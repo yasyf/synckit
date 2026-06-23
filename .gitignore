@@ -1,0 +1,11 @@
+# Go build artifacts
+*.test
+*.out
+*.prof
+
+# Editor / OS
+.DS_Store
+
+# Local Go workspace files
+go.work
+go.work.sum
