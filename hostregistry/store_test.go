@@ -1,7 +1,9 @@
 package hostregistry
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -105,6 +107,99 @@ func TestWithLockContendedReturnsErrLockBusy(t *testing.T) {
 	}
 	if !acquired {
 		t.Error("fn did not run after the lock was released")
+	}
+}
+
+// TestUpdateRawPreservesForeignKeysBothDirections is the sharpest invariant of
+// the shared writer: a write that touches one slice of state.json leaves every
+// other key byte-for-byte intact. It proves both directions — an identity write
+// preserves repos/settings/default_location, and a domain write preserves
+// self/hosts. The seed is written through UpdateRaw itself so the on-disk
+// formatting is already canonical, making an exact-bytes comparison meaningful.
+func TestUpdateRawPreservesForeignKeysBothDirections(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	seed := map[string]json.RawMessage{
+		"self":             json.RawMessage(`"yasyf@old"`),
+		"hosts":            json.RawMessage(`["yasyf@a"]`),
+		"default_location": json.RawMessage(`"~/Code"`),
+		"repos":            json.RawMessage(`[{"relpath":"cc-review","origin":"https://github.com/yasyf/cc-review.git","trunk":"main","local_only":false}]`),
+		"settings":         json.RawMessage(`{"interval":"15m0s","idle_threshold":"5m0s"}`),
+	}
+	if err := testCfg.UpdateRaw(context.Background(), func(raw map[string]json.RawMessage) error {
+		for k, v := range seed {
+			raw[k] = v
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed UpdateRaw: %v", err)
+	}
+
+	identityKeys := []string{"self", "hosts"}
+	domainKeys := []string{"repos", "settings", "default_location"}
+
+	// Direction 1: an identity write mutates only self/hosts; the domain keys
+	// must be byte-for-byte unchanged.
+	before := readState(t)
+	if err := testCfg.UpdateRaw(context.Background(), func(raw map[string]json.RawMessage) error {
+		raw["self"] = json.RawMessage(`"yasyf@new"`)
+		raw["hosts"] = json.RawMessage(`["yasyf@a","yasyf@b"]`)
+		return nil
+	}); err != nil {
+		t.Fatalf("identity UpdateRaw: %v", err)
+	}
+	after := readState(t)
+	assertKeysByteEqual(t, "identity write", before, after, domainKeys)
+	assertKeysChanged(t, "identity write", before, after, identityKeys)
+
+	// Direction 2: a domain write mutates only repos/settings/default_location;
+	// the identity keys (now yasyf@new) must be byte-for-byte unchanged.
+	before = readState(t)
+	if err := testCfg.UpdateRaw(context.Background(), func(raw map[string]json.RawMessage) error {
+		raw["repos"] = json.RawMessage(`[{"relpath":"notes","origin":"","trunk":"","local_only":true}]`)
+		raw["settings"] = json.RawMessage(`{"interval":"30m0s","idle_threshold":"5m0s"}`)
+		raw["default_location"] = json.RawMessage(`"~/Work"`)
+		return nil
+	}); err != nil {
+		t.Fatalf("domain UpdateRaw: %v", err)
+	}
+	after = readState(t)
+	assertKeysByteEqual(t, "domain write", before, after, identityKeys)
+	assertKeysChanged(t, "domain write", before, after, domainKeys)
+}
+
+func readState(t *testing.T) map[string]json.RawMessage {
+	t.Helper()
+	path, err := testCfg.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // G304: test reads a file from a test-controlled temp dir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse state: %v", err)
+	}
+	return raw
+}
+
+func assertKeysByteEqual(t *testing.T, label string, before, after map[string]json.RawMessage, keys []string) {
+	t.Helper()
+	for _, key := range keys {
+		if !bytes.Equal(before[key], after[key]) {
+			t.Fatalf("%s: %s changed (not byte-for-byte preserved):\n before: %s\n  after: %s", label, key, before[key], after[key])
+		}
+	}
+}
+
+func assertKeysChanged(t *testing.T, label string, before, after map[string]json.RawMessage, keys []string) {
+	t.Helper()
+	for _, key := range keys {
+		if bytes.Equal(before[key], after[key]) {
+			t.Fatalf("%s: %s did not change, want the write to have updated it: %s", label, key, after[key])
+		}
 	}
 }
 

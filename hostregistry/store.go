@@ -150,3 +150,26 @@ func (c Config) readRaw() (map[string]json.RawMessage, error) {
 	}
 	return raw, nil
 }
+
+// UpdateRaw is the one foreign-key-preserving writer of state.json: it acquires
+// the shared reconcile lock, reads the whole file as raw JSON keys, runs fn to
+// mutate only the keys the caller owns, then writes every key back. Keys fn
+// never touches survive byte-for-byte, so two packages can share one file
+// without clobbering each other's slice of it. encoding/json sorts map keys, so
+// the output key order is stable across writes.
+func (c Config) UpdateRaw(ctx context.Context, fn func(raw map[string]json.RawMessage) error) error {
+	return c.WithLock(ctx, func() error {
+		raw, err := c.readRaw()
+		if err != nil {
+			return err
+		}
+		if err := fn(raw); err != nil {
+			return err
+		}
+		encoded, err := json.MarshalIndent(raw, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encode state: %w", err)
+		}
+		return c.save(append(encoded, '\n'))
+	})
+}

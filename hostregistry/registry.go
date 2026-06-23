@@ -47,18 +47,7 @@ func (c Config) Load() (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	g := &Registry{}
-	if self, ok := raw["self"]; ok {
-		if err := json.Unmarshal(self, &g.Self); err != nil {
-			return nil, fmt.Errorf("parse self: %w", err)
-		}
-	}
-	if hosts, ok := raw["hosts"]; ok {
-		if err := json.Unmarshal(hosts, &g.Hosts); err != nil {
-			return nil, fmt.Errorf("parse hosts: %w", err)
-		}
-	}
-	return g, nil
+	return registryFromRaw(raw)
 }
 
 // Update runs fn against the freshly loaded Registry under the shared reconcile
@@ -67,21 +56,10 @@ func (c Config) Load() (*Registry, error) {
 // processes.
 func (c Config) Update(ctx context.Context, fn func(*Registry) error) (*Registry, error) {
 	var out *Registry
-	err := c.WithLock(ctx, func() error {
-		raw, err := c.readRaw()
+	err := c.UpdateRaw(ctx, func(raw map[string]json.RawMessage) error {
+		g, err := registryFromRaw(raw)
 		if err != nil {
 			return err
-		}
-		g := &Registry{}
-		if self, ok := raw["self"]; ok {
-			if err := json.Unmarshal(self, &g.Self); err != nil {
-				return fmt.Errorf("parse self: %w", err)
-			}
-		}
-		if hosts, ok := raw["hosts"]; ok {
-			if err := json.Unmarshal(hosts, &g.Hosts); err != nil {
-				return fmt.Errorf("parse hosts: %w", err)
-			}
 		}
 		if err := fn(g); err != nil {
 			return err
@@ -96,17 +74,27 @@ func (c Config) Update(ctx context.Context, fn func(*Registry) error) (*Registry
 		}
 		raw["self"] = selfJSON
 		raw["hosts"] = hostsJSON
-		encoded, err := json.MarshalIndent(raw, "", "  ")
-		if err != nil {
-			return fmt.Errorf("encode state: %w", err)
-		}
-		if err := c.save(append(encoded, '\n')); err != nil {
-			return err
-		}
 		out = g
 		return nil
 	})
 	return out, err
+}
+
+// registryFromRaw decodes the self/hosts keys out of a raw state map, leaving a
+// Registry's fields zero when their keys are absent.
+func registryFromRaw(raw map[string]json.RawMessage) (*Registry, error) {
+	g := &Registry{}
+	if self, ok := raw["self"]; ok {
+		if err := json.Unmarshal(self, &g.Self); err != nil {
+			return nil, fmt.Errorf("parse self: %w", err)
+		}
+	}
+	if hosts, ok := raw["hosts"]; ok {
+		if err := json.Unmarshal(hosts, &g.Hosts); err != nil {
+			return nil, fmt.Errorf("parse hosts: %w", err)
+		}
+	}
+	return g, nil
 }
 
 // DetectSelf returns the ssh target by which a peer reaches this machine,
