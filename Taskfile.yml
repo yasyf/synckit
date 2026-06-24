@@ -1,0 +1,37 @@
+version: '3'
+
+# synckit is a library module (no binary); `build` compiles every package.
+
+tasks:
+  build:
+    desc: Compile every package
+    cmds:
+      - go build ./...
+
+  test:
+    desc: Run the test suite with the race detector
+    cmds:
+      - go test -race -count=1 ./...
+
+  vet:
+    desc: Vet the module
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: Lint with golangci-lint
+    cmds:
+      - golangci-lint run
+
+  fmt:
+    desc: Format with gofumpt + goimports (via golangci-lint)
+    cmds:
+      - golangci-lint fmt
+
+  ci:
+    desc: Everything CI runs
+    cmds:
+      - task: vet
+      - task: lint
+      - task: test
+      - task: build
