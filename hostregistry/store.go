@@ -159,17 +159,28 @@ func (c Config) readRaw() (map[string]json.RawMessage, error) {
 // the output key order is stable across writes.
 func (c Config) UpdateRaw(ctx context.Context, fn func(raw map[string]json.RawMessage) error) error {
 	return c.WithLock(ctx, func() error {
-		raw, err := c.readRaw()
-		if err != nil {
-			return err
-		}
-		if err := fn(raw); err != nil {
-			return err
-		}
-		encoded, err := json.MarshalIndent(raw, "", "  ")
-		if err != nil {
-			return fmt.Errorf("encode state: %w", err)
-		}
-		return c.save(append(encoded, '\n'))
+		return c.UpdateRawUnlocked(fn)
 	})
+}
+
+// UpdateRawUnlocked is UpdateRaw without acquiring the reconcile lock: read the
+// whole file as raw JSON keys, run fn to mutate only the keys the caller owns, then
+// write every key back. It is for callers that ALREADY hold the lock — an
+// orchestration that wraps a whole multi-step pass in WithLock and must read and
+// write state.json inside it without re-entering the (non-reentrant) flock. It
+// shares save and readRaw with UpdateRaw, so there is still exactly one reader and
+// one atomic writer of the file.
+func (c Config) UpdateRawUnlocked(fn func(raw map[string]json.RawMessage) error) error {
+	raw, err := c.readRaw()
+	if err != nil {
+		return err
+	}
+	if err := fn(raw); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode state: %w", err)
+	}
+	return c.save(append(encoded, '\n'))
 }
