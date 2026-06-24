@@ -271,6 +271,49 @@ func TestAntiEchoSameHashTerminatesLoop(t *testing.T) {
 	}
 }
 
+func TestSeedSuppressesNextEvaluateAsOwnEcho(t *testing.T) {
+	// A write the consumer induces out of band (e.g. a peer-driven apply) seeds the
+	// fingerprint of the set it is about to write, then the filesystem event that
+	// write produces resolves to that same fingerprint. Seeding before the resolve
+	// must make evaluate recognize it as the engine's own echo and not notify — the
+	// anti-echo path for a Resolver that reads the very file being written.
+	resolver := &fakeResolver{fingerprints: []string{"fpWritten"}}
+	notifier := &fakeNotifier{}
+	eng := newTestEngine(resolver, notifier, time.Hour, []string{"peer1", "peer2"})
+	ctx := context.Background()
+	it := testItem()
+
+	eng.Seed(it, "fpWritten") // consumer records the set it is about to write
+	eng.evaluate(ctx, it)     // the induced fs event resolves the same fingerprint
+
+	if got := len(notifier.snapshot()); got != 0 {
+		t.Fatalf("notifies = %d, want 0 (seeded write recognized as own echo)", got)
+	}
+}
+
+func TestSeedThenGenuineChangeStillNotifies(t *testing.T) {
+	// Seeding the prior write must not deafen the engine to a later genuine change:
+	// once a different fingerprint resolves, the engine notifies exactly once.
+	resolver := &fakeResolver{fingerprints: []string{"fpOther"}}
+	notifier := &fakeNotifier{}
+	eng := newTestEngine(resolver, notifier, time.Hour, []string{"peer1"})
+	ctx := context.Background()
+	it := testItem()
+
+	eng.Seed(it, "fpWritten") // a prior self-induced write
+	eng.evaluate(ctx, it)     // a genuinely different fingerprint now
+
+	if got := len(notifier.snapshot()); got != 1 {
+		t.Fatalf("notifies = %d, want 1 (genuine change after a seed still notifies)", got)
+	}
+	eng.mu.Lock()
+	got := eng.lastDigest[testKey]
+	eng.mu.Unlock()
+	if got != "fpOther" {
+		t.Errorf("lastDigest = %q, want fpOther", got)
+	}
+}
+
 func TestNoPeersNoNotifyButLastDigestTracked(t *testing.T) {
 	resolver := &fakeResolver{fingerprints: []string{"fpA"}}
 	notifier := &fakeNotifier{}

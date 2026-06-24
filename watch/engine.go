@@ -108,6 +108,23 @@ func (e *Engine[T]) OnEvent(ctx context.Context, id T) {
 	})
 }
 
+// Seed records fingerprint as id's last-acted-on fingerprint without notifying, so
+// the next evaluate of id dedupes against it. It is the seam for a write the
+// consumer induces out of band — one a peer triggers over RPC rather than the local
+// watcher — where the consumer's Resolver reads the very file being written (so a
+// self-induced write would otherwise resolve a fresh fingerprint and notify, an echo
+// storm). The consumer seeds the fingerprint of the set it is about to write
+// immediately before writing it; the filesystem event that write produces then
+// resolves to the seeded fingerprint and is suppressed as the engine's own echo. A
+// consumer whose Resolver reads upstream truth (a hash a self-write does not move)
+// never needs this. Safe for concurrent use.
+func (e *Engine[T]) Seed(id T, fingerprint string) {
+	key := e.digest(id)
+	e.mu.Lock()
+	e.lastDigest[key] = fingerprint
+	e.mu.Unlock()
+}
+
 // fire drops the spent timer and runs the evaluation for id.
 func (e *Engine[T]) fire(ctx context.Context, id T) {
 	key := e.digest(id)
