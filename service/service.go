@@ -39,9 +39,16 @@ const DefaultDaemonPATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/
 // LabelPrefix), the CLI verb the binary is invoked with, and any per-agent plist
 // keys layered on top of the common ones (e.g. StartInterval, KeepAlive,
 // LimitLoadToSessionType). ExtraKeys values must be bool, int, or string.
+//
+// Binary, when set, makes this agent's plist run that binary instead of the tool's
+// own resolved executable: it is resolved on PATH the same symlink-preserving way
+// exePath resolves the own-exe (no EvalSymlinks), so a Homebrew symlink such as
+// /opt/homebrew/bin/cookiesync survives a brew upgrade. Empty Binary leaves the
+// current behavior unchanged.
 type AgentSpec struct {
 	Label     string
 	Command   string
+	Binary    string
 	ExtraKeys map[string]any
 }
 

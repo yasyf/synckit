@@ -204,6 +204,67 @@ func TestRenderPlistCommonKeys(t *testing.T) {
 	}
 }
 
+// TestRenderPlistBinaryOverride proves an AgentSpec.Binary overrides the own-exe as
+// the program / first ProgramArguments entry, resolved on PATH (symlink-preserved,
+// not EvalSymlinks'd), while empty Binary leaves the own-exe in place.
+func TestRenderPlistBinaryOverride(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "helper-bin")
+	//nolint:gosec // G306: test writes an executable shell-script fixture that must be runnable for PATH resolution.
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := testConfig()
+
+	tests := []struct {
+		name        string
+		agent       AgentSpec
+		wantProgram string
+	}{
+		{
+			name:        "binary override resolves on PATH",
+			agent:       AgentSpec{Label: "helper", Binary: "helper-bin", Command: "helper-serve"},
+			wantProgram: binPath,
+		},
+		{
+			name:        "empty binary keeps own exe",
+			agent:       AgentSpec{Label: "tick", Command: "reconcile"},
+			wantProgram: fakeExe,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parsePlist(t, mustRender(t, cfg, tt.agent))
+			args, ok := got["ProgramArguments"].([]any)
+			if !ok || len(args) != 2 {
+				t.Fatalf("ProgramArguments = %v, want 2 strings", got["ProgramArguments"])
+			}
+			if args[0] != tt.wantProgram {
+				t.Errorf("program = %v, want %q", args[0], tt.wantProgram)
+			}
+			if args[1] != tt.agent.Command {
+				t.Errorf("command = %v, want %q", args[1], tt.agent.Command)
+			}
+		})
+	}
+}
+
+// TestRenderPlistBinaryUnresolvable proves a Binary not on PATH fails render rather
+// than silently falling back to the own-exe.
+func TestRenderPlistBinaryUnresolvable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	cfg := testConfig()
+	agent := AgentSpec{Label: "helper", Binary: "nope-not-here", Command: "x"}
+
+	if _, err := renderPlist(cfg, fakeExe, agent); err == nil {
+		t.Fatal("expected error for unresolvable Binary")
+	}
+}
+
 func TestRenderPlistExtraKeysByType(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := testConfig()

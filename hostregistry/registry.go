@@ -144,13 +144,20 @@ type VerifyResult struct {
 }
 
 // Verify probes target over ssh: whether it is reachable, has the tool installed,
-// and its version.
+// and its version, shelling the Config's own Name.
 func (c Config) Verify(ctx context.Context, r Runner, target string) VerifyResult {
+	return c.VerifyBinary(ctx, r, target, c.Name)
+}
+
+// VerifyBinary probes target over ssh — whether it is reachable, has binary
+// installed, and binary's version — using the given binary name instead of the
+// Config's Name, for a shared mesh whose Name is not itself an installed tool.
+func (c Config) VerifyBinary(ctx context.Context, r Runner, target, binary string) VerifyResult {
 	res := VerifyResult{Target: target}
-	if c.RemoteInstalled(ctx, r, target) {
+	if c.RemoteInstalledBinary(ctx, r, target, binary) {
 		res.Reachable = true
 		res.Bootstrapped = true
-		if out, err := r.SSH(ctx, target, c.Name+" --version"); err == nil {
+		if out, err := r.SSH(ctx, target, binary+" --version"); err == nil {
 			res.Version = strings.TrimSpace(out)
 		}
 		return res
@@ -182,9 +189,15 @@ func (c Config) VerifyAll(ctx context.Context, r Runner, hosts []string) []Verif
 	return results
 }
 
-// RemoteInstalled reports whether the tool is on target's PATH over ssh.
+// RemoteInstalled reports whether the Config's tool is on target's PATH over ssh.
 func (c Config) RemoteInstalled(ctx context.Context, r Runner, target string) bool {
-	out, err := r.SSH(ctx, target, "command -v "+c.Name)
+	return c.RemoteInstalledBinary(ctx, r, target, c.Name)
+}
+
+// RemoteInstalledBinary reports whether binary is on target's PATH over ssh,
+// probing the given binary name instead of the Config's Name.
+func (c Config) RemoteInstalledBinary(ctx context.Context, r Runner, target, binary string) bool {
+	out, err := r.SSH(ctx, target, "command -v "+binary)
 	if err != nil {
 		return false
 	}
