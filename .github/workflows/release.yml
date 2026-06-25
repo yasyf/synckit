@@ -11,61 +11,46 @@ jobs:
   verify-tag-on-main:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Refuse tags that are not on main
-        run: |
-          git fetch origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::tag $GITHUB_REF_NAME is not on main — tag a merged commit (e.g. git tag vX.Y.Z origin/main)"
-            exit 1
-          fi
+      - uses: yasyf/homebrew-tap/.github/actions/verify-tag-on-main@v1
 
-  goreleaser:
+  release:
     needs: verify-tag-on-main
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      # goreleaser builds + quill-signs + archives + checksums. No homebrew block:
+      # synckitd ships as a formula (livecheck + `brew install --HEAD` source build +
+      # a `brew services` daemon), rendered from .github/formula/synckitd.rb.tmpl below.
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Apple Developer signing + notarization (optional; the .goreleaser.yaml
-          # notarize block is a no-op when these are unset).
+          # Apple Developer signing + notarization (optional; no-op when unset).
           MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
           MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
 
-      # goreleaser v2 can only emit Homebrew casks, but the shared tap is formulae —
-      # so render Formula/synckitd.rb from the release checksums and publish it via
-      # the shared tap action.
-      - name: Render the formula from release checksums
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          sha() { grep -E "  synckitd_${version}_$1\.tar\.gz\$" dist/checksums.txt | cut -d' ' -f1; }
-          mkdir -p tap-staging/Formula
-          sed \
-            -e "s|__VERSION__|${version}|g" \
-            -e "s|__SHA_DARWIN_ARM64__|$(sha darwin_arm64)|" \
-            -e "s|__SHA_DARWIN_AMD64__|$(sha darwin_amd64)|" \
-            -e "s|__SHA_LINUX_ARM64__|$(sha linux_arm64)|" \
-            -e "s|__SHA_LINUX_AMD64__|$(sha linux_amd64)|" \
-            .github/formula/synckitd.rb.tmpl > tap-staging/Formula/synckitd.rb
-          cat tap-staging/Formula/synckitd.rb
+      - name: Render Formula/synckitd.rb from the release checksums
+        uses: yasyf/homebrew-tap/.github/actions/render-formula@v1
+        with:
+          template: .github/formula/synckitd.rb.tmpl
+          output: Formula/synckitd.rb
+          name: synckitd
 
-      - name: Publish formula to the tap
-        uses: yasyf/homebrew-tap/.github/actions/publish@main
+      - name: Publish the formula to the tap
+        uses: yasyf/homebrew-tap/.github/actions/publish@v1
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           dir: tap-staging
