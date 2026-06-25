@@ -4,7 +4,7 @@ Shared substrate for cross-host sync tools: host mesh, convergent registry, unix
 
 ## Repository Structure
 
-synckit is a library module (no binary); each top-level package is one slice of the substrate, imported by reposync and cookiesync.
+synckit ships the `synckitd` daemon (`cmd/synckitd` + `daemon/`) plus library packages — each top-level package is one slice of the substrate, imported by reposync and cookiesync. synckitd is the one per-machine daemon that drives those consumers through declarative manifests and a CLI action contract.
 
 ```
 synckit/

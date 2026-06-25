@@ -1,0 +1,58 @@
+# goreleaser v2 — canonical base config (pure Go, CGO_ENABLED=0). See
+# yasyf/cc-skills repo-bootstrap reference/go-ci-and-release.md. Validate locally:
+# goreleaser release --snapshot --clean
+version: 2
+
+project_name: synckitd
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: synckitd
+    main: ./cmd/synckitd
+    binary: synckitd
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: synckitd
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+# Sign + notarize the darwin binaries with our Apple Developer ID — but only when the
+# MACOS_* secrets are set, so the release still runs (unsigned) without Apple creds.
+# goreleaser's built-in quill signer is pure Go and runs on the linux runner.
+# REQUIRES a full-chain p12 (leaf + Developer ID intermediate + Apple Root CA).
+notarize:
+  macos:
+    - enabled: '{{ if envOrDefault "MACOS_SIGN_P12" "" }}true{{ else }}false{{ end }}'
+      ids:
+        - synckitd
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        wait: true
+        timeout: 20m
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  prerelease: auto
+
+changelog:
+  use: github

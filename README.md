@@ -13,7 +13,7 @@ synckit is the shared Go substrate behind [reposync](https://github.com/yasyf/re
 go get github.com/yasyf/synckit
 ```
 
-synckit is a library, not a command. It ships no binary; you import the packages your daemon needs.
+synckit ships the `synckitd` daemon (`brew install yasyf/tap/synckitd`) — the one per-machine daemon that drives consumers via declarative manifests — and is also importable as a library: pull in the substrate packages your own tool needs.
 
 ## Quickstart
 
