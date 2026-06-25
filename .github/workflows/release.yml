@@ -8,50 +8,12 @@ permissions:
   contents: write
 
 jobs:
-  verify-tag-on-main:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - uses: yasyf/homebrew-tap/.github/actions/verify-tag-on-main@v1
-
   release:
-    needs: verify-tag-on-main
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      # goreleaser builds + quill-signs + archives + checksums. No homebrew block:
-      # synckitd ships as a formula (livecheck + `brew install --HEAD` source build +
-      # a `brew services` daemon), rendered from .github/formula/synckitd.rb.tmpl below.
-      - uses: goreleaser/goreleaser-action@v7
-        with:
-          version: "~> v2"
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Apple Developer signing + notarization (optional; no-op when unset).
-          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
-          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
-          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
-          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
-          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
-
-      - name: Render Formula/synckitd.rb from the release checksums
-        uses: yasyf/homebrew-tap/.github/actions/render-formula@v1
-        with:
-          template: .github/formula/synckitd.rb.tmpl
-          output: Formula/synckitd.rb
-          name: synckitd
-
-      - name: Publish the formula to the tap
-        uses: yasyf/homebrew-tap/.github/actions/publish@v1
-        with:
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          dir: tap-staging
-          message: "synckitd ${{ github.ref_name }}"
+    uses: yasyf/homebrew-tap/.github/workflows/release-go.yml@v1
+    secrets: inherit
+    with:
+      # synckitd ships as a formula (livecheck + `brew install --HEAD` source build)
+      # rendered from its template; goreleaser builds with no homebrew block.
+      render-formula: true
+      formula-template: .github/formula/synckitd.rb.tmpl
+      formula-name: synckitd
