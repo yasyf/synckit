@@ -31,8 +31,17 @@ func (execRunner) Local(ctx context.Context, name string, args ...string) (strin
 }
 
 func (execRunner) SSH(ctx context.Context, target, remoteCmd string) (string, error) {
+	argv := SSHArgv(target, remoteCmd)
+	return runCmd(ctx, argv[0], argv[1:]...)
+}
+
+// SSHArgv returns the full ssh argv that runs remoteCmd on target: the BatchMode,
+// timeout, and keepalive options, the target, then remoteCmd wrapped to source
+// brew's shellenv (a non-interactive ssh on macOS lacks brew, and thus any
+// brew-installed tool, on PATH). argv[0] is "ssh"; argv[1:] are its arguments.
+func SSHArgv(target, remoteCmd string) []string {
 	wrapped := fmt.Sprintf(`eval "$(/opt/homebrew/bin/brew shellenv)" && %s`, remoteCmd)
-	return runCmd(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", target, wrapped)
+	return []string{"ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", target, wrapped}
 }
 
 func runCmd(ctx context.Context, name string, args ...string) (string, error) {

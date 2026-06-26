@@ -34,14 +34,14 @@ func TestToolConfigAgents(t *testing.T) {
 	manifests := []manifest.Manifest{
 		{
 			Name: "cookiesync", Binary: "cookiesync",
-			Watch:   manifest.WatchSpec{Backend: "fsnotify", Debounce: codec.Duration(0), ListCmd: "watch list"},
-			Actions: manifest.ActionSpec{Reconcile: "reconcile", Sync: "sync", Fetch: "fetch", Apply: "apply"},
+			Watch:   manifest.WatchSpec{Backend: "fsnotify", Debounce: codec.Duration(0)},
+			Service: manifest.ServiceSpec{Transport: "socket", ServeArgs: []string{"rpc-serve"}, Sock: "~/.config/cookiesync/rpc.sock"},
 			Helper:  &manifest.HelperSpec{Command: "helper-serve", SessionType: "Aqua", Label: "helper"},
 		},
 		{
 			Name: "reposync", Binary: "reposync",
-			Watch:   manifest.WatchSpec{Backend: "watchman", Debounce: codec.Duration(0), ListCmd: "watch list"},
-			Actions: manifest.ActionSpec{Reconcile: "reconcile", Sync: "sync", Fetch: "fetch", Apply: "apply"},
+			Watch:   manifest.WatchSpec{Backend: "watchman", Debounce: codec.Duration(0)},
+			Service: manifest.ServiceSpec{Transport: "stdio", ServeArgs: []string{"rpc-serve"}},
 			// no Helper block -> no helper agent
 		},
 	}
@@ -113,8 +113,8 @@ func TestInstallBuildsAgentsAndBootsOutLegacy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure manifests dir: %v", err)
 	}
-	mf := `{"name":"cookiesync","binary":"cookiesync","watch":{"backend":"fsnotify","debounce":"1s","list_cmd":"watch list"},` +
-		`"actions":{"reconcile":"reconcile","sync":"sync","fetch":"fetch","apply":"apply"},` +
+	mf := `{"name":"cookiesync","binary":"cookiesync","watch":{"backend":"fsnotify","debounce":"1s"},` +
+		`"service":{"transport":"socket","serve_args":["rpc-serve"],"sock":"~/.config/cookiesync/rpc.sock"},` +
 		`"helper":{"command":"helper-serve","session_type":"Aqua","label":"helper"}}`
 	if err := os.WriteFile(filepath.Join(dir, "cookiesync.json"), []byte(mf), 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)

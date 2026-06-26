@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"time"
@@ -59,7 +60,7 @@ func handleConn(ctx context.Context, conn *net.UnixConn, d *Dispatcher) {
 	if err := conn.SetReadDeadline(time.Now().Add(ReadTimeout)); err != nil {
 		return
 	}
-	line, err := readLine(bufio.NewReader(conn), MaxLine)
+	line, err := ReadLine(bufio.NewReader(conn), MaxLine)
 	if err != nil {
 		writeResponse(conn, &Response{OK: false, Error: fmt.Sprintf("read request: %v", err)})
 		return
@@ -74,7 +75,36 @@ func handleConn(ctx context.Context, conn *net.UnixConn, d *Dispatcher) {
 	writeResponse(conn, d.Dispatch(ctx, req))
 }
 
-func writeResponse(conn net.Conn, resp *Response) {
+// ServeConn runs a streaming request/response loop over one long-lived bidirectional
+// pipe — a spawned child's stdin/stdout, or an ssh pipe — until the writer closes
+// (clean io.EOF, returns nil) or ctx is canceled. It reads each request line bounded
+// by MaxLine, dispatches it, and writes the response line back, so many requests
+// share one connection. Trust is established out of band (process ancestry, ssh
+// auth), so there is no peer-credential check; the resident unix socket keeps its
+// per-connection peercred check via Serve. ServeConn does not close rw.
+func ServeConn(ctx context.Context, rw io.ReadWriter, d *Dispatcher) error {
+	r := bufio.NewReader(rw)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		line, err := ReadLine(r, MaxLine)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read request: %w", err)
+		}
+		req, err := DecodeRequest(line)
+		if err != nil {
+			writeResponse(rw, &Response{OK: false, Error: err.Error()})
+			continue
+		}
+		writeResponse(rw, d.Dispatch(ctx, req))
+	}
+}
+
+func writeResponse(conn io.Writer, resp *Response) {
 	data, err := EncodeResponse(resp)
 	if err != nil {
 		return

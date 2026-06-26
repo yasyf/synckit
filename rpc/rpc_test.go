@@ -247,7 +247,7 @@ func TestServeRejectsOversizedLine(t *testing.T) {
 			break // server closed the connection on overflow, as intended
 		}
 	}
-	line, err := readLine(bufio.NewReader(conn), MaxLine)
+	line, err := ReadLine(bufio.NewReader(conn), MaxLine)
 	if err != nil {
 		return // connection closed without a response line is acceptable
 	}

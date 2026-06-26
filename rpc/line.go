@@ -7,11 +7,11 @@ import (
 	"fmt"
 )
 
-// readLine reads one '\n'-terminated line from r, bounding the total at limit bytes.
+// ReadLine reads one '\n'-terminated line from r, bounding the total at limit bytes.
 // It accumulates the bufio chunks until the delimiter, returning the line without
 // the trailing '\n'. If limit bytes arrive with no '\n', it returns an error rather
 // than truncating or buffering further, so a peer cannot stream an unbounded line.
-func readLine(r *bufio.Reader, limit int) ([]byte, error) {
+func ReadLine(r *bufio.Reader, limit int) ([]byte, error) {
 	var buf bytes.Buffer
 	for {
 		chunk, err := r.ReadSlice('\n')

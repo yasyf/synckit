@@ -1,10 +1,10 @@
 // Package daemon wires the synckitd cobra command tree and implements the generic
 // per-machine sync daemon: it owns the one shared host mesh, rpc socket, reconcile
 // tick, and watch supervisor, discovers declarative JSON manifests under
-// ~/.config/synckit/manifests, and shells out to each consumer's CLI for the
-// domain actions (list, reconcile, sync) those manifests declare. It never imports
-// a consumer — every consumer specific is read from a manifest and run as its
-// binary.
+// ~/.config/synckit/manifests, and drives each consumer's typed sync service
+// (list, reconcile, sync) over the transport its manifest declares — a unix
+// socket, a spawned child's stdio, or ssh to a peer. It never imports a consumer —
+// every consumer specific is read from a manifest.
 package daemon
 
 import (

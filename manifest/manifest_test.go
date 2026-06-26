@@ -19,13 +19,11 @@ func cookiesyncManifest() Manifest {
 		Watch: WatchSpec{
 			Backend:  "fsnotify",
 			Debounce: codec.Duration(2 * time.Second),
-			ListCmd:  "cookiesync list --json",
 		},
-		Actions: ActionSpec{
-			Reconcile: "cookiesync reconcile --origin {{.Origin}}",
-			Sync:      "cookiesync sync --origin {{.Origin}}",
-			Fetch:     "cookiesync state get-json",
-			Apply:     "cookiesync state apply-json",
+		Service: ServiceSpec{
+			Transport: "socket",
+			ServeArgs: []string{"rpc-serve"},
+			Sock:      "~/.config/cookiesync/rpc.sock",
 		},
 		Launchd: &LaunchdSpec{SessionType: "Aqua"},
 		Helper: &HelperSpec{
@@ -43,13 +41,10 @@ func reposyncManifest() Manifest {
 		Watch: WatchSpec{
 			Backend:  "watchman",
 			Debounce: codec.Duration(500 * time.Millisecond),
-			ListCmd:  "reposync list --json",
 		},
-		Actions: ActionSpec{
-			Reconcile: "reposync reconcile",
-			Sync:      "reposync sync",
-			Fetch:     "reposync state get-json",
-			Apply:     "reposync state apply-json",
+		Service: ServiceSpec{
+			Transport: "stdio",
+			ServeArgs: []string{"rpc-serve"},
 		},
 	}
 }
@@ -89,15 +84,18 @@ func TestValidate(t *testing.T) {
 		wantErr bool
 	}{
 		{"valid", func(*Manifest) {}, false},
+		{"stdio without sock", func(m *Manifest) {
+			m.Service.Transport = "stdio"
+			m.Service.Sock = ""
+		}, false},
 		{"missing name", func(m *Manifest) { m.Name = "" }, true},
 		{"missing binary", func(m *Manifest) { m.Binary = "" }, true},
 		{"empty backend", func(m *Manifest) { m.Watch.Backend = "" }, true},
 		{"unknown backend", func(m *Manifest) { m.Watch.Backend = "inotify" }, true},
-		{"missing list_cmd", func(m *Manifest) { m.Watch.ListCmd = "" }, true},
-		{"missing reconcile", func(m *Manifest) { m.Actions.Reconcile = "" }, true},
-		{"missing sync", func(m *Manifest) { m.Actions.Sync = "" }, true},
-		{"missing fetch", func(m *Manifest) { m.Actions.Fetch = "" }, true},
-		{"missing apply", func(m *Manifest) { m.Actions.Apply = "" }, true},
+		{"missing transport", func(m *Manifest) { m.Service.Transport = "" }, true},
+		{"invalid transport", func(m *Manifest) { m.Service.Transport = "http" }, true},
+		{"empty serve_args", func(m *Manifest) { m.Service.ServeArgs = nil }, true},
+		{"missing sock with socket transport", func(m *Manifest) { m.Service.Sock = "" }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -108,51 +106,6 @@ func TestValidate(t *testing.T) {
 				t.Errorf("Validate() = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
-	}
-}
-
-func TestRender(t *testing.T) {
-	tests := []struct {
-		name   string
-		action string
-		vars   ActionVars
-		want   []string
-	}{
-		{
-			name:   "sync with peer",
-			action: "sync --origin {{.Peer}}",
-			vars:   ActionVars{Peer: "u@h"},
-			want:   []string{"sync", "--origin", "u@h"},
-		},
-		{
-			name:   "spaces in value stay one field",
-			action: "reconcile --origin {{.Origin}} --id {{.ID}}",
-			vars:   ActionVars{Origin: "host1", ID: "profile-a"},
-			want:   []string{"reconcile", "--origin", "host1", "--id", "profile-a"},
-		},
-		{
-			name:   "no templating",
-			action: "state get-json",
-			vars:   ActionVars{},
-			want:   []string{"state", "get-json"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := Render(tt.action, tt.vars)
-			if err != nil {
-				t.Fatalf("Render() error = %v", err)
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("Render() = %#v, want %#v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRenderMissingKey(t *testing.T) {
-	if _, err := Render("sync --origin {{.Nope}}", ActionVars{}); err == nil {
-		t.Fatal("Render() with unknown key = nil error, want error")
 	}
 }
 

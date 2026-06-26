@@ -23,10 +23,7 @@ func TestAddHostStepSequence(t *testing.T) {
 		Name:   "cookiesync",
 		Binary: "cookiesync",
 		Brew:   "yasyf/tap/cookiesync",
-		Watch:  manifest.WatchSpec{Backend: "fsnotify", ListCmd: "watch list"},
-		Actions: manifest.ActionSpec{
-			Reconcile: "reconcile", Sync: "sync --origin {{.Peer}}", Fetch: "fetch", Apply: "apply",
-		},
+		Watch:  manifest.WatchSpec{Backend: "fsnotify"},
 	}}
 
 	var steps []string
@@ -93,8 +90,7 @@ func TestAddHostConsumerAlreadyInstalled(t *testing.T) {
 
 	manifests := []manifest.Manifest{{
 		Name: "cookiesync", Binary: "cookiesync", Brew: "yasyf/tap/cookiesync",
-		Watch:   manifest.WatchSpec{Backend: "fsnotify", ListCmd: "watch list"},
-		Actions: manifest.ActionSpec{Reconcile: "reconcile", Sync: "sync", Fetch: "fetch", Apply: "apply"},
+		Watch: manifest.WatchSpec{Backend: "fsnotify"},
 	}}
 
 	if err := AddHost(context.Background(), mock, manifests, "peer@node", "me@self", false, nil); err != nil {
