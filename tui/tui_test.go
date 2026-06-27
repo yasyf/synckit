@@ -1,0 +1,185 @@
+package tui
+
+import (
+	"errors"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/exp/teatest"
+
+	"github.com/yasyf/synckit/hostregistry"
+)
+
+func TestTabBarAndSwitch(t *testing.T) {
+	opts := hermeticOptions(t)
+	tm := teatest.NewTestModel(t, newRootModel(opts), teatest.WithInitialTermSize(100, 30))
+
+	// The tab bar names the consumer's content screen and the appended Hosts
+	// screen, and the content screen's body renders — all in one accumulated read.
+	waitForContent(t, tm, "Content", "Hosts", "content body")
+
+	// NextTab ("n") activates the Hosts screen, which lazily initializes and shows
+	// its discovering state. The spinner keeps re-rendering that line while the
+	// scan runs, so it recurs in fresh frames after the tab switch.
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	waitForContent(t, tm, "Discovering hosts")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(5*time.Second))
+}
+
+func TestAddHostInputAndCancel(t *testing.T) {
+	opts := hermeticOptions(t)
+	tm := teatest.NewTestModel(t, newRootModel(opts), teatest.WithInitialTermSize(100, 30))
+
+	// Switch to the Hosts tab and let it reach its discovering state.
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	waitForContent(t, tm, "Discovering hosts")
+
+	// "+" opens the add-host text input, which surfaces its prompt and placeholder
+	// in the same frame.
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'+'}})
+	waitForContent(t, tm, "Add host:", "user@node")
+
+	// esc returns to the list — the add-host prompt gives way to the list chrome
+	// whose help footer offers "add host" again.
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	waitForContent(t, tm, "add host")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(5*time.Second))
+}
+
+func TestCtrlCQuitsCleanly(t *testing.T) {
+	opts := hermeticOptions(t)
+	tm := teatest.NewTestModel(t, newRootModel(opts), teatest.WithInitialTermSize(100, 30))
+
+	// Let the first frame render so the program is past Init before quitting.
+	waitForContent(t, tm, "Content")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(5*time.Second))
+
+	// The router blanks its view on quit; the final model retains the quit flag.
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(5*time.Second)).(rootModel)
+	if !final.quitting {
+		t.Fatal("rootModel.quitting = false after ctrl+c, want true")
+	}
+}
+
+func TestStartAddFocusesInput(t *testing.T) {
+	m := newHostsModel(Options{})
+	s, _ := m.startAdd("")
+	hm := s.(hostsModel)
+	if !hm.input.Focused() {
+		t.Fatal("startAdd must focus the input so the host target can be typed")
+	}
+	// A keystroke must reach the (focused) input, not be swallowed.
+	s, _ = hm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if got := s.(hostsModel).input.Value(); got != "x" {
+		t.Fatalf("after typing into the add-host input, value = %q, want %q", got, "x")
+	}
+}
+
+func TestValidateTarget(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		ok   bool
+	}{
+		{name: "user@node", in: "yasyf@yasyf-home", ok: true},
+		{name: "bare node", in: "yasyf-home", ok: true},
+		{name: "dotted node", in: "node.tailnet.ts.net", ok: true},
+		{name: "underscore user", in: "ad_min@node", ok: true},
+		{name: "empty", in: "", ok: false},
+		{name: "whitespace only", in: "   ", ok: false},
+		{name: "embedded space", in: "user @node", ok: false},
+		{name: "trailing space", in: "node ", ok: false},
+		{name: "leading at", in: "@node", ok: false},
+		{name: "node starts with hyphen", in: "-node", ok: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateTarget(tc.in)
+			if tc.ok && err != nil {
+				t.Fatalf("validateTarget(%q) = %v, want nil", tc.in, err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("validateTarget(%q) = nil, want error", tc.in)
+			}
+		})
+	}
+}
+
+func TestHostNode(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"yasyf@alpha", "alpha"},
+		{"alpha", "alpha"},
+		{"user@host@weird", "weird"},
+	}
+	for _, tc := range cases {
+		if got := hostNode(tc.in); got != tc.want {
+			t.Fatalf("hostNode(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestClassifyVerify(t *testing.T) {
+	cases := []struct {
+		name string
+		res  hostregistry.VerifyResult
+		want verifyState
+	}{
+		{name: "ready", res: hostregistry.VerifyResult{Reachable: true, Bootstrapped: true}, want: verifyOK},
+		{name: "reachable not installed", res: hostregistry.VerifyResult{Reachable: true}, want: verifyWarn},
+		{name: "unreachable", res: hostregistry.VerifyResult{Err: errors.New("connection refused")}, want: verifyFail},
+		{name: "unreachable but bootstrapped flag ignored", res: hostregistry.VerifyResult{Bootstrapped: true}, want: verifyFail},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyVerify(tc.res); got != tc.want {
+				t.Fatalf("classifyVerify(%+v) = %v, want %v", tc.res, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMergeHostItems(t *testing.T) {
+	cands := []hostregistry.HostCandidate{
+		{Node: "alpha", DefaultTarget: "yasyf@alpha", Source: "tailscale", Online: true, Registered: true},
+		{Node: "beta", DefaultTarget: "yasyf@beta", Source: "bonjour", Online: false, Registered: false},
+	}
+	// gamma is registered but undiscovered; beta is already covered by the "beta"
+	// candidate's node so registration must not duplicate it.
+	registered := []string{"yasyf@gamma", "yasyf@beta"}
+
+	items := mergeHostItems(cands, registered)
+
+	if len(items) != 3 {
+		t.Fatalf("got %d items, want 3: %+v", len(items), items)
+	}
+
+	alpha := items[0]
+	if alpha.node != "alpha" || alpha.target != "yasyf@alpha" || alpha.source != "tailscale" {
+		t.Fatalf("alpha = %+v, want node=alpha target=yasyf@alpha source=tailscale", alpha)
+	}
+	if !alpha.online || !alpha.registered {
+		t.Fatalf("alpha online/registered = %v/%v, want true/true", alpha.online, alpha.registered)
+	}
+
+	beta := items[1]
+	if beta.registered {
+		t.Fatalf("beta registered = true, want false (candidate carried Registered=false)")
+	}
+
+	gamma := items[2]
+	if gamma.node != "gamma" || gamma.target != "yasyf@gamma" {
+		t.Fatalf("gamma = %+v, want node=gamma target=yasyf@gamma", gamma)
+	}
+	if gamma.source != "registered" || gamma.online || !gamma.registered {
+		t.Fatalf("gamma = %+v, want source=registered online=false registered=true", gamma)
+	}
+}
