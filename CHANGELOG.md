@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-27
+
+### Fixed
+- The shared TUI's Hosts tab now sorts registered mesh peers above merely-discovered candidates,
+  instead of interleaving them.
+
 ## [0.4.0] - 2026-06-27
 
 ### Added
@@ -61,7 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/yasyf/synckit/releases/tag/v0.4.1
 [0.4.0]: https://github.com/yasyf/synckit/releases/tag/v0.4.0
 [0.3.0]: https://github.com/yasyf/synckit/releases/tag/v0.3.0
 [0.2.0]: https://github.com/yasyf/synckit/releases/tag/v0.2.0

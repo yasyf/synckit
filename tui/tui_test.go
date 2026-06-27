@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -162,6 +163,9 @@ func TestMergeHostItems(t *testing.T) {
 		t.Fatalf("got %d items, want 3: %+v", len(items), items)
 	}
 
+	// Registered hosts float to the top: alpha (discovered+registered) then gamma
+	// (registered-only) ahead of beta (discovered-only). Within each group order is
+	// the assembly order, so alpha precedes gamma.
 	alpha := items[0]
 	if alpha.node != "alpha" || alpha.target != "yasyf@alpha" || alpha.source != "tailscale" {
 		t.Fatalf("alpha = %+v, want node=alpha target=yasyf@alpha source=tailscale", alpha)
@@ -170,16 +174,60 @@ func TestMergeHostItems(t *testing.T) {
 		t.Fatalf("alpha online/registered = %v/%v, want true/true", alpha.online, alpha.registered)
 	}
 
-	beta := items[1]
-	if beta.registered {
-		t.Fatalf("beta registered = true, want false (candidate carried Registered=false)")
-	}
-
-	gamma := items[2]
+	gamma := items[1]
 	if gamma.node != "gamma" || gamma.target != "yasyf@gamma" {
 		t.Fatalf("gamma = %+v, want node=gamma target=yasyf@gamma", gamma)
 	}
 	if gamma.source != "registered" || gamma.online || !gamma.registered {
 		t.Fatalf("gamma = %+v, want source=registered online=false registered=true", gamma)
+	}
+
+	beta := items[2]
+	if beta.registered {
+		t.Fatalf("beta registered = true, want false (candidate carried Registered=false)")
+	}
+}
+
+// TestMergeHostItemsRegisteredSortFirst feeds a deliberately interleaved candidate
+// set (unregistered, registered, unregistered, registered) plus a registered-only
+// host and asserts every registered row sorts ahead of every discovered-only one,
+// while order within each group stays the stable assembly order.
+func TestMergeHostItemsRegisteredSortFirst(t *testing.T) {
+	cands := []hostregistry.HostCandidate{
+		{Node: "aaa", DefaultTarget: "yasyf@aaa", Source: "bonjour", Registered: false},
+		{Node: "bbb", DefaultTarget: "yasyf@bbb", Source: "tailscale", Registered: true},
+		{Node: "ccc", DefaultTarget: "yasyf@ccc", Source: "bonjour", Registered: false},
+		{Node: "ddd", DefaultTarget: "yasyf@ddd", Source: "tailscale", Registered: true},
+	}
+	// zzz is registered but undiscovered; it appends last yet must still sort into
+	// the registered group.
+	registered := []string{"yasyf@bbb", "yasyf@ddd", "yasyf@zzz"}
+
+	items := mergeHostItems(cands, registered)
+
+	gotTargets := make([]string, len(items))
+	gotReg := make([]bool, len(items))
+	for i, it := range items {
+		gotTargets[i] = it.target
+		gotReg[i] = it.registered
+	}
+
+	// bbb, ddd (discovered+registered, in candidate order), then zzz (registered-
+	// only, appended), then aaa, ccc (discovered-only, in candidate order).
+	wantTargets := []string{"yasyf@bbb", "yasyf@ddd", "yasyf@zzz", "yasyf@aaa", "yasyf@ccc"}
+	wantReg := []bool{true, true, true, false, false}
+
+	if !slices.Equal(gotTargets, wantTargets) {
+		t.Fatalf("targets = %v, want %v", gotTargets, wantTargets)
+	}
+	if !slices.Equal(gotReg, wantReg) {
+		t.Fatalf("registered flags = %v, want %v", gotReg, wantReg)
+	}
+
+	// Guard the invariant directly: no unregistered row may precede a registered one.
+	for i := 1; i < len(items); i++ {
+		if !items[i-1].registered && items[i].registered {
+			t.Fatalf("unregistered row %q precedes registered row %q", items[i-1].target, items[i].target)
+		}
 	}
 }

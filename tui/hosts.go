@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -423,7 +424,10 @@ func discoverHostsCmd(r hostregistry.Runner) tea.Cmd {
 }
 
 // mergeHostItems turns discovery candidates into rows and appends every
-// registered host that discovery missed as an offline registered row.
+// registered host that discovery missed as an offline registered row, then
+// floats registered hosts above discovered-only candidates. The sort is stable,
+// so within each group rows keep their assembly order (candidates sorted by node,
+// then registered-only hosts in registry order).
 func mergeHostItems(cands []hostregistry.HostCandidate, registered []string) []hostItem {
 	items := make([]hostItem, 0, len(cands)+len(registered))
 	seen := map[string]struct{}{}
@@ -449,6 +453,9 @@ func mergeHostItems(cands []hostregistry.HostCandidate, registered []string) []h
 			registered: true,
 		})
 	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].registered && !items[j].registered
+	})
 	return items
 }
 
