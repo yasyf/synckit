@@ -38,6 +38,7 @@ type hostsModel struct {
 	allItems   []list.Item
 	filter     FilterBar
 	loading    bool
+	refreshing bool
 	mode       int
 	input      textinput.Model
 	spin       spinner.Model
@@ -79,7 +80,28 @@ func newHostsModel(opts Options) hostsModel {
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false)
 	l.DisableQuitKeybindings()
-	return hostsModel{opts: opts, list: l, filter: NewFilterBar(), loading: true, input: in, spin: sp, keys: newHostsKeyMap()}
+	m := hostsModel{opts: opts, list: l, filter: NewFilterBar(), loading: true, refreshing: true, input: in, spin: sp, keys: newHostsKeyMap()}
+	m.allItems = seedRegisteredItems()
+	if m.allItems != nil {
+		m.loading = len(m.allItems) == 0
+	}
+	return m
+}
+
+// seedRegisteredItems reads the registered mesh off disk and turns it into
+// …checking host rows so the list paints from cache before any network probe
+// runs. A registry read error yields nil, leaving the caller on the cold
+// full-screen loading path.
+func seedRegisteredItems() []list.Item {
+	reg, err := hostregistry.Mesh.Load()
+	if err != nil {
+		return nil
+	}
+	items := mergeHostItems(nil, reg.Hosts)
+	for i := range items {
+		items[i].state = verifyChecking
+	}
+	return toListItems(items)
 }
 
 func (m hostsModel) Title() string { return "Hosts" }
@@ -102,7 +124,17 @@ func (m hostsModel) WantsKey(tea.KeyMsg) bool {
 }
 
 func (m hostsModel) Init() tea.Cmd {
-	return tea.Batch(m.spin.Tick, discoverHostsCmd(m.opts.Runner))
+	return tea.Batch(m.spin.Tick, discoverHostsCmd(m.opts.Runner), verifyAllCmd(m.opts.Runner, m.allHostItems()))
+}
+
+// allHostItems is the canonical host slice as concrete rows, the seed for the
+// initial verify pass before discovery returns.
+func (m hostsModel) allHostItems() []hostItem {
+	out := make([]hostItem, len(m.allItems))
+	for i, raw := range m.allItems {
+		out[i] = raw.(hostItem)
+	}
+	return out
 }
 
 func (m hostsModel) Update(msg tea.Msg) (Screen, tea.Cmd) {
@@ -113,15 +145,17 @@ func (m hostsModel) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail = SplitDims(msg.Width, msg.Height-FilterBarLines-hostsReserve)
 		m.list.SetSize(m.mdListW, m.mdHeight)
 		m.logVP = viewport.New(msg.Width, max(1, msg.Height-2))
-		return m, nil
+		cmd := m.refreshHosts()
+		return m, cmd
 
 	case hostsLoadedMsg:
 		m.loading = false
+		m.refreshing = false
 		if msg.err != nil {
 			m.status = StatusErr.Render(msg.err.Error())
 			return m, nil
 		}
-		m.allItems = toListItems(msg.items)
+		m.allItems = mergeDiscovered(m.allItems, msg.items)
 		cmd := m.refreshHosts()
 		return m, tea.Batch(cmd, verifyAllCmd(m.opts.Runner, msg.items))
 
@@ -147,7 +181,8 @@ func (m hostsModel) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		} else {
 			m.status = StatusOK.Render("bootstrapped " + msg.target)
 		}
-		return m, discoverHostsCmd(m.opts.Runner)
+		m.refreshing = true
+		return m, tea.Batch(m.spin.Tick, discoverHostsCmd(m.opts.Runner))
 
 	case hostRemovedMsg:
 		if msg.err != nil {
@@ -155,12 +190,13 @@ func (m hostsModel) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			return m, nil
 		}
 		m.status = StatusOK.Render("removed " + msg.target)
-		return m, discoverHostsCmd(m.opts.Runner)
+		m.refreshing = true
+		return m, tea.Batch(m.spin.Tick, discoverHostsCmd(m.opts.Runner))
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
-		if m.loading || m.mode == hostModeBootstrapping {
+		if m.loading || m.refreshing || m.mode == hostModeBootstrapping {
 			return m, cmd
 		}
 		return m, nil
@@ -379,8 +415,12 @@ func (m hostsModel) View() string {
 		return Dim.Render("No hosts discovered. Press + to add one.")
 	}
 
+	legend := Dim.Render(verifyLegend)
+	if m.refreshing {
+		legend += "  " + m.spin.View() + Dim.Render(" refreshing…")
+	}
 	split := MasterDetail(m.list.View(), renderHostDetail(m.list.SelectedItem()), m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail)
-	body := lipgloss.JoinVertical(lipgloss.Left, m.filter.View(len(m.list.Items()), len(m.allItems)), split, Dim.Render(verifyLegend))
+	body := lipgloss.JoinVertical(lipgloss.Left, m.filter.View(len(m.list.Items()), len(m.allItems)), split, legend)
 	if m.confirm != nil {
 		body = lipgloss.JoinVertical(lipgloss.Left, body, ConfirmBox.Render(m.confirm.prompt))
 	}
@@ -396,6 +436,30 @@ func toListItems(items []hostItem) []list.Item {
 		out[i] = it
 	}
 	return out
+}
+
+// mergeDiscovered overlays the verify result and state of prior rows onto the
+// freshly-discovered set, matched by target, so a host that already resolved to
+// ✓/⚠/✗ does not flash back to …checking when a discovery pass returns. The
+// discovered set is authoritative for membership (it already carries every still-
+// registered host) and order (registered-first), so newly-found rows appear and
+// nothing still registered drops.
+func mergeDiscovered(prior []list.Item, discovered []hostItem) []list.Item {
+	resolved := make(map[string]hostItem, len(prior))
+	for _, raw := range prior {
+		it := raw.(hostItem)
+		if it.state != verifyUnknown {
+			resolved[it.target] = it
+		}
+	}
+	for i, it := range discovered {
+		if was, ok := resolved[it.target]; ok {
+			it.verify = was.verify
+			it.state = was.state
+			discovered[i] = it
+		}
+	}
+	return toListItems(discovered)
 }
 
 func listItems(l list.Model) []hostItem {

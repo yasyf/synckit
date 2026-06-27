@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-27
+
+### Fixed
+- The shared TUI's Hosts tab no longer blanks to a full "Discovering hosts…" screen on every launch.
+  It seeds the known (registered) mesh hosts instantly and revalidates in place — discovered hosts
+  and verify results update as the background scan finishes, with a subtle "refreshing…" indicator.
+
 ## [0.4.1] - 2026-06-27
 
 ### Fixed
@@ -67,7 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/yasyf/synckit/releases/tag/v0.4.2
 [0.4.1]: https://github.com/yasyf/synckit/releases/tag/v0.4.1
 [0.4.0]: https://github.com/yasyf/synckit/releases/tag/v0.4.0
 [0.3.0]: https://github.com/yasyf/synckit/releases/tag/v0.3.0

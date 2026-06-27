@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -229,5 +231,109 @@ func TestMergeHostItemsRegisteredSortFirst(t *testing.T) {
 		if !items[i-1].registered && items[i].registered {
 			t.Fatalf("unregistered row %q precedes registered row %q", items[i-1].target, items[i].target)
 		}
+	}
+}
+
+// seedMesh points the shared mesh at a fresh temp config dir and persists the
+// given hosts as registered peers, so newHostsModel seeds from a real on-disk
+// state.json rather than a mocked registry.
+func seedMesh(t *testing.T, hosts ...string) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if _, err := hostregistry.Mesh.Update(context.Background(), func(g *hostregistry.Registry) error {
+		for _, h := range hosts {
+			g.UpsertHost(h)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed mesh: %v", err)
+	}
+}
+
+// findItem returns the row with the given target from the model's canonical
+// slice, failing the test when it is absent.
+func findItem(t *testing.T, m hostsModel, target string) hostItem {
+	t.Helper()
+	for _, raw := range m.allItems {
+		if it := raw.(hostItem); it.target == target {
+			return it
+		}
+	}
+	t.Fatalf("target %q not in allItems (%d rows)", target, len(m.allItems))
+	return hostItem{}
+}
+
+// TestHostsSeedsFromRegisteredMeshBeforeDiscovery proves the stale-while-
+// revalidate seed: a model built over a registry with a known host paints that
+// host row immediately, never the full-screen "Discovering hosts…" takeover,
+// before any discovery result arrives.
+func TestHostsSeedsFromRegisteredMeshBeforeDiscovery(t *testing.T) {
+	seedMesh(t, "yasyf@alpha")
+
+	m := newHostsModel(Options{Runner: fakeRunner{}})
+	if m.loading {
+		t.Fatal("seeded model loading = true, want false (a known host must paint without the cold spinner)")
+	}
+
+	// Size the screen exactly as the router does on startup; this is what pushes
+	// the seeded rows into the list so View renders them.
+	s, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = s.(hostsModel)
+
+	view := m.View()
+	if strings.Contains(view, "Discovering hosts") {
+		t.Fatalf("seeded View rendered the cold loading screen:\n%s", view)
+	}
+	if !strings.Contains(view, "yasyf@alpha") {
+		t.Fatalf("seeded View missing the registered host row:\n%s", view)
+	}
+
+	// The seeded row sits in …checking until verify resolves it.
+	if got := findItem(t, m, "yasyf@alpha").state; got != verifyChecking {
+		t.Fatalf("seeded host state = %v, want verifyChecking", got)
+	}
+}
+
+// TestHostsLoadedPreservesResolvedVerifyState proves the merge half: once a
+// seeded host has resolved to a verify state, a later discovery pass that re-
+// lists it (plus a freshly-discovered host) must carry that state over instead
+// of resetting it to …checking, while the new host appears.
+func TestHostsLoadedPreservesResolvedVerifyState(t *testing.T) {
+	seedMesh(t, "yasyf@alpha")
+
+	m := newHostsModel(Options{Runner: fakeRunner{}})
+	s, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = s.(hostsModel)
+
+	// Resolve alpha to ✓ via the real verify message path.
+	s, _ = m.Update(hostVerifiedMsg{target: "yasyf@alpha", res: hostregistry.VerifyResult{Reachable: true, Bootstrapped: true, Version: "1.2.3"}})
+	m = s.(hostsModel)
+	if got := findItem(t, m, "yasyf@alpha").state; got != verifyOK {
+		t.Fatalf("after verify, alpha state = %v, want verifyOK", got)
+	}
+
+	// A discovery pass re-lists alpha (registered) and surfaces beta (new, never
+	// probed). The merge must preserve alpha's resolved state and version.
+	s, _ = m.Update(hostsLoadedMsg{items: []hostItem{
+		{node: "alpha", target: "yasyf@alpha", source: "tailscale", online: true, registered: true},
+		{node: "beta", target: "yasyf@beta", source: "bonjour", online: true, registered: false},
+	}})
+	m = s.(hostsModel)
+
+	alpha := findItem(t, m, "yasyf@alpha")
+	if alpha.state != verifyOK {
+		t.Fatalf("after discovery merge, alpha state = %v, want verifyOK (resolved row must not flash back to …checking)", alpha.state)
+	}
+	if alpha.verify.Version != "1.2.3" {
+		t.Fatalf("after discovery merge, alpha version = %q, want %q (verify result must carry over)", alpha.verify.Version, "1.2.3")
+	}
+
+	beta := findItem(t, m, "yasyf@beta")
+	if beta.state != verifyUnknown {
+		t.Fatalf("freshly-discovered beta state = %v, want verifyUnknown (no probe carried over)", beta.state)
+	}
+
+	if m.refreshing {
+		t.Fatal("refreshing = true after hostsLoadedMsg, want false (the in-flight indicator must clear when a pass returns)")
 	}
 }
