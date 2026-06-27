@@ -100,19 +100,23 @@ func TestVerify(t *testing.T) {
 	}
 }
 
-// TestVerifyProbesUseConfigName pins the tool-name parameterization: Verify must
-// shell the Config's Name in both the install check and the version probe.
-func TestVerifyProbesUseConfigName(t *testing.T) {
-	r := NewMockRunner().
-		OnSSH("command -v cookiesync", "/opt/homebrew/bin/cookiesync\n", nil).
-		OnSSH("cookiesync --version", "cookiesync 9.9.9\n", nil)
+// TestVerifyProbesConfigBinary pins the binary parameterization: Verify and
+// RemoteInstalled must shell the Config's Binary, not its Name. The shared mesh's
+// config dir is named "synckit" but the installed binary is "synckitd", so a probe
+// keyed on Name would mislabel a bootstrapped host as "reachable, not installed".
+func TestVerifyProbesConfigBinary(t *testing.T) {
+	cfg := Config{Name: "synckit", Binary: "synckitd"}
 
-	res := Config{Name: "cookiesync"}.Verify(context.Background(), r, "yasyf@host")
-	if !res.Bootstrapped || res.Version != "cookiesync 9.9.9" {
-		t.Fatalf("Verify with Name=cookiesync: %+v", res)
+	r := NewMockRunner().
+		OnSSH("command -v synckitd", "/opt/homebrew/bin/synckitd\n", nil).
+		OnSSH("synckitd --version", "synckitd 9.9.9\n", nil)
+
+	res := cfg.Verify(context.Background(), r, "yasyf@host")
+	if !res.Bootstrapped || res.Version != "synckitd 9.9.9" {
+		t.Fatalf("Verify with Binary=synckitd: %+v", res)
 	}
 	cmds := r.SSHCmds("yasyf@host")
-	want := []string{"command -v cookiesync", "cookiesync --version"}
+	want := []string{"command -v synckitd", "synckitd --version"}
 	if len(cmds) != len(want) {
 		t.Fatalf("ssh cmds = %v, want %v", cmds, want)
 	}
@@ -120,6 +124,14 @@ func TestVerifyProbesUseConfigName(t *testing.T) {
 		if cmds[i] != want[i] {
 			t.Fatalf("ssh cmd[%d] = %q, want %q", i, cmds[i], want[i])
 		}
+	}
+
+	r2 := NewMockRunner().OnSSH("command -v synckitd", "/opt/homebrew/bin/synckitd\n", nil)
+	if !cfg.RemoteInstalled(context.Background(), r2, "yasyf@host") {
+		t.Fatal("RemoteInstalled with Binary=synckitd should report installed")
+	}
+	if got := r2.SSHCmds("yasyf@host"); len(got) != 1 || got[0] != "command -v synckitd" {
+		t.Fatalf("RemoteInstalled ssh cmds = %v, want [command -v synckitd]", got)
 	}
 }
 

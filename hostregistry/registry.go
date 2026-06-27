@@ -144,9 +144,9 @@ type VerifyResult struct {
 }
 
 // Verify probes target over ssh: whether it is reachable, has the tool installed,
-// and its version, shelling the Config's own Name.
+// and its version, shelling the Config's own Binary.
 func (c Config) Verify(ctx context.Context, r Runner, target string) VerifyResult {
-	return c.VerifyBinary(ctx, r, target, c.Name)
+	return c.VerifyBinary(ctx, r, target, c.Binary)
 }
 
 // VerifyBinary probes target over ssh — whether it is reachable, has binary
@@ -189,9 +189,9 @@ func (c Config) VerifyAll(ctx context.Context, r Runner, hosts []string) []Verif
 	return results
 }
 
-// RemoteInstalled reports whether the Config's tool is on target's PATH over ssh.
+// RemoteInstalled reports whether the Config's Binary is on target's PATH over ssh.
 func (c Config) RemoteInstalled(ctx context.Context, r Runner, target string) bool {
-	return c.RemoteInstalledBinary(ctx, r, target, c.Name)
+	return c.RemoteInstalledBinary(ctx, r, target, c.Binary)
 }
 
 // RemoteInstalledBinary reports whether binary is on target's PATH over ssh,

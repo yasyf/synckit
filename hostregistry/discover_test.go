@@ -202,10 +202,82 @@ func TestHostNode(t *testing.T) {
 	}
 }
 
+func TestBonjourCandidatesSkipsSelf(t *testing.T) {
+	cases := []struct {
+		name          string
+		nodes         []string
+		localHostName string
+		wantNodes     []string
+		wantSkipNode  string
+	}{
+		{
+			name:          "exact self match dropped",
+			nodes:         []string{"alpha", "ybook-pro", "beta"},
+			localHostName: "ybook-pro",
+			wantNodes:     []string{"alpha", "beta"},
+			wantSkipNode:  "ybook-pro",
+		},
+		{
+			name:          "case-mismatched self dropped",
+			nodes:         []string{"alpha", "yBook-Pro"},
+			localHostName: "ybook-pro",
+			wantNodes:     []string{"alpha"},
+			wantSkipNode:  "yBook-Pro",
+		},
+		{
+			name:          "no self present passes all through",
+			nodes:         []string{"alpha", "beta"},
+			localHostName: "ybook-pro",
+			wantNodes:     []string{"alpha", "beta"},
+			wantSkipNode:  "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cands, notes := bonjourCandidates(tc.nodes, "yasyf", tc.localHostName)
+
+			if len(cands) != len(tc.wantNodes) {
+				t.Fatalf("got %d candidates, want %d: %+v", len(cands), len(tc.wantNodes), cands)
+			}
+			for i, want := range tc.wantNodes {
+				if cands[i].Node != want {
+					t.Fatalf("candidate[%d].Node = %q, want %q", i, cands[i].Node, want)
+				}
+				if cands[i].DefaultTarget != "yasyf@"+want {
+					t.Fatalf("candidate[%d].DefaultTarget = %q, want %q", i, cands[i].DefaultTarget, "yasyf@"+want)
+				}
+				if cands[i].Source != "bonjour" {
+					t.Fatalf("candidate[%d].Source = %q, want bonjour", i, cands[i].Source)
+				}
+			}
+			if hasNode(cands, tc.localHostName) {
+				t.Fatalf("self node %q must not appear in candidates: %+v", tc.localHostName, cands)
+			}
+
+			if tc.wantSkipNode == "" {
+				if len(notes) != 0 {
+					t.Fatalf("notes = %+v, want none", notes)
+				}
+				return
+			}
+			if len(notes) != 1 {
+				t.Fatalf("got %d notes, want exactly 1: %+v", len(notes), notes)
+			}
+			if notes[0].Name != tc.wantSkipNode {
+				t.Fatalf("skip note name = %q, want %q", notes[0].Name, tc.wantSkipNode)
+			}
+			if notes[0].Reason != "self" {
+				t.Fatalf("skip note reason = %q, want %q", notes[0].Reason, "self")
+			}
+		})
+	}
+}
+
 func TestHostsTailscaleErrorStillSucceeds(t *testing.T) {
 	r := NewMockRunner().
 		OnLocal("id -un", "yasyf\n", nil).
-		OnLocal("tailscale status --json", "", errors.New("exec: tailscale: not found"))
+		OnLocal("tailscale status --json", "", errors.New("exec: tailscale: not found")).
+		OnLocal("scutil --get LocalHostName", "yBook-Pro\n", nil)
 
 	// An already-cancelled context makes discoverBonjour's LookupType return
 	// immediately with context.Canceled (normal completion), so this exercises the

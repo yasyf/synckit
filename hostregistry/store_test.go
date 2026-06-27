@@ -14,8 +14,9 @@ import (
 )
 
 // testCfg is the Config the in-package tests drive; Name selects the per-tool
-// config subdir under the temp XDG_CONFIG_HOME each test sets.
-var testCfg = Config{Name: "synckit"}
+// config subdir under the temp XDG_CONFIG_HOME each test sets, and Binary is the
+// name the verify/install probes shell over ssh.
+var testCfg = Config{Name: "synckit", Binary: "synckit"}
 
 func TestWithLockRunsFnAndCreatesLockFile(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

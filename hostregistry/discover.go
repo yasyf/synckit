@@ -52,7 +52,13 @@ func Hosts(ctx context.Context, r Runner, registered []string) (HostResult, erro
 	tsCands, tsNotes := discoverTailscale(ctx, r, localUser)
 	notes = append(notes, tsNotes...)
 
-	bjCands, bjNotes := discoverBonjour(ctx, localUser)
+	localHost, err := r.Local(ctx, "scutil", "--get", "LocalHostName")
+	localHost = strings.TrimSpace(localHost)
+	if err != nil {
+		notes = append(notes, SkipNote{Name: "scutil", Reason: err.Error()})
+	}
+
+	bjCands, bjNotes := discoverBonjour(ctx, localUser, localHost)
 	notes = append(notes, bjNotes...)
 
 	cands := make([]HostCandidate, 0, len(tsCands)+len(bjCands))
@@ -136,22 +142,53 @@ func isLikelyEphemeral(p tailscalePeer) bool {
 	return !isMullvad(p) && p.KeyExpiry == nil
 }
 
-// discoverBonjour browses _ssh._tcp services for up to bonjourTimeout. The lookup
+// discoverBonjour browses _ssh._tcp services for up to bonjourTimeout, skipping
+// this Mac itself (the browse entry whose node matches localHostName). The lookup
 // blocks until the context expires, so a deadline or cancellation is normal
 // completion; any other error degrades to a SkipNote.
-func discoverBonjour(ctx context.Context, localUser string) ([]HostCandidate, []SkipNote) {
+func discoverBonjour(ctx context.Context, localUser, localHostName string) ([]HostCandidate, []SkipNote) {
 	ctx2, cancel := context.WithTimeout(ctx, bonjourTimeout)
 	defer cancel()
 
-	seen := map[string]struct{}{}
-	var cands []HostCandidate
+	var nodes []string
 	add := func(e dnssd.BrowseEntry) {
-		node := bonjourNode(e)
+		nodes = append(nodes, bonjourNode(e))
+	}
+	rmv := func(dnssd.BrowseEntry) {}
+
+	err := dnssd.LookupType(ctx2, "_ssh._tcp.local.", add, rmv)
+	cands, notes := bonjourCandidates(nodes, localUser, localHostName)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		return cands, append(notes, SkipNote{Name: "bonjour", Reason: err.Error()})
+	}
+	return cands, notes
+}
+
+// bonjourCandidates dedupes browsed node labels into candidates, dropping any
+// whose node matches localHostName (case-insensitive — bonjour casing is
+// inconsistent, e.g. "yBook-Pro" vs "ybook-pro") and recording a SkipNote for the
+// self entry. Factored out of discoverBonjour because dnssd.LookupType is not
+// mockable, so the self-skip is exercised through this helper.
+func bonjourCandidates(nodes []string, localUser, localHostName string) ([]HostCandidate, []SkipNote) {
+	var (
+		cands    []HostCandidate
+		notes    []SkipNote
+		seenSelf bool
+	)
+	seen := map[string]struct{}{}
+	for _, node := range nodes {
 		if node == "" {
-			return
+			continue
+		}
+		if strings.EqualFold(node, localHostName) {
+			if !seenSelf {
+				notes = append(notes, SkipNote{Name: node, Reason: "self"})
+				seenSelf = true
+			}
+			continue
 		}
 		if _, dup := seen[node]; dup {
-			return
+			continue
 		}
 		seen[node] = struct{}{}
 		cands = append(cands, HostCandidate{
@@ -161,13 +198,7 @@ func discoverBonjour(ctx context.Context, localUser string) ([]HostCandidate, []
 			Online:        true,
 		})
 	}
-	rmv := func(dnssd.BrowseEntry) {}
-
-	err := dnssd.LookupType(ctx2, "_ssh._tcp.local.", add, rmv)
-	if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-		return cands, []SkipNote{{Name: "bonjour", Reason: err.Error()}}
-	}
-	return cands, nil
+	return cands, notes
 }
 
 // mergeHosts dedupes candidates by node — preferring a tailscale entry over a

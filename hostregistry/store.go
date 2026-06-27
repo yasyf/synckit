@@ -4,9 +4,9 @@
 // self/hosts identity into a shared state.json under a cross-process flock.
 //
 // A Config names the owning tool (Config.Name), which selects the per-tool config
-// directory (~/.config/<name>) and the verify/install probes ("<name> --version",
-// "command -v <name>"). Identity-free helpers — discovery, the Runner, DetectSelf,
-// ShellQuote — stay free functions.
+// directory (~/.config/<name>), and the binary it install-probes over ssh
+// (Config.Binary, "command -v <binary>" / "<binary> --version"). Identity-free
+// helpers — discovery, the Runner, DetectSelf, ShellQuote — stay free functions.
 //
 // The registry owns only the host-identity slice of state.json (self, hosts); the
 // owning tool's other keys are preserved byte-for-byte across an Update, so two
@@ -40,9 +40,13 @@ var ErrLockBusy = errors.New("reconcile lock held by another process")
 // the verify/install probes. The host-registry methods that read or write
 // state.json or shell a tool name hang off it.
 type Config struct {
-	// Name is the tool's CLI/config identity: it selects ~/.config/<Name> and the
-	// "<Name> --version" / "command -v <Name>" probes.
+	// Name is the tool's CLI/config identity: it selects ~/.config/<Name>.
 	Name string
+	// Binary is the binary name probed over ssh to decide a host is bootstrapped
+	// ("command -v <Binary>" / "<Binary> --version"), distinct from Name: the
+	// shared mesh's config dir is named "synckit" but the installed daemon is
+	// "synckitd".
+	Binary string
 }
 
 // Dir returns the config directory under XDG_CONFIG_HOME or ~/.config.
