@@ -163,11 +163,11 @@ func TestHandlerPanicBecomesErrorResponse(t *testing.T) {
 	}
 }
 
-func TestDispatchIsSerialized(t *testing.T) {
-	d := NewDispatcher()
+// slowHandler tracks the peak number of concurrent invocations, holding each call
+// for 20ms so an overlap is observable.
+func slowHandler(peak *atomic.Int32) Handler {
 	var concurrent atomic.Int32
-	var peak atomic.Int32
-	d.Register("slow", func(_ context.Context, _ map[string]any) (any, error) {
+	return func(_ context.Context, _ map[string]any) (any, error) {
 		n := concurrent.Add(1)
 		for {
 			p := peak.Load()
@@ -178,22 +178,181 @@ func TestDispatchIsSerialized(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		concurrent.Add(-1)
 		return nil, nil
-	})
+	}
+}
+
+// TestExclusiveDispatchSerializes proves methods registered via RegisterExclusive
+// share one mutex: two exclusive handlers are never mid-flight at once, whichever
+// method drives them.
+func TestExclusiveDispatchSerializes(t *testing.T) {
+	d := NewDispatcher()
+	var peak atomic.Int32
+	d.RegisterExclusive("slow", slowHandler(&peak))
+	d.RegisterExclusive("slow2", slowHandler(&peak))
 	sock := serve(t, d)
 
 	var wg sync.WaitGroup
-	for range 5 {
+	for _, method := range []string{"slow", "slow2", "slow", "slow2", "slow"} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := Call(context.Background(), sock, &Request{Method: "slow"}); err != nil {
+			if _, err := Call(context.Background(), sock, &Request{Method: method}); err != nil {
 				t.Errorf("call: %v", err)
 			}
 		}()
 	}
 	wg.Wait()
 	if peak.Load() != 1 {
-		t.Errorf("peak concurrent handlers = %d, want 1 (dispatch must serialize)", peak.Load())
+		t.Errorf("peak concurrent exclusive handlers = %d, want 1 (exclusive dispatch must serialize)", peak.Load())
+	}
+}
+
+// TestConcurrentHandlersOverlap proves two plain Register'd handlers run
+// simultaneously: each parks until the other arrives, so both calls succeed only at
+// peak concurrency 2.
+func TestConcurrentHandlersOverlap(t *testing.T) {
+	d := NewDispatcher()
+	var inflight atomic.Int32
+	both := make(chan struct{})
+	handler := func(ctx context.Context, _ map[string]any) (any, error) {
+		if inflight.Add(1) == 2 {
+			close(both)
+		}
+		select {
+		case <-both:
+			return nil, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	d.Register("a", handler)
+	d.Register("b", handler)
+	sock := serve(t, d)
+
+	var wg sync.WaitGroup
+	for _, method := range []string{"a", "b"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			resp, err := Call(ctx, sock, &Request{Method: method})
+			if err != nil {
+				t.Errorf("call %s: %v", method, err)
+				return
+			}
+			if !resp.OK {
+				t.Errorf("call %s: handlers never overlapped: %s", method, resp.Error)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestConcurrentHandlerRunsWhileExclusiveHandlerBlocks proves a plain Register'd
+// handler completes while an exclusive handler is blocked mid-invoke — the exclusive
+// mutex must never queue the concurrent surface behind it.
+func TestConcurrentHandlerRunsWhileExclusiveHandlerBlocks(t *testing.T) {
+	d := NewDispatcher()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	d.RegisterExclusive("blocked", func(_ context.Context, _ map[string]any) (any, error) {
+		close(entered)
+		<-release
+		return nil, nil
+	})
+	d.Register("quick", func(_ context.Context, _ map[string]any) (any, error) {
+		return "ran", nil
+	})
+	sock := serve(t, d)
+
+	go func() { _, _ = Call(context.Background(), sock, &Request{Method: "blocked"}) }()
+	<-entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := Call(ctx, sock, &Request{Method: "quick"})
+	if err != nil {
+		t.Fatalf("call quick while exclusive handler blocked: %v", err)
+	}
+	if !resp.OK || resp.Result != "ran" {
+		t.Errorf("got ok=%v result=%v, want ok=true result=ran", resp.OK, resp.Result)
+	}
+}
+
+// TestDispatchTimeoutBoundsHandler proves the handler ctx carries a deadline within
+// (DispatchTimeout-1min, DispatchTimeout] and that a blocked handler is released
+// when the deadline fires.
+func TestDispatchTimeoutBoundsHandler(t *testing.T) {
+	d := NewDispatcher()
+	var remaining time.Duration
+	var hasDeadline bool
+	d.Register("check", func(ctx context.Context, _ map[string]any) (any, error) {
+		var deadline time.Time
+		deadline, hasDeadline = ctx.Deadline()
+		remaining = time.Until(deadline)
+		return nil, nil
+	})
+	d.Register("block", func(ctx context.Context, _ map[string]any) (any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+
+	if resp := d.Dispatch(context.Background(), &Request{Method: "check"}); !resp.OK {
+		t.Fatalf("check: %s", resp.Error)
+	}
+	if !hasDeadline {
+		t.Fatal("handler ctx carries no deadline")
+	}
+	if remaining <= DispatchTimeout-time.Minute || remaining > DispatchTimeout {
+		t.Errorf("handler deadline %v away, want within (%v, %v]", remaining, DispatchTimeout-time.Minute, DispatchTimeout)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	resp := d.Dispatch(ctx, &Request{Method: "block"})
+	if resp.OK || !strings.Contains(resp.Error, context.DeadlineExceeded.Error()) {
+		t.Errorf("got ok=%v error=%q, want the deadline to release the blocked handler", resp.OK, resp.Error)
+	}
+}
+
+// TestClosingConnCancelsHandler proves the server cancels a dispatched handler's ctx
+// the moment the requesting connection closes, rather than letting it run to the
+// full DispatchTimeout.
+func TestClosingConnCancelsHandler(t *testing.T) {
+	d := NewDispatcher()
+	entered := make(chan struct{})
+	ended := make(chan error, 1)
+	d.Register("park", func(ctx context.Context, _ map[string]any) (any, error) {
+		close(entered)
+		<-ctx.Done()
+		ended <- ctx.Err()
+		return nil, ctx.Err()
+	})
+	sock := serve(t, d)
+
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	line, err := EncodeRequest(&Request{Method: "park"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if _, err := conn.Write(line); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	<-entered
+	_ = conn.Close()
+
+	select {
+	case err := <-ended:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("handler ctx ended with %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler still running 5s after the client connection closed")
 	}
 }
 

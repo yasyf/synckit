@@ -1,9 +1,9 @@
 // Package rpc is the generic unix-socket RPC transport shared across synckit tools:
 // a {method, params} request line in, a {ok, result, error} response line out, then
 // the connection closes. The wire is newline-delimited JSON (one object + '\n' per
-// message); a Dispatcher routes method names to registered handlers serialized
-// behind a single mutex; the server enforces a same-UID peer check and a 16 MiB
-// per-line bound before doing any work. Method names, param shapes, and result
+// message); a Dispatcher routes method names to registered handlers — concurrent by
+// default, serialized only for methods bound via RegisterExclusive; the server
+// enforces a same-UID peer check and a 16 MiB per-line bound before doing any work. Method names, param shapes, and result
 // types are the consuming tool's domain — this package knows none of them.
 package rpc
 

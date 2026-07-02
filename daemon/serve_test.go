@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -364,6 +366,98 @@ func TestEngineEventDrivesLocalSync(t *testing.T) {
 	}
 	if origin != "" {
 		t.Errorf("event-driven local sync origin = %q, want empty", origin)
+	}
+}
+
+func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
+	cfgHome, err := os.MkdirTemp("", "skd")
+	if err != nil {
+		t.Fatalf("mkdir config home: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cfgHome) })
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+
+	if _, err := hostregistry.Mesh.Update(context.Background(), func(g *hostregistry.Registry) error {
+		g.Self = "me@self"
+		return nil
+	}); err != nil {
+		t.Fatalf("seed mesh: %v", err)
+	}
+
+	watched := t.TempDir()
+	fake := newFakeConsumer(syncservice.WatchItem{ID: "only", WatchDirs: []string{watched}, Fingerprint: "fp-1"})
+	fakeMesh(t, map[string]*fakeConsumer{"me@self": fake})
+
+	manifestsDir, err := ensureManifestsDir()
+	if err != nil {
+		t.Fatalf("ensure manifests dir: %v", err)
+	}
+	raw, err := json.Marshal(testManifest())
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestsDir, "stub.json"), raw, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-served:
+			if err != nil {
+				t.Errorf("serve: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("serve did not stop after ctx cancel")
+		}
+	})
+
+	sock, err := hostregistry.Mesh.SockPath()
+	if err != nil {
+		t.Fatalf("sock path: %v", err)
+	}
+	resp := callReload(t, sock)
+	if !resp.OK {
+		t.Fatalf("reload rpc: %s", resp.Error)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, calls := fake.syncOrigin(); calls > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no fs event drove a sync after the reload rpc returned: the watch generation died with the request ctx")
+		}
+		if err := os.WriteFile(filepath.Join(watched, "touch"), []byte(time.Now().String()), 0o600); err != nil {
+			t.Fatalf("touch watched dir: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if origin, _ := fake.syncOrigin(); origin != "" {
+		t.Errorf("event-driven local sync origin = %q, want empty", origin)
+	}
+}
+
+// callReload invokes the reload rpc, retrying dial failures until the daemon has
+// bound its socket.
+func callReload(t *testing.T, sock string) *rpc.Response {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		resp, err := rpc.Call(ctx, sock, &rpc.Request{Method: "reload"})
+		cancel()
+		if err == nil {
+			return resp
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("reload rpc never came up: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

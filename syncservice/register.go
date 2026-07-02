@@ -8,7 +8,10 @@ import (
 
 // RegisterConsumer binds every svc.-namespaced method on d to the matching method of
 // svc, adapting each rpc handler's untyped params to the typed call and returning the
-// result struct. GetState returns the [RawRegistry] directly as the handler result so
+// result struct. Sync and Reconcile run the flock-wrapped converge pass, so they are
+// registered exclusive — they queue behind the dispatcher's exclusive mutex instead
+// of contending on the non-reentrant flock; the read-only methods stay concurrent.
+// GetState returns the [RawRegistry] directly as the handler result so
 // rpc.EncodeResponse marshals it as raw bytes, preserving the registry's int64 CRDT
 // stamps; the other methods return their result structs for the dispatcher to encode.
 func RegisterConsumer(d *rpc.Dispatcher, svc SyncConsumer) {
@@ -18,10 +21,10 @@ func RegisterConsumer(d *rpc.Dispatcher, svc SyncConsumer) {
 	d.Register(MethodList, func(ctx context.Context, _ map[string]any) (any, error) {
 		return svc.List(ctx)
 	})
-	d.Register(MethodReconcile, func(ctx context.Context, p map[string]any) (any, error) {
+	d.RegisterExclusive(MethodReconcile, func(ctx context.Context, p map[string]any) (any, error) {
 		return svc.Reconcile(ctx, optString(p, "origin"))
 	})
-	d.Register(MethodSync, func(ctx context.Context, p map[string]any) (any, error) {
+	d.RegisterExclusive(MethodSync, func(ctx context.Context, p map[string]any) (any, error) {
 		return svc.Sync(ctx, optString(p, "origin"))
 	})
 	d.Register(MethodGetState, func(ctx context.Context, _ map[string]any) (any, error) {

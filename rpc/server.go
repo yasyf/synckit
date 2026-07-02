@@ -27,7 +27,9 @@ func Listen(sockPath string) (net.Listener, error) {
 // Serve accepts and handles one request per connection until ctx is canceled, then
 // returns nil. Canceling ctx closes ln, which unblocks Accept; it does not close ln
 // itself, since the caller owns the listener. Each connection is checked for a
-// same-UID peer before any byte is read, then bounded by ReadTimeout and MaxLine.
+// same-UID peer before any byte is read, then bounded by ReadTimeout and MaxLine;
+// the dispatch ctx is canceled when the client connection closes, so an abandoned
+// request never runs to the full DispatchTimeout.
 func Serve(ctx context.Context, ln net.Listener, d *Dispatcher) error {
 	go func() {
 		<-ctx.Done()
@@ -72,6 +74,18 @@ func handleConn(ctx context.Context, conn *net.UnixConn, d *Dispatcher) {
 		writeResponse(conn, &Response{OK: false, Error: err.Error()})
 		return
 	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// The protocol allows no client bytes after the request line, so any Read result
+	// — a byte, EOF, or an error — means the client is gone or misbehaving. Reading
+	// the raw conn, not the bufio.Reader above, keeps bytes the reader already
+	// buffered past the line from firing this; the deferred Close unblocks the Read
+	// once the handler finishes, so the goroutine never outlives the connection.
+	go func() {
+		_, _ = conn.Read(make([]byte, 1))
+		cancel()
+	}()
 	writeResponse(conn, d.Dispatch(ctx, req))
 }
 

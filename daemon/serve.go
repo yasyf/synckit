@@ -71,11 +71,17 @@ func serve(ctx context.Context) error {
 
 	d := rpc.NewDispatcher()
 	d.Register("status", handleStatus)
-	d.Register("reconcile", func(hctx context.Context, _ map[string]any) (any, error) {
+	// reconcile and reload mutate the engine generation, so they serialize behind
+	// the exclusive mutex — a reload never tears down the clients a reconcile pass
+	// is mid-drive on; status is a pure read and stays concurrent.
+	d.RegisterExclusive("reconcile", func(hctx context.Context, _ map[string]any) (any, error) {
 		return reconcileAll(hctx)
 	})
-	d.Register("reload", func(hctx context.Context, _ map[string]any) (any, error) {
-		if err := sup.reload(hctx); err != nil {
+	// The generation reload starts must outlive the request, so it parents to
+	// serve's ctx: the request ctx dies as soon as Dispatch returns, which would
+	// silently cancel every engine the reload just started.
+	d.RegisterExclusive("reload", func(_ context.Context, _ map[string]any) (any, error) {
+		if err := sup.reload(ctx); err != nil {
 			return nil, err
 		}
 		return map[string]any{"reloaded": true}, nil
