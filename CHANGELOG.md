@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Busy-awareness through the watch layer. `watch.Gate` (with `watch.WithGate`) teaches the engine
+  to defer a busy item's evaluation instead of acting on it: nothing is recorded or notified while
+  the item is busy, the evaluation retries at a configurable cadence, and an item deferred past a
+  max-defer window fires through — so a pending change lands right after the item goes idle
+  instead of parking until an external tick. An ungated engine behaves exactly as before.
+- Busy on the wire: `syncservice.WatchItem` gains `busy`/`busy_reason`, and `SyncResult`/
+  `ReconcileResult` gain `skipped_busy`. All three are additive `omitempty` fields that decode
+  compatibly in both directions, so `ProtocolVersion` stays 1 and `SyncConsumer` is unchanged.
+- The daemon gates each manifest's watch engine on the busy state its consumer reports via
+  `List`, retrying at the manifest's debounce cadence and firing through after ten windows. The
+  gate shares its `List` round trip with the fingerprint resolver, so a gated evaluation costs
+  one RPC, not two.
+
 ## [0.4.2] - 2026-06-27
 
 ### Fixed

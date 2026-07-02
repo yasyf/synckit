@@ -28,6 +28,7 @@ type fakeConsumer struct {
 	capsFails   int                     // fail the first N Capabilities calls
 	capsCalls   int                     // total Capabilities calls seen
 	items       []syncservice.WatchItem // List result
+	listCalls   int                     // total List calls seen
 
 	lastReconcileOrigin string
 	reconcileCalls      int
@@ -54,6 +55,7 @@ func (f *fakeConsumer) Capabilities(context.Context) (syncservice.Capabilities, 
 func (f *fakeConsumer) List(context.Context) ([]syncservice.WatchItem, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listCalls++
 	return append([]syncservice.WatchItem(nil), f.items...), nil
 }
 
@@ -93,6 +95,12 @@ func (f *fakeConsumer) capabilityCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.capsCalls
+}
+
+func (f *fakeConsumer) listCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listCalls
 }
 
 type errString string
@@ -198,7 +206,7 @@ func TestManifestResolver(t *testing.T) {
 	)
 	tx := serveFake(t, fake)
 	t.Cleanup(func() { _ = tx.Close() })
-	r := manifestResolver{client: syncservice.NewClient(tx), name: "stub"}
+	r := manifestResolver{client: syncservice.NewClient(tx), name: "stub", memo: newFingerprintMemo()}
 
 	tests := []struct {
 		name string
@@ -219,6 +227,75 @@ func TestManifestResolver(t *testing.T) {
 				t.Errorf("Resolve(%q) = %q, want %q", tt.id, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestManifestGate(t *testing.T) {
+	fake := newFakeConsumer(
+		syncservice.WatchItem{ID: "site-a", Fingerprint: "fp-a", Busy: true, BusyReason: "op in progress"},
+		syncservice.WatchItem{ID: "site-b", Fingerprint: "fp-b"},
+	)
+	tx := serveFake(t, fake)
+	t.Cleanup(func() { _ = tx.Close() })
+	g := manifestGate{client: syncservice.NewClient(tx), name: "stub", memo: newFingerprintMemo()}
+
+	tests := []struct {
+		name       string
+		id         string
+		wantBusy   bool
+		wantReason string
+	}{
+		{"busy item", "site-a", true, "op in progress"},
+		{"idle item", "site-b", false, ""},
+		{"missing item", "site-z", false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			busy, reason, err := g.Busy(context.Background(), tt.id)
+			if err != nil {
+				t.Fatalf("Busy: %v", err)
+			}
+			if busy != tt.wantBusy || reason != tt.wantReason {
+				t.Errorf("Busy(%q) = (%v, %q), want (%v, %q)", tt.id, busy, reason, tt.wantBusy, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestManifestGateFeedsResolverOneList(t *testing.T) {
+	fake := newFakeConsumer(syncservice.WatchItem{ID: "site-a", Fingerprint: "fp-a"})
+	tx := serveFake(t, fake)
+	t.Cleanup(func() { _ = tx.Close() })
+	client := syncservice.NewClient(tx)
+	memo := newFingerprintMemo()
+	g := manifestGate{client: client, name: "stub", memo: memo}
+	r := manifestResolver{client: client, name: "stub", memo: memo}
+	ctx := context.Background()
+
+	busy, _, err := g.Busy(ctx, "site-a")
+	if err != nil {
+		t.Fatalf("Busy: %v", err)
+	}
+	if busy {
+		t.Fatal("Busy(site-a) = true, want false")
+	}
+	got, err := r.Resolve(ctx, "site-a")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got != "fp-a" {
+		t.Errorf("Resolve(site-a) = %q, want fp-a", got)
+	}
+	if calls := fake.listCount(); calls != 1 {
+		t.Errorf("list calls = %d, want 1 (the resolver must consume the gate's round trip)", calls)
+	}
+
+	// The stash is single-use: a resolve outside a gated evaluation lists again.
+	if _, err := r.Resolve(ctx, "site-a"); err != nil {
+		t.Fatalf("Resolve again: %v", err)
+	}
+	if calls := fake.listCount(); calls != 2 {
+		t.Errorf("list calls = %d, want 2 (a consumed stash must not serve a later evaluation)", calls)
 	}
 }
 

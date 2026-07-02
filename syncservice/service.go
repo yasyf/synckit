@@ -25,11 +25,15 @@ const (
 )
 
 // WatchItem is one tracked unit of sync: a stable id, the directories whose changes
-// trigger a sync, and a fingerprint of its current state.
+// trigger a sync, and a fingerprint of its current state. A consumer that can tell
+// an item is mid-operation reports it busy with a human-readable reason, so a
+// watcher defers acting on it until it goes idle.
 type WatchItem struct {
 	ID          string   `json:"id"`
 	WatchDirs   []string `json:"watch_dirs"`
 	Fingerprint string   `json:"fingerprint"`
+	Busy        bool     `json:"busy,omitempty"`
+	BusyReason  string   `json:"busy_reason,omitempty"`
 }
 
 // Capabilities is a peer's self-description: its name, the protocol version it
@@ -40,14 +44,18 @@ type Capabilities struct {
 	Methods         []string `json:"methods"`
 }
 
-// ReconcileResult reports the outcome of a reconcile: how many items converged.
+// ReconcileResult reports the outcome of a reconcile: how many items converged and
+// how many were skipped because they were busy.
 type ReconcileResult struct {
-	Converged int `json:"converged"`
+	Converged   int `json:"converged"`
+	SkippedBusy int `json:"skipped_busy,omitempty"`
 }
 
-// SyncResult reports the outcome of a sync: how many items converged.
+// SyncResult reports the outcome of a sync: how many items converged and how many
+// were skipped because they were busy.
 type SyncResult struct {
-	Converged int `json:"converged"`
+	Converged   int `json:"converged"`
+	SkippedBusy int `json:"skipped_busy,omitempty"`
 }
 
 // RawRegistry is the consumer's registry state carried as opaque JSON. It is never

@@ -250,14 +250,20 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // buildEngine wires one manifest's watch engine: the resolver and notifier drive
 // the consumer's typed sync service, the digest is the identity (the id is already
 // the stable key), and the host fan-out is self first (local converge) then peers.
+// The gate defers a busy item's evaluation at the debounce cadence, firing through
+// after ten windows so a persistently busy item can only delay a change, never
+// park it.
 func buildEngine(local *syncservice.Client, m manifest.Manifest, reg *hostregistry.Registry) *watch.Engine[string] {
 	hosts := append([]string{reg.Self}, reg.Hosts...)
+	debounce := time.Duration(m.Watch.Debounce)
+	memo := newFingerprintMemo()
 	return watch.NewEngine[string](
-		manifestResolver{client: local, name: m.Name},
+		manifestResolver{client: local, name: m.Name, memo: memo},
 		manifestNotifier{local: local, m: m, self: reg.Self},
 		func(id string) string { return id },
-		time.Duration(m.Watch.Debounce),
+		debounce,
 		hosts,
+		watch.WithGate[string](manifestGate{client: local, name: m.Name, memo: memo}, debounce, 10*debounce),
 	)
 }
 
@@ -282,13 +288,19 @@ func (s *supervisor) stop() {
 // fingerprint is apply-stable, the engine dedups a consumer's own write without a
 // cross-process Seed: after the consumer applies a peer's change, the item's
 // fingerprint matches the value the engine already recorded. A missing item
-// resolves to "" so the engine treats it as no change.
+// resolves to "" so the engine treats it as no change. A fingerprint the gate
+// stashed from its own List round trip in the same evaluation is consumed instead
+// of listing again.
 type manifestResolver struct {
 	client *syncservice.Client
 	name   string
+	memo   *fingerprintMemo
 }
 
 func (r manifestResolver) Resolve(ctx context.Context, id string) (string, error) {
+	if fingerprint, ok := r.memo.take(id); ok {
+		return fingerprint, nil
+	}
 	items, err := r.client.List(ctx)
 	if err != nil {
 		return "", fmt.Errorf("list watch items for %q: %w", r.name, err)
@@ -299,6 +311,62 @@ func (r manifestResolver) Resolve(ctx context.Context, id string) (string, error
 		}
 	}
 	return "", nil
+}
+
+// manifestGate reports an item's busy state from the consumer's List, so the
+// engine defers acting on an item its consumer says is mid-operation. A missing
+// item is not busy. The engine consults the gate immediately before the resolver
+// in the same evaluation, so the gate stashes the fingerprint its List round trip
+// already carried for the resolver to consume — one List per gated evaluation,
+// not two.
+type manifestGate struct {
+	client *syncservice.Client
+	name   string
+	memo   *fingerprintMemo
+}
+
+func (g manifestGate) Busy(ctx context.Context, id string) (bool, string, error) {
+	items, err := g.client.List(ctx)
+	if err != nil {
+		return false, "", fmt.Errorf("list watch items for %q: %w", g.name, err)
+	}
+	for _, it := range items {
+		if it.ID == id {
+			g.memo.put(id, it.Fingerprint)
+			return it.Busy, it.BusyReason, nil
+		}
+	}
+	g.memo.put(id, "")
+	return false, "", nil
+}
+
+// fingerprintMemo hands an id's fingerprint from the gate's List round trip to the
+// resolver within a single evaluation. take consumes the entry and every gate
+// check overwrites it fresh, so a stashed fingerprint never serves an evaluation
+// other than the one that produced it.
+type fingerprintMemo struct {
+	mu           sync.Mutex
+	fingerprints map[string]string
+}
+
+func newFingerprintMemo() *fingerprintMemo {
+	return &fingerprintMemo{fingerprints: make(map[string]string)}
+}
+
+func (m *fingerprintMemo) put(id, fingerprint string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fingerprints[id] = fingerprint
+}
+
+func (m *fingerprintMemo) take(id string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	fingerprint, ok := m.fingerprints[id]
+	if ok {
+		delete(m.fingerprints, id)
+	}
+	return fingerprint, ok
 }
 
 // manifestNotifier drives the consumer's typed Sync for one peer: the self host
