@@ -29,6 +29,17 @@ type Notifier[T any] interface {
 	Notify(ctx context.Context, peer string, id T) error
 }
 
+// Gate reports whether id is busy — mid-operation in a way that makes acting on
+// it right now unwelcome. A busy id's evaluation is deferred and retried rather
+// than acted on, so the pending change fires shortly after the id goes idle
+// instead of parking until some external tick. reason is logged with each
+// deferral. The gate is politeness and latency only, never a correctness
+// backstop: gate-to-act is a TOCTOU window, and the consumer's own guards stay
+// authoritative. Implementations must be safe for concurrent use.
+type Gate[T any] interface {
+	Busy(ctx context.Context, id T) (busy bool, reason string, err error)
+}
+
 // DigestFunc returns a stable map key for id — the key under which the engine
 // tracks the per-id debounce timer and the last-acted-on fingerprint. It MUST be
 // stable: the same id must always yield the same key, or debounce coalescing and
@@ -68,27 +79,58 @@ type Engine[T any] struct {
 	debounce time.Duration
 	hosts    []string
 	newTimer newTimerFunc
+	now      func() time.Time
 
-	mu         sync.Mutex
-	timers     map[string]timer  // per-id debounce timer, keyed by digest
-	lastDigest map[string]string // per-id last-acted-on fingerprint, keyed by digest
+	gate         Gate[T]
+	gateRetry    time.Duration
+	gateMaxDefer time.Duration
+
+	mu            sync.Mutex
+	timers        map[string]timer     // per-id debounce timer, keyed by digest
+	lastDigest    map[string]string    // per-id last-acted-on fingerprint, keyed by digest
+	deferredSince map[string]time.Time // per-id first busy deferral, keyed by digest
+}
+
+// Option customizes an Engine beyond NewEngine's required boundaries.
+type Option[T any] func(*Engine[T])
+
+// WithGate installs g as the engine's busy gate. Before an evaluation compares
+// and records the fingerprint, the engine asks g whether the id is busy; while
+// it is, the evaluation defers — nothing is recorded or notified, and the
+// per-id timer re-arms at the retry cadence (the debounce window when retry is
+// zero) so the pending change stays live until the id goes idle. An id deferred
+// for longer than maxDefer fires through anyway, so a persistently busy gate
+// can only delay a change, never park it; the deferral clock resets whenever an
+// evaluation proceeds. A gate error is logged and treated as not busy.
+func WithGate[T any](g Gate[T], retry, maxDefer time.Duration) Option[T] {
+	return func(e *Engine[T]) {
+		e.gate = g
+		e.gateRetry = retry
+		e.gateMaxDefer = maxDefer
+	}
 }
 
 // NewEngine builds an engine over the given boundaries. resolver resolves an id's
 // current fingerprint, notifier tells one peer about an id, digest maps an id to
 // its stable key, debounce is the settle window a burst must be quiet for before
 // one evaluate runs, and hosts are the peers fanned out to on a real change.
-func NewEngine[T any](resolver Resolver[T], notifier Notifier[T], digest DigestFunc[T], debounce time.Duration, hosts []string) *Engine[T] {
-	return &Engine[T]{
-		resolver:   resolver,
-		notifier:   notifier,
-		digest:     digest,
-		debounce:   debounce,
-		hosts:      hosts,
-		newTimer:   realNewTimer,
-		timers:     make(map[string]timer),
-		lastDigest: make(map[string]string),
+func NewEngine[T any](resolver Resolver[T], notifier Notifier[T], digest DigestFunc[T], debounce time.Duration, hosts []string, opts ...Option[T]) *Engine[T] {
+	e := &Engine[T]{
+		resolver:      resolver,
+		notifier:      notifier,
+		digest:        digest,
+		debounce:      debounce,
+		hosts:         hosts,
+		newTimer:      realNewTimer,
+		now:           time.Now,
+		timers:        make(map[string]timer),
+		lastDigest:    make(map[string]string),
+		deferredSince: make(map[string]time.Time),
 	}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
 // OnEvent records an event for id. It (re)arms a single per-id debounce timer so a
@@ -138,9 +180,15 @@ func (e *Engine[T]) fire(ctx context.Context, id T) {
 // fingerprint, and on a real change records the new fingerprint *before* notifying
 // peers (so the self-induced event that follows is recognized as a no-op) then
 // notifies every peer concurrently. A resolver error is logged and skipped
-// silently; it never crashes or notifies.
+// silently; it never crashes or notifies. A gated engine consults the gate first:
+// a busy id defers — no resolve, no record, no notify — and re-arms itself, so
+// the change stays pending rather than parked.
 func (e *Engine[T]) evaluate(ctx context.Context, id T) {
 	key := e.digest(id)
+	if e.gate != nil && e.deferBusy(ctx, id, key) {
+		return
+	}
+
 	fingerprint, err := e.resolver.Resolve(ctx, id)
 	if err != nil {
 		log.Printf("watch: %s: resolve: %v", key, err)
@@ -156,6 +204,60 @@ func (e *Engine[T]) evaluate(ctx context.Context, id T) {
 	e.mu.Unlock()
 
 	e.notifyPeers(ctx, id)
+}
+
+// deferBusy decides whether this evaluation of id defers. A busy id inside the
+// maxDefer window logs the reason, re-arms the per-id timer at the retry cadence,
+// and reports true; the caller returns without recording or notifying. A gate
+// error is logged and treated as not busy; an id deferred longer than maxDefer
+// fires through. Whenever the evaluation proceeds, the id's deferral clock
+// resets, so a once-deferred id earns a fresh window the next time it is busy.
+func (e *Engine[T]) deferBusy(ctx context.Context, id T, key string) bool {
+	busy, reason, err := e.gate.Busy(ctx, id)
+	if err != nil {
+		log.Printf("watch: %s: gate: %v", key, err)
+		busy = false
+	}
+
+	e.mu.Lock()
+	if !busy {
+		delete(e.deferredSince, key)
+		e.mu.Unlock()
+		return false
+	}
+	since, ok := e.deferredSince[key]
+	if !ok {
+		since = e.now()
+		e.deferredSince[key] = since
+	}
+	if e.now().Sub(since) > e.gateMaxDefer {
+		delete(e.deferredSince, key)
+		e.mu.Unlock()
+		return false
+	}
+	e.mu.Unlock()
+
+	log.Printf("watch: %s: deferred: %s", key, reason)
+	e.rearm(ctx, id, key)
+	return true
+}
+
+// rearm schedules the deferred id's next evaluation at the retry cadence,
+// falling back to the debounce window when no retry cadence was configured.
+func (e *Engine[T]) rearm(ctx context.Context, id T, key string) {
+	d := e.gateRetry
+	if d == 0 {
+		d = e.debounce
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if t, ok := e.timers[key]; ok {
+		t.Reset(d)
+		return
+	}
+	e.timers[key] = e.newTimer(d, func() {
+		e.fire(ctx, id)
+	})
 }
 
 // notifyPeers fans the notification out to every peer concurrently. A down or

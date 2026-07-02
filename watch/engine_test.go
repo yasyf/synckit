@@ -1,8 +1,12 @@
 package watch
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +26,10 @@ func itemDigest(it item) string { return it.key }
 
 func newTestEngine(resolver Resolver[item], notifier Notifier[item], debounce time.Duration, hosts []string) *Engine[item] {
 	return NewEngine[item](resolver, notifier, itemDigest, debounce, hosts)
+}
+
+func newGatedEngine(resolver Resolver[item], notifier Notifier[item], debounce time.Duration, hosts []string, gate Gate[item], retry, maxDefer time.Duration) *Engine[item] {
+	return NewEngine[item](resolver, notifier, itemDigest, debounce, hosts, WithGate(gate, retry, maxDefer))
 }
 
 // fakeResolver returns scripted fingerprints per call, advancing through the script
@@ -114,6 +122,32 @@ func (t *fakeTimer) resetCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.resets
+}
+
+// fakeGate scripts the busy gate. busy/reason/err are read per call under mu so a
+// test can flip the gate between evaluations; calls counts consultations.
+type fakeGate struct {
+	mu     sync.Mutex
+	busy   bool
+	reason string
+	err    error
+	calls  int
+}
+
+func (g *fakeGate) Busy(_ context.Context, _ item) (bool, string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.calls++
+	if g.err != nil {
+		return false, "", g.err
+	}
+	return g.busy, g.reason, nil
+}
+
+func (g *fakeGate) setBusy(busy bool) {
+	g.mu.Lock()
+	g.busy = busy
+	g.mu.Unlock()
 }
 
 func TestDebounceCoalescesBurstIntoOneEvaluation(t *testing.T) {
@@ -329,5 +363,246 @@ func TestNoPeersNoNotifyButLastDigestTracked(t *testing.T) {
 	eng.mu.Unlock()
 	if got != "fpA" {
 		t.Errorf("lastDigest = %q, want fpA tracked even with no peers", got)
+	}
+}
+
+func TestBusyGateDefersWithoutRecordingOrNotifying(t *testing.T) {
+	// A busy id must not be recorded as acted on: recording while deferred would
+	// park the change forever (the next evaluate would dedupe against it). The
+	// deferred evaluation logs the reason, re-arms at the retry cadence, and once
+	// the gate goes idle the same pending fingerprint still fires.
+	resolver := &fakeResolver{fingerprints: []string{"fpA"}}
+	notifier := &fakeNotifier{}
+	gate := &fakeGate{busy: true, reason: "sync in flight"}
+	eng := newGatedEngine(resolver, notifier, time.Hour, []string{"peer1"}, gate, 5*time.Second, time.Hour)
+
+	var armed []time.Duration
+	eng.newTimer = func(d time.Duration, fn func()) timer {
+		armed = append(armed, d)
+		return &fakeTimer{fn: fn}
+	}
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	ctx := context.Background()
+	it := testItem()
+
+	eng.evaluate(ctx, it)
+
+	if got := len(notifier.snapshot()); got != 0 {
+		t.Fatalf("notifies = %d, want 0 while busy", got)
+	}
+	eng.mu.Lock()
+	_, recorded := eng.lastDigest[testKey]
+	eng.mu.Unlock()
+	if recorded {
+		t.Fatal("lastDigest recorded while deferred (parks the pending change)")
+	}
+	if len(armed) != 1 || armed[0] != 5*time.Second {
+		t.Fatalf("re-armed timers = %v, want exactly one at the 5s retry cadence", armed)
+	}
+	if !strings.Contains(buf.String(), "watch: alpha: deferred: sync in flight") {
+		t.Errorf("log = %q, want the deferral logged with its reason", buf.String())
+	}
+
+	gate.setBusy(false)
+	eng.evaluate(ctx, it)
+
+	if got := len(notifier.snapshot()); got != 1 {
+		t.Fatalf("notifies = %d, want 1 (pending fingerprint fires once idle)", got)
+	}
+	eng.mu.Lock()
+	got := eng.lastDigest[testKey]
+	eng.mu.Unlock()
+	if got != "fpA" {
+		t.Errorf("lastDigest = %q, want fpA", got)
+	}
+}
+
+func TestGateFlipsIdleFiresOnceWithPendingFingerprint(t *testing.T) {
+	// Through the timer path: the debounce lapses against a busy gate, the
+	// evaluation defers and re-arms; the retry lapses against an idle gate and
+	// the pending change fires exactly once to every peer.
+	resolver := &fakeResolver{fingerprints: []string{"fpPending"}}
+	notifier := &fakeNotifier{}
+	gate := &fakeGate{busy: true, reason: "op in progress"}
+	eng := newGatedEngine(resolver, notifier, time.Hour, []string{"peer1", "peer2"}, gate, time.Second, time.Hour)
+
+	var timers []*fakeTimer
+	eng.newTimer = func(_ time.Duration, fn func()) timer {
+		ft := &fakeTimer{fn: fn}
+		timers = append(timers, ft)
+		return ft
+	}
+
+	ctx := context.Background()
+	it := testItem()
+
+	eng.OnEvent(ctx, it)
+	timers[0].fire() // debounce lapses; the evaluation defers and re-arms
+
+	if got := len(notifier.snapshot()); got != 0 {
+		t.Fatalf("notifies = %d, want 0 while busy", got)
+	}
+	if len(timers) != 2 {
+		t.Fatalf("timers armed = %d, want 2 (debounce + retry)", len(timers))
+	}
+
+	gate.setBusy(false)
+	timers[1].fire() // retry lapses against an idle gate
+
+	calls := notifier.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("notifies = %d, want 2 (both peers, exactly once)", len(calls))
+	}
+	for _, c := range calls {
+		if c.key != testKey {
+			t.Errorf("notify key = %q, want %q", c.key, testKey)
+		}
+	}
+	eng.mu.Lock()
+	got := eng.lastDigest[testKey]
+	eng.mu.Unlock()
+	if got != "fpPending" {
+		t.Errorf("lastDigest = %q, want fpPending", got)
+	}
+}
+
+func TestMaxDeferLapseFiresThroughAndResetsDeferState(t *testing.T) {
+	// A persistently busy gate delays a change at most maxDefer, then the
+	// evaluation fires through (records + notifies). Firing through resets the
+	// per-id defer state: the next cycle earns a fresh deferral window instead of
+	// firing through forever.
+	resolver := &fakeResolver{fingerprints: []string{"fpA", "fpB"}}
+	notifier := &fakeNotifier{}
+	gate := &fakeGate{busy: true, reason: "still busy"}
+	eng := newGatedEngine(resolver, notifier, time.Hour, []string{"peer1"}, gate, time.Second, time.Minute)
+
+	eng.newTimer = func(_ time.Duration, fn func()) timer {
+		return &fakeTimer{fn: fn}
+	}
+	current := time.Unix(1000, 0)
+	eng.now = func() time.Time { return current }
+
+	ctx := context.Background()
+	it := testItem()
+
+	eng.evaluate(ctx, it) // first busy evaluation starts the defer window
+	if got := len(notifier.snapshot()); got != 0 {
+		t.Fatalf("notifies = %d, want 0 on first deferral", got)
+	}
+
+	current = current.Add(2 * time.Minute)
+	eng.evaluate(ctx, it) // still busy, but past maxDefer: fires through
+	if got := len(notifier.snapshot()); got != 1 {
+		t.Fatalf("notifies = %d, want 1 (fired through after maxDefer)", got)
+	}
+	eng.mu.Lock()
+	recorded := eng.lastDigest[testKey]
+	deferred := len(eng.deferredSince)
+	eng.mu.Unlock()
+	if recorded != "fpA" {
+		t.Errorf("lastDigest = %q, want fpA recorded on fire-through", recorded)
+	}
+	if deferred != 0 {
+		t.Errorf("deferredSince entries = %d, want 0 after fire-through", deferred)
+	}
+
+	eng.evaluate(ctx, it) // next cycle: still busy, defers normally again
+	if got := len(notifier.snapshot()); got != 1 {
+		t.Fatalf("notifies = %d, want 1 (fresh window defers again, no fire-through)", got)
+	}
+
+	gate.setBusy(false)
+	eng.evaluate(ctx, it)
+	if got := len(notifier.snapshot()); got != 2 {
+		t.Fatalf("notifies = %d, want 2 (deferred change fires once idle)", got)
+	}
+	eng.mu.Lock()
+	recorded = eng.lastDigest[testKey]
+	eng.mu.Unlock()
+	if recorded != "fpB" {
+		t.Errorf("lastDigest = %q, want fpB", recorded)
+	}
+}
+
+func TestDeferRetryZeroRearmsAtDebounce(t *testing.T) {
+	resolver := &fakeResolver{fingerprints: []string{"fpA"}}
+	notifier := &fakeNotifier{}
+	gate := &fakeGate{busy: true, reason: "busy"}
+	eng := newGatedEngine(resolver, notifier, 42*time.Minute, []string{"peer1"}, gate, 0, time.Hour)
+
+	var armed []time.Duration
+	eng.newTimer = func(d time.Duration, fn func()) timer {
+		armed = append(armed, d)
+		return &fakeTimer{fn: fn}
+	}
+
+	eng.evaluate(context.Background(), testItem())
+
+	if len(armed) != 1 || armed[0] != 42*time.Minute {
+		t.Fatalf("re-armed timers = %v, want exactly one at the 42m debounce fallback", armed)
+	}
+}
+
+func TestNilGateBehaviorUnchanged(t *testing.T) {
+	// An engine built without WithGate must behave exactly as before the gate
+	// existed: evaluate records and notifies, the echo dedupes, and no defer
+	// state is ever tracked.
+	resolver := &fakeResolver{fingerprints: []string{"fpA", "fpA"}}
+	notifier := &fakeNotifier{}
+	eng := newTestEngine(resolver, notifier, time.Hour, []string{"peer1"})
+	ctx := context.Background()
+	it := testItem()
+
+	eng.evaluate(ctx, it)
+	eng.evaluate(ctx, it)
+
+	if got := len(notifier.snapshot()); got != 1 {
+		t.Fatalf("notifies = %d, want 1 (notify once, echo deduped)", got)
+	}
+	eng.mu.Lock()
+	recorded := eng.lastDigest[testKey]
+	deferred := len(eng.deferredSince)
+	eng.mu.Unlock()
+	if recorded != "fpA" {
+		t.Errorf("lastDigest = %q, want fpA", recorded)
+	}
+	if deferred != 0 {
+		t.Errorf("deferredSince entries = %d, want 0 without a gate", deferred)
+	}
+}
+
+func TestGateErrorLoggedTreatedNotBusy(t *testing.T) {
+	resolver := &fakeResolver{fingerprints: []string{"fpA"}}
+	notifier := &fakeNotifier{}
+	gate := &fakeGate{err: errors.New("gate down")}
+	eng := newGatedEngine(resolver, notifier, time.Hour, []string{"peer1"}, gate, time.Second, time.Hour)
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	eng.evaluate(context.Background(), testItem())
+
+	if got := len(notifier.snapshot()); got != 1 {
+		t.Fatalf("notifies = %d, want 1 (gate error treated as not busy)", got)
+	}
+	eng.mu.Lock()
+	recorded := eng.lastDigest[testKey]
+	eng.mu.Unlock()
+	if recorded != "fpA" {
+		t.Errorf("lastDigest = %q, want fpA", recorded)
+	}
+	if !strings.Contains(buf.String(), "watch: alpha: gate: gate down") {
+		t.Errorf("log = %q, want it to contain the gate error", buf.String())
+	}
+	gate.mu.Lock()
+	calls := gate.calls
+	gate.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("gate consulted %d times, want 1", calls)
 	}
 }
