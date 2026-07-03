@@ -5,6 +5,8 @@ source = "github:yasyf/cc-notes@latest"
 source = "github:yasyf/cc-context@v0.1.1"
 commit = "cfa0dd9c52197f02d1e189246751684e8ff84838"
 
+[packs.fixes]
+
 [packs.general]
 
 [packs.go]
