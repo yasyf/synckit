@@ -436,3 +436,12 @@ func TestPeerUIDMatchesCurrentUID(t *testing.T) {
 		t.Errorf("got ok=%v result=%v, want ok=true result=pong", resp.OK, resp.Result)
 	}
 }
+
+func TestPeerPIDAbsentOnBareContext(t *testing.T) {
+	if pid, ok := PeerPID(context.Background()); ok || pid != 0 {
+		t.Errorf("PeerPID(context.Background()) = (%d, %v), want (0, false)", pid, ok)
+	}
+	if sid, ok := PeerSID(context.Background()); ok || sid != 0 {
+		t.Errorf("PeerSID(context.Background()) = (%d, %v), want (0, false)", sid, ok)
+	}
+}

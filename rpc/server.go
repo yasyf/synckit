@@ -11,6 +11,28 @@ import (
 	"time"
 )
 
+type peerPIDKey struct{}
+
+type peerSIDKey struct{}
+
+// PeerPID returns the PID of the client process on the unix-socket connection that
+// carried the request, captured via LOCAL_PEERPID when the connection was accepted.
+// It reports false when no PID was captured: the sockopt failed or is unsupported,
+// or the handler ctx never passed through Serve (ServeConn, a bare ctx in tests).
+func PeerPID(ctx context.Context) (int, bool) {
+	pid, ok := ctx.Value(peerPIDKey{}).(int)
+	return pid, ok
+}
+
+// PeerSID returns the session ID of the client process on the unix-socket connection
+// that carried the request, derived via getsid(2) from the PID captured at accept.
+// It reports false when no session ID was captured: the peer PID was unavailable or
+// getsid failed, or the handler ctx never passed through Serve.
+func PeerSID(ctx context.Context) (int, bool) {
+	sid, ok := ctx.Value(peerSIDKey{}).(int)
+	return sid, ok
+}
+
 // Listen binds a unix socket at sockPath, first unlinking any stale socket left by a
 // crashed daemon so a relaunch does not fail with EADDRINUSE.
 func Listen(sockPath string) (net.Listener, error) {
@@ -28,8 +50,9 @@ func Listen(sockPath string) (net.Listener, error) {
 // returns nil. Canceling ctx closes ln, which unblocks Accept; it does not close ln
 // itself, since the caller owns the listener. Each connection is checked for a
 // same-UID peer before any byte is read, then bounded by ReadTimeout and MaxLine;
-// the dispatch ctx is canceled when the client connection closes, so an abandoned
-// request never runs to the full DispatchTimeout.
+// the dispatch ctx carries the peer PID and session ID (see PeerPID, PeerSID) and is
+// canceled when the client connection closes, so an abandoned request never runs to
+// the full DispatchTimeout.
 func Serve(ctx context.Context, ln net.Listener, d *Dispatcher) error {
 	go func() {
 		<-ctx.Done()
@@ -57,6 +80,13 @@ func handleConn(ctx context.Context, conn *net.UnixConn, d *Dispatcher) {
 	case uid != os.Getuid():
 		writeResponse(conn, &Response{OK: false, Error: fmt.Sprintf("peer uid %d is not %d", uid, os.Getuid())})
 		return
+	}
+
+	if pid, err := peerPID(conn); err == nil {
+		ctx = context.WithValue(ctx, peerPIDKey{}, pid)
+		if sid, err := sidOf(pid); err == nil {
+			ctx = context.WithValue(ctx, peerSIDKey{}, sid)
+		}
 	}
 
 	if err := conn.SetReadDeadline(time.Now().Add(ReadTimeout)); err != nil {
