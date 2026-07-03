@@ -304,11 +304,11 @@ func TestStdioTransportResetRaceSoak(t *testing.T) {
 	stop := make(chan struct{})
 	for range runtime.GOMAXPROCS(0) * 2 {
 		go func() {
-			for { //nolint:staticcheck // SA5004: spinning is the point — starve the scheduler.
+			for {
 				select {
 				case <-stop:
 					return
-				default:
+				default: //nolint:staticcheck // SA5004: spinning is the point — starve the scheduler.
 				}
 			}
 		}()
