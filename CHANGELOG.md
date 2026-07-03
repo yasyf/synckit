@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a tab switch can change how many bindings show, but the router reserved a fixed single row and
   let the overflow shove the view past the last terminal line; it now measures the help height live
   and reflows the active screen whenever help toggles or the active tab changes.
+- The Hosts tab's removal confirmation no longer pushes the list past the terminal. The confirm box
+  stacked three rows below a body that already filled the height budget; opening or closing the
+  prompt now recomputes the split so its box is reserved out of the list instead of overflowing.
 
 ### Added
 - Busy-awareness through the watch layer. `watch.Gate` (with `watch.WithGate`) teaches the engine

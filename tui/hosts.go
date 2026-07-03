@@ -63,6 +63,10 @@ type hostsModel struct {
 // for the verify legend and status line.
 const hostsReserve = 2
 
+// confirmReserve is the extra rows an open confirmation prompt claims below the
+// split: its single prompt line plus the confirm box's top and bottom borders.
+const confirmReserve = 3
+
 // hostConfirmState is an open removal confirmation awaiting its target.
 type hostConfirmState struct {
 	prompt string
@@ -142,8 +146,7 @@ func (m hostsModel) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail = SplitDims(msg.Width, msg.Height-FilterBarLines-hostsReserve)
-		m.list.SetSize(m.mdListW, m.mdHeight)
+		m.resizeSplit()
 		m.logVP = viewport.New(msg.Width, max(1, msg.Height-2))
 		cmd := m.refreshHosts()
 		return m, cmd
@@ -226,9 +229,11 @@ func (m hostsModel) handleKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
 		case key.Matches(msg, m.keys.Confirm):
 			target := m.confirm.target
 			m.confirm = nil
+			m.resizeSplit()
 			return m, removeHostCmd(target)
 		case key.Matches(msg, m.keys.Cancel):
 			m.confirm = nil
+			m.resizeSplit()
 			return m, nil
 		}
 		return m, nil
@@ -275,6 +280,18 @@ func (m hostsModel) handleFilterKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
 	m.filter, icmd = m.filter.Update(msg)
 	rcmd := m.refreshHosts()
 	return m, tea.Batch(icmd, rcmd)
+}
+
+// resizeSplit recomputes the master-detail dimensions for the stored terminal
+// size, widening the reserve while a confirmation is open so its box never pushes
+// the layout past the last terminal row.
+func (m *hostsModel) resizeSplit() {
+	reserve := hostsReserve
+	if m.confirm != nil {
+		reserve += confirmReserve
+	}
+	m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail = SplitDims(m.width, m.height-FilterBarLines-reserve)
+	m.list.SetSize(m.mdListW, m.mdHeight)
 }
 
 // refreshHosts recomputes the visible list from the canonical slice under the
@@ -359,6 +376,7 @@ func (m hostsModel) startRemove() (Screen, tea.Cmd) {
 		prompt: fmt.Sprintf("Remove host %s? (y/N)", it.target),
 		target: it.target,
 	}
+	m.resizeSplit()
 	return m, nil
 }
 
