@@ -1,48 +1,121 @@
-# synckit
+# ![synckit](docs/assets/readme-banner.webp)
 
-![synckit banner](docs/assets/readme-banner.webp)
+**Your file watcher just synced its own write. Again.** synckit, the Go substrate under reposync and cookiesync, ships anti-echo watching, unix-socket RPC, a host mesh, and flock-backed state, each written once.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/yasyf/synckit/ci.yml?branch=main&label=ci)](https://github.com/yasyf/synckit/actions/workflows/ci.yml)
-[![License: PolyForm-Noncommercial-1.0.0](https://img.shields.io/badge/License-PolyForm--Noncommercial--1.0.0-blue.svg)](https://github.com/yasyf/synckit/blob/main/LICENSE)
+[![CI](https://github.com/yasyf/synckit/actions/workflows/ci.yml/badge.svg)](https://github.com/yasyf/synckit/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/yasyf/synckit)](https://github.com/yasyf/synckit/releases)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm--NC--1.0.0-blue)](LICENSE)
 
-synckit is the shared Go substrate behind [reposync](https://github.com/yasyf/reposync) and cookiesync — the host-mesh registry, convergent state store, unix-socket RPC, launchd service manager, and anti-echo watch engine that any "keep X in sync across my machines" tool needs. Both tools import one substrate, so the wire formats, lock semantics, and daemon plumbing that must stay byte-identical for two daemons to interoperate are defined once and tested once.
-
-## Install
+## Get started
 
 ```bash
 go get github.com/yasyf/synckit
 ```
 
-synckit ships the `synckitd` daemon (`brew install yasyf/tap/synckitd`) — the one per-machine daemon that drives consumers via declarative manifests — and is also importable as a library: pull in the substrate packages your own tool needs.
-
-## Quickstart
-
-A unix-socket RPC server with the peer-UID check, 16 MiB line bound, and read/dispatch timeouts already wired:
+A unix-socket RPC server — peer-UID check, 16 MiB line bound, and read/dispatch timeouts already wired:
 
 ```go
-import "github.com/yasyf/synckit/rpc"
+package main
 
-d := rpc.NewDispatcher()
-d.Register("ping", func(ctx context.Context, p map[string]any) (any, error) {
-    return map[string]any{"pong": p["msg"]}, nil
-})
+import (
+	"context"
+	"fmt"
 
-ln, _ := rpc.Listen("/tmp/app.sock")
-go rpc.Serve(ctx, ln, d)
+	"github.com/yasyf/synckit/rpc"
+)
 
-resp, _ := rpc.Call(ctx, "/tmp/app.sock", &rpc.Request{
-    Method: "ping",
-    Params: map[string]any{"msg": "hi"},
-})
-// resp.Result == map[string]any{"pong": "hi"}
+func main() {
+	ctx := context.Background()
+
+	d := rpc.NewDispatcher()
+	d.Register("ping", func(ctx context.Context, p map[string]any) (any, error) {
+		return map[string]any{"pong": p["msg"]}, nil
+	})
+
+	ln, _ := rpc.Listen("/tmp/app.sock")
+	go rpc.Serve(ctx, ln, d)
+
+	resp, _ := rpc.Call(ctx, "/tmp/app.sock", &rpc.Request{
+		Method: "ping",
+		Params: map[string]any{"msg": "hi"},
+	})
+	fmt.Printf("resp.Result = %v\n", resp.Result)
+}
 ```
 
-## What's inside
+```console
+$ go run .
+resp.Result = map[pong:hi]
+```
 
-- A `{method,params}` unix-socket RPC with a peer-UID check, a 16 MiB line bound, and read/dispatch timeouts.
-- A host-mesh registry with Tailscale and Bonjour discovery and an SSH transport.
-- A flock-guarded state store where each tool writes only its own keys and preserves every sibling key byte-for-byte.
-- A canonical Go-duration codec and the fan-out and timeout constants two daemons must agree on, defined once.
-- A generic anti-echo watch engine that records the applied fingerprint before it notifies, so it never chases its own writes.
+(Real output; [`docs/scripts/demo.sh`](docs/scripts/demo.sh) regenerates it.)
 
-Two tools import one substrate, so none of this can drift between them.
+Driving with an agent? Paste this:
+
+```text
+Run `go get github.com/yasyf/synckit`, then use its rpc package to stand up a
+unix-socket server: register a ping handler on rpc.NewDispatcher, rpc.Listen on
+a socket, rpc.Serve it, and rpc.Call it back. Keep the built-in peer-UID check,
+16 MiB line bound, and read/dispatch timeouts as shipped.
+```
+
+---
+
+## Use cases
+
+### Build a keep-X-in-sync daemon without rewriting the plumbing
+
+Every "keep X in sync across my machines" tool re-implements the same daemon: a socket server, host discovery, launchd plists, a reconcile tick, a watch supervisor. Ship a manifest instead:
+
+```bash
+brew install yasyf/tap/synckitd
+synckitd register manifest.json
+```
+
+`synckitd` installs the manifest under `~/.config/synckit/manifests` and drives your tool's typed sync service — list, reconcile, sync — over the transport the manifest declares: a unix socket, a spawned child's stdio, or ssh to a peer. The daemon never imports your code.
+
+### Watch files without chasing your own writes
+
+Your daemon writes a file, fsnotify fires, the watcher syncs the write it just made, and around it goes. The watch engine breaks the loop:
+
+```go
+eng := watch.NewEngine(resolver, notifier, digest, 2*time.Second, peers)
+eng.OnEvent(ctx, id)
+```
+
+The engine debounces, dedupes on the resolved fingerprint, and records what it applied *before* notifying peers — so the echo of its own write resolves to the recorded fingerprint and dies there instead of fanning out again.
+
+### Merge state from every peer without a write storm
+
+Push-based sync between two daemons is a feedback loop: each write triggers the other's. `converge.Reconcile` is pull-only:
+
+```go
+results, err := converge.Reconcile(ctx, lock, driver, fetcher, peers, origin)
+```
+
+A pass fetches every peer's registry read-only, folds them in with the CRDT merge (a LWW-element-set join), and performs exactly one write: the local `SaveRegistry`. Merge in any order and every replica lands on the identical registry; an unreachable peer is logged and skipped, never fatal.
+
+## The packages
+
+| Package | What it holds |
+|---|---|
+| `rpc` | Newline-JSON `{method,params}` over a unix socket: peer-UID check, 16 MiB line bound, read/dispatch timeouts |
+| `syncservice` | The typed sync contract over `rpc` (capabilities, list, reconcile, sync, get_state) plus the client and its three transports |
+| `watch` | The generic anti-echo watch engine: debounce, fingerprint dedupe, record-before-notify, concurrent peer fan-out, busy gating |
+| `watchbackend` | Filesystem events mapped to watch ids, over fsnotify or watchman |
+| `hostregistry` | The host mesh: reachability detection, Tailscale and Bonjour discovery, an ssh runner, flock-guarded `state.json` |
+| `cregistry` | LWW-element-set CRDT registry with per-item payloads; pure and clock-free |
+| `converge` | The pull-only convergent-reconcile pass over a `cregistry` registry |
+| `manifest` | The JSON manifest a consumer registers, plus discovery and validation |
+| `daemon` | The `synckitd` command tree: serve, reconcile, register, status |
+| `service` | macOS LaunchAgent manager: deterministic plists, an injected launchctl boundary |
+| `codec` | Config-free JSON codecs, e.g. the canonical Go-duration string |
+| `tui` | Shared bubbletea terminal UI: a tab router plus the built-in Hosts tab |
+
+reposync and cookiesync import this one substrate, so the wire formats, lock semantics, and fan-out constants two daemons must agree on byte-for-byte are defined once and tested once.
+
+## The synckitd daemon
+
+`synckitd` is the one per-machine daemon behind every consumer: it owns the shared host mesh, the RPC socket, the reconcile tick, and the watch supervisor. `synckitd status` prints the mesh, registered manifests, socket path, and daemon liveness; `synckitd --help` carries the full command surface.
+
+Status: pre-1.0 — the API still moves between minors. Licensed under [PolyForm Noncommercial 1.0.0](LICENSE).
