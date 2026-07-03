@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yasyf/synckit/rpc"
 )
@@ -269,6 +272,58 @@ func TestStdioTransportRealSubprocess(t *testing.T) {
 	}
 	if _, err := tx.Do(ctx, &rpc.Request{Method: MethodCapabilities}); err == nil {
 		t.Fatal("Do after Close returned nil, want a closed error")
+	}
+}
+
+// TestStdioTransportCtxTimeout drives Do against a child that never answers, so ctx
+// expires and reset() tears the child down while the exchange goroutine is still in
+// flight; each following Do re-spawns a fresh child. Unfixed, the abandoned goroutine
+// read receiver pipe fields reset() had already cleared and crashed the daemon on a
+// nil dereference in the field.
+func TestStdioTransportCtxTimeout(t *testing.T) {
+	tx := Stdio("sleep", "9999")
+	t.Cleanup(func() { _ = tx.Close() })
+
+	for range 25 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		_, err := tx.Do(ctx, &rpc.Request{Method: MethodCapabilities})
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Do = %v, want context.DeadlineExceeded", err)
+		}
+	}
+}
+
+// TestStdioTransportResetRaceSoak is a canary for the reset()-vs-exchange race: an
+// already-expired ctx plus spinner goroutines starving the scheduler delay exchange
+// past reset()'s teardown, which unfixed panicked on a nil pipe field and tripped
+// the race detector. The starved interleaving is probabilistic per iteration —
+// deterministically green on correct code, while a reintroduced race surfaces
+// within a few CI runs rather than every run.
+func TestStdioTransportResetRaceSoak(t *testing.T) {
+	stop := make(chan struct{})
+	for range runtime.GOMAXPROCS(0) * 2 {
+		go func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+			}
+		}()
+	}
+	defer close(stop)
+
+	tx := Stdio("sleep", "9999")
+	t.Cleanup(func() { _ = tx.Close() })
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	for range 200 {
+		if _, err := tx.Do(ctx, &rpc.Request{Method: MethodCapabilities}); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Do = %v, want context.DeadlineExceeded", err)
+		}
 	}
 }
 

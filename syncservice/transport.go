@@ -93,8 +93,11 @@ func (t *cmdTransport) Do(ctx context.Context, req *rpc.Request) (*Response, err
 		err  error
 	}
 	done := make(chan result, 1)
+	// Snapshot the pipes for the goroutine: when ctx expires first, Do returns and
+	// reset() clears the receiver fields while exchange may still be running.
+	in, out := t.in, t.out
 	go func() {
-		resp, err := t.exchange(line)
+		resp, err := exchange(in, out, line)
 		done <- result{resp: resp, err: err}
 	}()
 
@@ -109,22 +112,6 @@ func (t *cmdTransport) Do(ctx context.Context, req *rpc.Request) (*Response, err
 		}
 		return r.resp, nil
 	}
-}
-
-// exchange writes one request line plus '\n' to the child and reads one response
-// line. The caller holds mu, so this is the only writer/reader of the pipe.
-func (t *cmdTransport) exchange(line []byte) (*Response, error) {
-	if _, err := t.in.Write(line); err != nil {
-		return nil, fmt.Errorf("write request: %w", err)
-	}
-	if _, err := t.in.Write([]byte{'\n'}); err != nil {
-		return nil, fmt.Errorf("write request: %w", err)
-	}
-	respLine, err := rpc.ReadLine(t.out, rpc.MaxLine)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	return decodeEnvelope(respLine)
 }
 
 // start spawns the child and wires its stdio if it is not already running. The caller
@@ -202,6 +189,26 @@ func (t *cmdTransport) Close() error {
 		return fmt.Errorf("wait for %s to exit: %w", t.name, err)
 	}
 	return nil
+}
+
+// exchange writes one request line plus '\n' to the child and reads one response
+// line. It runs on a goroutine that can outlive Do's mu critical section — a ctx
+// expiry abandons it mid-flight — so it takes its generation's pipes as parameters
+// rather than reading receiver fields that reset() clears concurrently. reset's
+// kill and reap close the pipes, so an abandoned exchange fails its next I/O and
+// exits through the buffered done channel.
+func exchange(in io.Writer, out *bufio.Reader, line []byte) (*Response, error) {
+	if _, err := in.Write(line); err != nil {
+		return nil, fmt.Errorf("write request: %w", err)
+	}
+	if _, err := in.Write([]byte{'\n'}); err != nil {
+		return nil, fmt.Errorf("write request: %w", err)
+	}
+	respLine, err := rpc.ReadLine(out, rpc.MaxLine)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	return decodeEnvelope(respLine)
 }
 
 // decodeEnvelope parses one response line into a [Response], keeping its result as
