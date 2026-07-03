@@ -11,12 +11,10 @@ import (
 	"github.com/yasyf/synckit/hostregistry"
 )
 
-// headerLines and helpLines are the fixed chrome rows the router reserves above
-// and below the active screen when laying out its inner height.
-const (
-	headerLines = 1
-	helpLines   = 1
-)
+// headerLines is the fixed chrome row the router reserves above the active
+// screen; the help bar below is measured live since expanded help grows with the
+// active screen's bindings.
+const headerLines = 1
 
 // rootModel is the tab router over the consumer's content screens and the shared
 // hosts screen.
@@ -69,20 +67,11 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		inner := tea.WindowSizeMsg{Width: msg.Width, Height: m.innerHeight()}
-		cmds := make([]tea.Cmd, 0, len(m.screens))
-		for i := range m.screens {
-			s, cmd := m.screens[i].Update(inner)
-			m.screens[i] = s
-			cmds = append(cmds, cmd)
-		}
-		return m, tea.Batch(cmds...)
+		return m, m.resizeScreens()
 
 	case tea.KeyMsg:
 		if m.screens[m.active].WantsKey(msg) {
-			s, cmd := m.screens[m.active].Update(msg)
-			m.screens[m.active] = s
-			return m, cmd
+			return m, m.updateActive(msg)
 		}
 		switch {
 		case key.Matches(msg, m.keys.Quit):
@@ -90,28 +79,45 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case key.Matches(msg, m.keys.NextTab):
 			m.active = (m.active + 1) % len(m.screens)
+			cmd := m.resizeScreens()
 			if !m.inited[m.active] {
 				m.inited[m.active] = true
-				return m, m.screens[m.active].Init()
+				return m, tea.Batch(cmd, m.screens[m.active].Init())
 			}
-			return m, nil
+			return m, cmd
 		case key.Matches(msg, m.keys.Help):
 			m.help.ShowAll = !m.help.ShowAll
-			return m, nil
+			return m, m.resizeScreens()
 		}
-		s, cmd := m.screens[m.active].Update(msg)
-		m.screens[m.active] = s
-		return m, cmd
+		return m, m.updateActive(msg)
 
 	default:
+		before := lipgloss.Height(m.helpView())
 		var cmds []tea.Cmd
 		for i := range m.screens {
 			s, cmd := m.screens[i].Update(msg)
 			m.screens[i] = s
 			cmds = append(cmds, cmd)
 		}
+		if lipgloss.Height(m.helpView()) != before {
+			cmds = append(cmds, m.resizeScreens())
+		}
 		return m, tea.Batch(cmds...)
 	}
+}
+
+// updateActive routes msg to the active screen, then rebroadcasts the inner size
+// to every screen when the update changed the help bar's height: a screen's Help()
+// is state-dependent, so an internal state change can grow or shrink the footer
+// with no WindowSizeMsg, leaving the screens sized against the wrong footer.
+func (m *rootModel) updateActive(msg tea.Msg) tea.Cmd {
+	before := lipgloss.Height(m.helpView())
+	s, cmd := m.screens[m.active].Update(msg)
+	m.screens[m.active] = s
+	if lipgloss.Height(m.helpView()) == before {
+		return cmd
+	}
+	return tea.Batch(cmd, m.resizeScreens())
 }
 
 func (m rootModel) View() string {
@@ -122,11 +128,25 @@ func (m rootModel) View() string {
 }
 
 func (m rootModel) innerHeight() int {
-	inner := m.height - headerLines - helpLines
+	inner := m.height - headerLines - lipgloss.Height(m.helpView())
 	if inner < 1 {
 		return 1
 	}
 	return inner
+}
+
+// resizeScreens broadcasts the current inner content size to every screen and
+// batches the commands they return, so a change in the help bar's height reflows
+// the active content immediately.
+func (m *rootModel) resizeScreens() tea.Cmd {
+	inner := tea.WindowSizeMsg{Width: m.width, Height: m.innerHeight()}
+	cmds := make([]tea.Cmd, 0, len(m.screens))
+	for i := range m.screens {
+		s, cmd := m.screens[i].Update(inner)
+		m.screens[i] = s
+		cmds = append(cmds, cmd)
+	}
+	return tea.Batch(cmds...)
 }
 
 // header renders the brand mark, this host's identity, and the tab strip on a

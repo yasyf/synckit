@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The shared TUI no longer renders past the bottom of the terminal. The master-detail split
+  double-subtracted each panel's horizontal padding, so a row sized to the full column width wrapped
+  onto a second line and pushed the layout off-screen; both panes now render at their budgeted width
+  without wrapping, and each fills its full column instead of coming up two cells short.
+- The router's help bar now reserves its true height. Expanded help (`?`) prints one line per binding
+  and a tab switch can change how many bindings show, but the router reserved a fixed single row and
+  let the overflow shove the view past the last terminal line; it now measures the help height live
+  and reflows the active screen whenever help toggles or the active tab changes.
+
 ### Added
 - Busy-awareness through the watch layer. `watch.Gate` (with `watch.WithGate`) teaches the engine
   to defer a busy item's evaluation instead of acting on it: nothing is recorded or notified while
