@@ -39,10 +39,10 @@ func SplitDims(width, height int) (listW, detailW, contentH int, showDetail bool
 // carries the accent border (it always holds focus today); the detail pane stays
 // grey. When the screen is too narrow, the list is boxed on its own.
 func MasterDetail(listView, detail string, listW, detailW, height int, showDetail bool) string {
-	left := panelActive.Width(listW).Height(height).Render(listView)
+	left := panelActive.Width(listW + panelActive.GetHorizontalPadding()).Height(height).Render(listView)
 	if !showDetail {
 		return left
 	}
-	right := panel.Width(detailW).Height(height).Render(detail)
+	right := panel.Width(detailW + panel.GetHorizontalPadding()).Height(height).Render(detail)
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
