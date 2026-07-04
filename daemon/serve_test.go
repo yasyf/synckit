@@ -348,7 +348,7 @@ func TestEngineEventDrivesLocalSync(t *testing.T) {
 	fakeMesh(t, map[string]*fakeConsumer{"me@self": fake})
 
 	local := syncservice.NewClient(serveFake(t, fake))
-	eng := buildEngine(local, testManifest(), &hostregistry.Registry{Self: "me@self"})
+	eng := buildEngine(context.Background(), local, testManifest(), &hostregistry.Registry{Self: "me@self"})
 
 	ctx := context.Background()
 	eng.OnEvent(ctx, "site-a")

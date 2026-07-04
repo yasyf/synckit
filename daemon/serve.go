@@ -174,7 +174,7 @@ func (s *supervisor) reload(parent context.Context) error {
 func (s *supervisor) startEngine(ctx context.Context, wg *sync.WaitGroup, m manifest.Manifest, reg *hostregistry.Registry) {
 	local := syncservice.NewClient(dialTransport(m, reg.Self, reg.Self))
 	s.clients = append(s.clients, local)
-	eng := buildEngine(local, m, reg)
+	eng := buildEngine(ctx, local, m, reg)
 
 	wg.Add(1)
 	go func() {
@@ -256,16 +256,18 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // buildEngine wires one manifest's watch engine: the resolver and notifier drive
 // the consumer's typed sync service, the digest is the identity (the id is already
 // the stable key), and the host fan-out is self first (local converge) then peers.
-// The gate defers a busy item's evaluation at the debounce cadence, firing through
-// after ten windows so a persistently busy item can only delay a change, never
-// park it.
-func buildEngine(local *syncservice.Client, m manifest.Manifest, reg *hostregistry.Registry) *watch.Engine[string] {
+// The notifier is wrapped in a per-peer circuit breaker under ctx (the generation
+// context its retry timers outlive single events on), so a repeatedly unreachable
+// peer is logged once and probed on a backoff instead of on every event. The gate
+// defers a busy item's evaluation at the debounce cadence, firing through after ten
+// windows so a persistently busy item can only delay a change, never park it.
+func buildEngine(ctx context.Context, local *syncservice.Client, m manifest.Manifest, reg *hostregistry.Registry) *watch.Engine[string] {
 	hosts := append([]string{reg.Self}, reg.Hosts...)
 	debounce := time.Duration(m.Watch.Debounce)
 	memo := newFingerprintMemo()
 	return watch.NewEngine[string](
 		manifestResolver{client: local, name: m.Name, memo: memo},
-		manifestNotifier{local: local, m: m, self: reg.Self},
+		newBreakerNotifier(ctx, manifestNotifier{local: local, m: m, self: reg.Self}, m.Name, reg.Self),
 		func(id string) string { return id },
 		debounce,
 		hosts,
