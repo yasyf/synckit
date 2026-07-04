@@ -21,8 +21,8 @@ func TestDetectSelf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DetectSelf: %v", err)
 	}
-	if self != "yasyf@yasyf" {
-		t.Fatalf("self = %q, want %q", self, "yasyf@yasyf")
+	if self != "yasyf@yasyf.tail71af5d.ts.net" {
+		t.Fatalf("self = %q, want %q", self, "yasyf@yasyf.tail71af5d.ts.net")
 	}
 }
 

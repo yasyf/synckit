@@ -98,7 +98,8 @@ func registryFromRaw(raw map[string]json.RawMessage) (*Registry, error) {
 }
 
 // DetectSelf returns the ssh target by which a peer reaches this machine,
-// derived from the tailscale node name and the local user.
+// derived from the tailscale MagicDNS name (its full FQDN) and the local user, so
+// the peer always dials the tailscale path instead of racing LAN DNS.
 func DetectSelf(ctx context.Context, r Runner) (string, error) {
 	out, err := r.Local(ctx, "tailscale", "status", "--json")
 	if err != nil {
@@ -112,15 +113,15 @@ func DetectSelf(ctx context.Context, r Runner) (string, error) {
 	if err := json.Unmarshal([]byte(out), &status); err != nil {
 		return "", fmt.Errorf("parse tailscale status (pass --self to override): %w", err)
 	}
-	node := TailscaleNode(status.Self.DNSName)
-	if node == "" {
+	host := strings.TrimSuffix(status.Self.DNSName, ".")
+	if host == "" {
 		return "", fmt.Errorf("empty tailscale node name (pass --self to override)")
 	}
 	user, err := r.Local(ctx, "id", "-un")
 	if err != nil {
 		return "", fmt.Errorf("detect local user: %w", err)
 	}
-	return strings.TrimSpace(user) + "@" + node, nil
+	return strings.TrimSpace(user) + "@" + host, nil
 }
 
 // RemoveHost unregisters target as a peer and persists the change.

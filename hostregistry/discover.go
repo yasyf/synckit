@@ -23,7 +23,7 @@ type SkipNote struct {
 // HostCandidate is one host discovered on the network.
 type HostCandidate struct {
 	Node          string // tailscale/bonjour node label
-	DefaultTarget string // suggested ssh target, e.g. "user@node"
+	DefaultTarget string // suggested ssh target: tailscale mints "user@host.<tailnet>.ts.net", bonjour "user@node"
 	Source        string // "tailscale" or "bonjour"
 	Online        bool   // reported reachable by the discovery source
 	Registered    bool   // already present in the registry (matched by node label)
@@ -96,7 +96,7 @@ func discoverTailscale(ctx context.Context, r Runner, localUser string) ([]HostC
 		}
 		cands = append(cands, HostCandidate{
 			Node:          node,
-			DefaultTarget: target(localUser, node),
+			DefaultTarget: target(localUser, strings.TrimSuffix(p.DNSName, ".")),
 			Source:        "tailscale",
 			Online:        p.Online,
 		})
@@ -207,7 +207,7 @@ func bonjourCandidates(nodes []string, localUser, localHostName string) ([]HostC
 func mergeHosts(cands []HostCandidate, registered []string) []HostCandidate {
 	regNodes := map[string]struct{}{}
 	for _, h := range registered {
-		regNodes[hostNode(h)] = struct{}{}
+		regNodes[HostNode(h)] = struct{}{}
 	}
 
 	byNode := map[string]HostCandidate{}
@@ -243,13 +243,17 @@ func bonjourNode(e dnssd.BrowseEntry) string {
 	return label
 }
 
-// hostNode extracts the node label from a registered host target, which is either
-// "user@node" or a bare "node": the substring after the last '@'.
-func hostNode(target string) string {
+// HostNode returns the short node label of a "user@host" target: the first DNS
+// label of the host portion, i.e. the text after the last '@' up to the first '.'.
+// So "yasyf@yasyf.tail71af5d.ts.net" yields "yasyf", and a bare short name like
+// "yasyf" passes through unchanged.
+func HostNode(target string) string {
+	host := target
 	if i := strings.LastIndex(target, "@"); i >= 0 {
-		return target[i+1:]
+		host = target[i+1:]
 	}
-	return target
+	label, _, _ := strings.Cut(host, ".")
+	return label
 }
 
 // target builds the suggested ssh target, degrading to the bare node when the

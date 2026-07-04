@@ -49,8 +49,8 @@ func TestDiscoverTailscale(t *testing.T) {
 	}
 
 	alpha := candidateByNode(t, cands, "alpha")
-	if alpha.DefaultTarget != "yasyf@alpha" {
-		t.Fatalf("alpha target = %q, want yasyf@alpha", alpha.DefaultTarget)
+	if alpha.DefaultTarget != "yasyf@alpha.tailnet.ts.net" {
+		t.Fatalf("alpha target = %q, want yasyf@alpha.tailnet.ts.net", alpha.DefaultTarget)
 	}
 	if alpha.Source != "tailscale" {
 		t.Fatalf("alpha source = %q, want tailscale", alpha.Source)
@@ -60,8 +60,8 @@ func TestDiscoverTailscale(t *testing.T) {
 	}
 
 	beta := candidateByNode(t, cands, "beta")
-	if beta.DefaultTarget != "yasyf@beta" {
-		t.Fatalf("beta target = %q, want yasyf@beta", beta.DefaultTarget)
+	if beta.DefaultTarget != "yasyf@beta.tailnet.ts.net" {
+		t.Fatalf("beta target = %q, want yasyf@beta.tailnet.ts.net", beta.DefaultTarget)
 	}
 	if beta.Online {
 		t.Fatal("beta Online = true, want false")
@@ -100,8 +100,8 @@ func TestDiscoverTailscaleNoUserDegradesTarget(t *testing.T) {
 		t.Fatalf("notes = %+v, want none", notes)
 	}
 	alpha := candidateByNode(t, cands, "alpha")
-	if alpha.DefaultTarget != "alpha" {
-		t.Fatalf("alpha target = %q, want bare node alpha when user unknown", alpha.DefaultTarget)
+	if alpha.DefaultTarget != "alpha.tailnet.ts.net" {
+		t.Fatalf("alpha target = %q, want bare FQDN alpha.tailnet.ts.net when user unknown", alpha.DefaultTarget)
 	}
 }
 
@@ -194,11 +194,38 @@ func TestHostNode(t *testing.T) {
 		{"yasyf@alpha", "alpha"},
 		{"alpha", "alpha"},
 		{"user@host@weird", "weird"},
+		{"yasyf@alpha.tailnet.ts.net", "alpha"},
+		{"alpha.tailnet.ts.net", "alpha"},
 	}
 	for _, tc := range cases {
-		if got := hostNode(tc.in); got != tc.want {
-			t.Fatalf("hostNode(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := HostNode(tc.in); got != tc.want {
+			t.Fatalf("HostNode(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestMergeHostsRegisteredByFQDN proves an FQDN registration marks its short-label
+// candidate Registered, and a mesh mixing a legacy short name with an FQDN matches
+// both — discovery mints short node labels, so matching cuts the registered target
+// at its first dot.
+func TestMergeHostsRegisteredByFQDN(t *testing.T) {
+	cands := []HostCandidate{
+		{Node: "alpha", DefaultTarget: "yasyf@alpha.tailnet.ts.net", Source: "tailscale", Online: true},
+		{Node: "beta", DefaultTarget: "yasyf@beta.tailnet.ts.net", Source: "tailscale", Online: true},
+		{Node: "gamma", DefaultTarget: "yasyf@gamma.tailnet.ts.net", Source: "tailscale", Online: true},
+	}
+	registered := []string{"yasyf@alpha.tailnet.ts.net", "yasyf@beta"}
+
+	merged := mergeHosts(cands, registered)
+
+	if !candidateByNode(t, merged, "alpha").Registered {
+		t.Fatal("alpha Registered = false, want true (matched FQDN registration)")
+	}
+	if !candidateByNode(t, merged, "beta").Registered {
+		t.Fatal("beta Registered = false, want true (matched legacy short registration)")
+	}
+	if candidateByNode(t, merged, "gamma").Registered {
+		t.Fatal("gamma Registered = true, want false (unregistered)")
 	}
 }
 

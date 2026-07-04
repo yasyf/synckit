@@ -524,11 +524,11 @@ func mergeHostItems(cands []hostregistry.HostCandidate, registered []string) []h
 		seen[c.Node] = struct{}{}
 	}
 	for _, h := range registered {
-		if _, ok := seen[hostNode(h)]; ok {
+		if _, ok := seen[hostregistry.HostNode(h)]; ok {
 			continue
 		}
 		items = append(items, hostItem{
-			node:       hostNode(h),
+			node:       hostregistry.HostNode(h),
 			target:     h,
 			source:     "registered",
 			online:     false,
@@ -611,12 +611,4 @@ func waitForLine(lines chan string) tea.Cmd {
 		}
 		return hostAddProgressMsg{line: line}
 	}
-}
-
-// hostNode extracts the node label from a "user@node" or bare "node" target.
-func hostNode(target string) string {
-	if i := strings.LastIndex(target, "@"); i >= 0 {
-		return target[i+1:]
-	}
-	return target
 }

@@ -115,21 +115,6 @@ func TestValidateTarget(t *testing.T) {
 	}
 }
 
-func TestHostNode(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"yasyf@alpha", "alpha"},
-		{"alpha", "alpha"},
-		{"user@host@weird", "weird"},
-	}
-	for _, tc := range cases {
-		if got := hostNode(tc.in); got != tc.want {
-			t.Fatalf("hostNode(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 func TestClassifyVerify(t *testing.T) {
 	cases := []struct {
 		name string
@@ -187,6 +172,25 @@ func TestMergeHostItems(t *testing.T) {
 	beta := items[2]
 	if beta.registered {
 		t.Fatalf("beta registered = true, want false (candidate carried Registered=false)")
+	}
+}
+
+// TestMergeHostItemsRegisteredByFQDN proves an FQDN registration folds into its
+// discovered short-label row instead of appending a duplicate registered-only row,
+// so a mesh that adopted FQDN dialing does not double-list its own peers.
+func TestMergeHostItemsRegisteredByFQDN(t *testing.T) {
+	cands := []hostregistry.HostCandidate{
+		{Node: "beta", DefaultTarget: "yasyf@beta.tailnet.ts.net", Source: "tailscale", Online: true},
+	}
+	registered := []string{"yasyf@beta.tailnet.ts.net"}
+
+	items := mergeHostItems(cands, registered)
+
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1 (FQDN registration must not duplicate the beta row): %+v", len(items), items)
+	}
+	if items[0].node != "beta" {
+		t.Fatalf("row node = %q, want beta", items[0].node)
 	}
 }
 
