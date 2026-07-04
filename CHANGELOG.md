@@ -32,6 +32,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `List`, retrying at the manifest's debounce cadence and firing through after ten windows. The
   gate shares its `List` round trip with the fingerprint resolver, so a gated evaluation costs
   one RPC, not two.
+- The daemon's watch-notify path now runs a per-peer circuit breaker. The first failed notify to
+  a peer logs once, captures a one-line tailscale snapshot of that peer (online, direct or DERP,
+  endpoint), and opens the breaker; further notifies are suppressed while a retry probes on a
+  doubling cooldown (30s up to 5m). A successful retry is a full-manifest sync, so recovery,
+  catch-up, and the single 'recovered after <duration>' line are one act.
+
+### Changed
+- `converge.Reconcile` takes a `*converge.PeerStatus` and logs unreachable peers per outage
+  instead of per pass: one line when a peer goes down, one with the outage duration when it
+  recovers. Skip semantics are unchanged. Consumers hold one tracker for the life of their
+  process.
+- hostregistry: pin ssh targets to tailscale MagicDNS FQDNs — DetectSelf and tailscale discovery
+  now mint `user@host.<tailnet>.ts.net` targets (previously the bare first label), so peer ssh
+  always rides the tailscale path instead of racing LAN DNS. Discovery and the hosts TUI
+  match/display peers by short node label via the new `hostregistry.HostNode`. Existing
+  short-name registrations keep working; `host rm` + `host add` each peer to adopt FQDN dialing.
 
 ## [0.4.2] - 2026-06-27
 
