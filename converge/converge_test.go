@@ -1,15 +1,45 @@
 package converge
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/yasyf/synckit/cregistry"
 )
+
+// captureSlog swaps the default slog logger for a buffered text handler at debug
+// level so a test can count transition log lines, restoring it on cleanup.
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// setErr scripts peer's Fetch to fail (or, with a nil err, succeed) under lock so a
+// test can flip a peer between reachable and unreachable across passes race-free.
+func (f *fakeFetcher) setErr(peer string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.errs == nil {
+		f.errs = map[string]error{}
+	}
+	if err == nil {
+		delete(f.errs, peer)
+		return
+	}
+	f.errs[peer] = err
+}
 
 // meta is the per-item payload used throughout the tests: a small struct so the
 // registry's value path runs against real JSON.
@@ -130,7 +160,7 @@ func TestPullMergeConvergesAndPersists(t *testing.T) {
 	d := newFakeDriver(local)
 	f := &fakeFetcher{regs: map[string]cregistry.Registry[meta]{"peer-1": peer1, "peer-2": peer2}}
 
-	results, err := Reconcile(context.Background(), noLock, d, f, []string{"peer-1", "peer-2"}, "")
+	results, err := Reconcile(context.Background(), noLock, d, f, NewPeerStatus(), []string{"peer-1", "peer-2"}, "")
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -174,7 +204,7 @@ func TestOfflinePeerDoesNotAbort(t *testing.T) {
 		errs: map[string]error{"peer-down": errors.New("connection refused")},
 	}
 
-	results, err := Reconcile(context.Background(), noLock, d, f, []string{"peer-down", "peer-up"}, "")
+	results, err := Reconcile(context.Background(), noLock, d, f, NewPeerStatus(), []string{"peer-down", "peer-up"}, "")
 	if err != nil {
 		t.Fatalf("Reconcile must not abort on one unreachable peer: %v", err)
 	}
@@ -202,12 +232,12 @@ func TestIdempotentLoopGuard(t *testing.T) {
 	f := &fakeFetcher{regs: map[string]cregistry.Registry[meta]{"peer-1": peer}}
 	peers := []string{"peer-1"}
 
-	if _, err := Reconcile(context.Background(), noLock, d, f, peers, ""); err != nil {
+	if _, err := Reconcile(context.Background(), noLock, d, f, NewPeerStatus(), peers, ""); err != nil {
 		t.Fatalf("first Reconcile: %v", err)
 	}
 	afterFirst := maps(d.reg)
 
-	if _, err := Reconcile(context.Background(), noLock, d, f, peers, ""); err != nil {
+	if _, err := Reconcile(context.Background(), noLock, d, f, NewPeerStatus(), peers, ""); err != nil {
 		t.Fatalf("second Reconcile: %v", err)
 	}
 	if !reflect.DeepEqual(d.reg, afterFirst) {
@@ -239,7 +269,7 @@ func TestOriginPeerSkipped(t *testing.T) {
 	d := newFakeDriver(local)
 	f := &fakeFetcher{regs: map[string]cregistry.Registry[meta]{"peer-1": peer1, "peer-2": peer2}}
 
-	if _, err := Reconcile(context.Background(), noLock, d, f, []string{"peer-1", "peer-2"}, "peer-1"); err != nil {
+	if _, err := Reconcile(context.Background(), noLock, d, f, NewPeerStatus(), []string{"peer-1", "peer-2"}, "peer-1"); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if got := f.fetchedPeers(); !slices.Equal(got, []string{"peer-2"}) {
@@ -266,7 +296,7 @@ func TestTombstonePersistedNotReconciled(t *testing.T) {
 	d := newFakeDriver(local)
 	f := &fakeFetcher{regs: map[string]cregistry.Registry[meta]{"peer-1": peer}}
 
-	results, err := Reconcile(context.Background(), noLock, d, f, []string{"peer-1"}, "")
+	results, err := Reconcile(context.Background(), noLock, d, f, NewPeerStatus(), []string{"peer-1"}, "")
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -297,7 +327,7 @@ func TestSaveErrorAbortsPass(t *testing.T) {
 	d.saveErr = errors.New("disk full")
 	f := &fakeFetcher{regs: map[string]cregistry.Registry[meta]{}}
 
-	results, err := Reconcile(context.Background(), noLock, d, f, nil, "")
+	results, err := Reconcile(context.Background(), noLock, d, f, NewPeerStatus(), nil, "")
 	if err == nil {
 		t.Fatal("expected SaveRegistry failure to abort the pass")
 	}
@@ -306,5 +336,72 @@ func TestSaveErrorAbortsPass(t *testing.T) {
 	}
 	if got := d.lastReconciled(); len(got) != 0 {
 		t.Fatalf("reconciled %v after a persist failure, want none", got)
+	}
+}
+
+// TestUnreachablePeerLogsOncePerOutage proves the transition tracker collapses a
+// sustained outage into a single warn: two passes against the same down peer,
+// sharing one PeerStatus, log the unreachable line exactly once — not once per pass.
+func TestUnreachablePeerLogsOncePerOutage(t *testing.T) {
+	buf := captureSlog(t)
+
+	local := cregistry.New[meta]()
+	local.Add("A", meta{Tag: "a"}, 10)
+	d := newFakeDriver(local)
+	f := &fakeFetcher{
+		regs: map[string]cregistry.Registry[meta]{},
+		errs: map[string]error{"peer-down": errors.New("connection refused")},
+	}
+	status := NewPeerStatus()
+	peers := []string{"peer-down"}
+
+	for pass := 0; pass < 2; pass++ {
+		if _, err := Reconcile(context.Background(), noLock, d, f, status, peers, ""); err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+	}
+
+	if got := strings.Count(buf.String(), "converge: peer unreachable"); got != 1 {
+		t.Fatalf("unreachable warns = %d across two passes, want exactly 1\nlog:\n%s", got, buf.String())
+	}
+}
+
+// TestPeerRecoveryLogsOnceWithDuration proves recovery logs one line carrying the
+// outage duration: a down pass then two up passes emit exactly one "peer recovered"
+// record, stamped with the down_for the injected clock makes deterministic, and no
+// recovered line while the peer stays reachable.
+func TestPeerRecoveryLogsOnceWithDuration(t *testing.T) {
+	buf := captureSlog(t)
+
+	local := cregistry.New[meta]()
+	local.Add("A", meta{Tag: "a"}, 10)
+	d := newFakeDriver(local)
+	f := &fakeFetcher{
+		regs: map[string]cregistry.Registry[meta]{"peer": cregistry.New[meta]()},
+		errs: map[string]error{"peer": errors.New("connection refused")},
+	}
+	status := NewPeerStatus()
+	clock := time.Unix(1000, 0)
+	status.now = func() time.Time { return clock }
+	peers := []string{"peer"}
+
+	// Down pass: peer unreachable, outage begins at t0.
+	if _, err := Reconcile(context.Background(), noLock, d, f, status, peers, ""); err != nil {
+		t.Fatalf("down pass: %v", err)
+	}
+	// Peer heals; 90s elapse before the recovery pass.
+	f.setErr("peer", nil)
+	clock = clock.Add(90 * time.Second)
+	for pass := 0; pass < 2; pass++ {
+		if _, err := Reconcile(context.Background(), noLock, d, f, status, peers, ""); err != nil {
+			t.Fatalf("up pass %d: %v", pass, err)
+		}
+	}
+
+	if got := strings.Count(buf.String(), "converge: peer recovered"); got != 1 {
+		t.Fatalf("recovered records = %d, want exactly 1\nlog:\n%s", got, buf.String())
+	}
+	if !strings.Contains(buf.String(), "down_for=1m30s") {
+		t.Fatalf("recovery line missing down_for=1m30s\nlog:\n%s", buf.String())
 	}
 }

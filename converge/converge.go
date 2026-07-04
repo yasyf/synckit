@@ -13,8 +13,8 @@
 // emergent: each host catches up by pulling on its own schedule, so a reconcile
 // on host A can never cause host B to do work, and an offline peer simply folds
 // in the missed mutations on its next pass. A single unreachable peer is logged
-// and skipped, never fatal — the pass still converges against every peer that did
-// answer, and the skipped one self-heals next time.
+// once per outage and skipped, never fatal — the pass still converges against
+// every peer that did answer, and the skipped one self-heals next time.
 //
 // # The Driver seam
 //
@@ -83,15 +83,18 @@ type Fetcher[V any] interface {
 // pull-merge every peer except origin into it, persist the converged result, then
 // reconcile each present item through d. It is PULL-ONLY — the sole write is the
 // local SaveRegistry; see the package doc for the loop guard. An unreachable peer is
-// logged and skipped, never fatal. lock wraps the whole pass so a concurrent pass on
-// the same host is serialized. peers is the full mesh; origin is the anti-echo
-// provenance ("" for a local trigger). It returns one [ItemResult] per present item;
-// a single item's failure is carried in its result, not returned as the pass error.
+// logged once per outage (against status) and skipped, never fatal. lock wraps the
+// whole pass so a concurrent pass on the same host is serialized. peers is the full
+// mesh; origin is the anti-echo provenance ("" for a local trigger). status is the
+// caller's long-lived transition tracker; it must be non-nil. It returns one
+// [ItemResult] per present item; a single item's failure is carried in its result,
+// not returned as the pass error.
 func Reconcile[V any](
 	ctx context.Context,
 	lock func(ctx context.Context, fn func() error) error,
 	d Driver[V],
 	f Fetcher[V],
+	status *PeerStatus,
 	peers []string,
 	origin string,
 ) ([]ItemResult, error) {
@@ -109,8 +112,13 @@ func Reconcile[V any](
 			}
 			peerReg, err := f.Fetch(ctx, peer)
 			if err != nil {
-				slog.WarnContext(ctx, "converge: skip unreachable peer", "peer", peer, "err", err)
+				if status.Down(peer) {
+					slog.WarnContext(ctx, "converge: peer unreachable; suppressing until recovery", "peer", peer, "err", err)
+				}
 				continue
+			}
+			if downFor, recovered := status.Up(peer); recovered {
+				slog.InfoContext(ctx, "converge: peer recovered", "peer", peer, "down_for", downFor)
 			}
 			merged = cregistry.Merge(merged, peerReg)
 		}
