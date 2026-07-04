@@ -300,6 +300,79 @@ func TestBonjourCandidatesSkipsSelf(t *testing.T) {
 	}
 }
 
+const tailscaleStatusPeerStatusJSON = `{
+  "Self": {"DNSName": "self.tailnet.ts.net.", "HostName": "self", "Online": true},
+  "Peer": {
+    "key-alpha": {"DNSName": "alpha.tailnet.ts.net.", "HostName": "alpha", "Online": true,  "CurAddr": "100.64.0.5:41641", "Relay": "tor", "LastSeen": "2026-07-03T18:00:00Z", "KeyExpiry": "2027-01-01T00:00:00Z"},
+    "key-beta":  {"DNSName": "beta.tailnet.ts.net.",  "HostName": "beta",  "Online": true,  "CurAddr": "",                 "Relay": "tor", "LastSeen": "2026-07-03T18:00:00Z", "KeyExpiry": "2027-01-01T00:00:00Z"},
+    "key-gamma": {"DNSName": "gamma.tailnet.ts.net.", "HostName": "gamma", "Online": false, "CurAddr": "",                 "Relay": "sea", "LastSeen": "2026-07-03T18:00:00Z", "KeyExpiry": "2027-01-01T00:00:00Z"}
+  }
+}`
+
+func TestTailscalePeerStatus(t *testing.T) {
+	cases := []struct {
+		name       string
+		target     string
+		json       string
+		runnerErr  error
+		want       string
+		wantErrSub string
+	}{
+		{
+			name:   "online direct via FQDN target",
+			target: "yasyf@alpha.tailnet.ts.net",
+			json:   tailscaleStatusPeerStatusJSON,
+			want:   "online=true conn=direct 100.64.0.5:41641 lastseen=2026-07-03T18:00:00Z",
+		},
+		{
+			name:   "online relayed via short target",
+			target: "yasyf@beta",
+			json:   tailscaleStatusPeerStatusJSON,
+			want:   "online=true conn=derp tor lastseen=2026-07-03T18:00:00Z",
+		},
+		{
+			name:   "offline peer",
+			target: "yasyf@gamma",
+			json:   tailscaleStatusPeerStatusJSON,
+			want:   "online=false conn=derp sea lastseen=2026-07-03T18:00:00Z",
+		},
+		{
+			name:       "node absent from tailnet",
+			target:     "yasyf@delta",
+			json:       tailscaleStatusPeerStatusJSON,
+			wantErrSub: "delta",
+		},
+		{
+			name:       "tailscale binary missing",
+			target:     "yasyf@alpha",
+			runnerErr:  errors.New("exec: tailscale: not found"),
+			wantErrSub: "not found",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewMockRunner().OnLocal("tailscale status --json", tc.json, tc.runnerErr)
+
+			got, err := TailscalePeerStatus(context.Background(), r, tc.target)
+			if tc.wantErrSub != "" {
+				if err == nil {
+					t.Fatalf("TailscalePeerStatus = %q, want an error containing %q", got, tc.wantErrSub)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("error = %q, want it to contain %q", err.Error(), tc.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("TailscalePeerStatus: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("TailscalePeerStatus = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHostsTailscaleErrorStillSucceeds(t *testing.T) {
 	r := NewMockRunner().
 		OnLocal("id -un", "yasyf\n", nil).

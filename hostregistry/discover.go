@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -104,17 +105,63 @@ func discoverTailscale(ctx context.Context, r Runner, localUser string) ([]HostC
 	return cands, nil
 }
 
+// TailscalePeerStatus returns a one-line tailnet view of the peer behind target (a
+// "user@node" ssh target): whether it is online, whether the connection is direct
+// or DERP-relayed and via which endpoint or region, and when it was last seen. It
+// runs `tailscale status --json` through r and matches the peer by short node label,
+// erroring when tailscale is unreachable or the node is not in the tailnet.
+func TailscalePeerStatus(ctx context.Context, r Runner, target string) (string, error) {
+	out, err := r.Local(ctx, "tailscale", "status", "--json")
+	if err != nil {
+		return "", fmt.Errorf("tailscale status: %w", err)
+	}
+	var status struct {
+		Peer map[string]tailscalePeer
+	}
+	if err := json.Unmarshal([]byte(out), &status); err != nil {
+		return "", fmt.Errorf("parse tailscale status: %w", err)
+	}
+	node := HostNode(target)
+	for _, p := range status.Peer {
+		if strings.EqualFold(TailscaleNode(p.DNSName), node) {
+			return formatTailscalePeer(p), nil
+		}
+	}
+	return "", fmt.Errorf("no tailscale peer for node %q", node)
+}
+
+// formatTailscalePeer renders a peer as a single status line: direct connections
+// name their current endpoint, relayed ones their DERP region, and an absent
+// last-seen renders as "never".
+func formatTailscalePeer(p tailscalePeer) string {
+	conn := "derp " + p.Relay
+	if p.CurAddr != "" {
+		conn = "direct " + p.CurAddr
+	}
+	lastseen := "never"
+	if p.LastSeen != nil {
+		lastseen = p.LastSeen.UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf("online=%t conn=%s lastseen=%s", p.Online, conn, lastseen)
+}
+
 // tailscalePeer is the subset of a `tailscale status --json` peer that discovery
-// decodes. Location is a pointer so a JSON null (a personal node) is
-// distinguishable from a populated object (a Mullvad relay); KeyExpiry is a
-// pointer so a null/absent expiry is distinguishable from a real one.
+// and the peer snapshot decode. Location is a pointer so a JSON null (a personal
+// node) is distinguishable from a populated object (a Mullvad relay); KeyExpiry is
+// a pointer so a null/absent expiry is distinguishable from a real one; LastSeen is
+// a pointer so an absent last-seen is distinguishable from the zero time. CurAddr is
+// the active direct endpoint when the connection is not relayed, Relay the home DERP
+// region otherwise.
 type tailscalePeer struct {
 	DNSName   string
 	HostName  string
 	Online    bool
 	OS        string
 	Tags      []string
+	Relay     string
+	CurAddr   string
 	KeyExpiry *time.Time
+	LastSeen  *time.Time
 	Location  *struct{}
 }
 
