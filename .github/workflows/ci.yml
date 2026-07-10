@@ -25,6 +25,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          check-latest: true
       - name: Vet
         run: go vet ./...
       - name: Test (race)
@@ -40,6 +41,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          check-latest: true
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
@@ -53,6 +55,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          check-latest: true
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
