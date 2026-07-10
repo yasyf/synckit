@@ -1,0 +1,5 @@
+fragments = [
+  "synckit-development-guide",
+  "cc-skills:ccx",
+  "go-style",
+]

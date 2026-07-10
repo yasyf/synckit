@@ -1,4 +1,4 @@
-<!-- cc-guides 0.1.8 src=AGENTS.src.md | GENERATED — do not edit: change AGENTS.src.md and run 'cc-guides render'. Everything below is in force. -->
+<!-- cc-guides 0.1.10 src=.claude/fragments/AGENTS.md fragments=cc-skills@a91b043bdbd2 | GENERATED — do not edit: edit .claude/fragments/AGENTS.md/ and run 'cc-guides render'. Everything below is in force. -->
 # synckit Development Guide
 
 Shared substrate for cross-host sync tools: host mesh, convergent registry, unix-socket RPC, launchd, and an anti-echo watch engine.
