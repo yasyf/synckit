@@ -20,16 +20,16 @@
       "Bash(gh pr view:*)",
       "Bash(git log:*)",
       "Bash(git status:*)",
-      "Bash(go build:*)",
-      "Bash(go doc:*)",
-      "Bash(go test:*)",
-      "Bash(go vet:*)",
       "Bash(head:*)",
       "Bash(jq:*)",
       "Bash(ls:*)",
       "Bash(rg:*)",
-      "Bash(task:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(go build:*)",
+      "Bash(go doc:*)",
+      "Bash(go test:*)",
+      "Bash(go vet:*)",
+      "Bash(task:*)"
     ],
     "defaultMode": "auto"
   },
@@ -47,16 +47,16 @@
         "repo": "yasyf/cc-notes"
       }
     },
-    "captain-hook": {
-      "source": {
-        "source": "github",
-        "repo": "yasyf/captain-hook"
-      }
-    },
     "cc-context": {
       "source": {
         "source": "github",
         "repo": "yasyf/cc-context"
+      }
+    },
+    "captain-hook": {
+      "source": {
+        "source": "github",
+        "repo": "yasyf/captain-hook"
       }
     }
   },
@@ -70,12 +70,22 @@
     "captain-hook@captain-hook": true
   },
   "hooks": {
-    "PermissionRequest": [
+    "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "uvx capt-hook run PermissionRequest"
+            "command": "uvx capt-hook run UserPromptSubmit"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx capt-hook run PreToolUse"
           }
         ]
       }
@@ -100,12 +110,22 @@
         ]
       }
     ],
-    "PreToolUse": [
+    "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "uvx capt-hook run PreToolUse"
+            "command": "uvx capt-hook run Stop"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx capt-hook run PermissionRequest"
           }
         ]
       }
@@ -128,26 +148,6 @@
             "type": "command",
             "command": "uvx capt-hook run SessionStart --async",
             "async": true
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uvx capt-hook run Stop"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uvx capt-hook run UserPromptSubmit"
           }
         ]
       }
