@@ -1,1 +1,1 @@
-{"v":1,"lamport":4,"ops":[{"kind":"remove_criterion","id":"deecafdba6cd6ebd41972b7cde8e727c"}]}
+{"v":1,"lamport":5,"ops":[{"kind":"add_criterion","id":"754aaff4af4865f2b9c9320bc3566c9d","text":"after P2 rollout: synckitd logs fsnotify \"watching dir\" lines, watchman watch-list contains no synckit roots and stays that way; leaf-touch converge, nested slash-ref event, and deleted-leaf recovery (~30s rewatch) all verified","script":""}]}
