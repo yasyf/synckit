@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -166,6 +167,19 @@ func createPoke(t *testing.T, dir string) func() {
 		p := filepath.Join(dir, fmt.Sprintf("poke-%d", n))
 		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
 			t.Fatalf("write poke %s: %v", p, err)
+		}
+	}
+}
+
+// writePoke returns a poke that rewrites file with fresh content each call, so every
+// poke is a modification that fires the file's own watch on both kqueue and inotify.
+func writePoke(t *testing.T, file string) func() {
+	t.Helper()
+	var n int
+	return func() {
+		n++
+		if err := os.WriteFile(file, []byte(fmt.Sprintf("v%d", n)), 0o600); err != nil {
+			t.Fatalf("write %s: %v", file, err)
 		}
 	}
 }
@@ -473,4 +487,152 @@ func TestRunFsnotifyDoesNotFollowNestedSymlink(t *testing.T) {
 
 	// Sanity: the root itself still fires on a direct write.
 	awaitEvent(t, h, "x", createPoke(t, root))
+}
+
+func TestRunWatchedFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "data")
+	if err := os.WriteFile(file, []byte("init"), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	// Declare the regular file itself, not its parent: walkDirs visits it alone and
+	// watches it individually, so the parent dir stays unwatched.
+	h := startFsnotify(t, map[string][]string{"x": {file}})
+
+	// A write to the declared file fires its own watch. (Parent unwatched, so there is
+	// no sibling to isolate here — that is TestRunFileAndDirOverlap's job.)
+	awaitEvent(t, h, "x", writePoke(t, file))
+}
+
+func TestRunWatchedFileRecoversReplace(t *testing.T) {
+	shrinkRewatch(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "data")
+	if err := os.WriteFile(file, []byte("init"), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	h := startFsnotify(t, map[string][]string{"x": {file}})
+
+	// Live: a write to the watched file fires.
+	awaitEvent(t, h, "x", writePoke(t, file))
+	h.drainUntilQuiet(200 * time.Millisecond)
+
+	// Replace atomically: rename a staged sibling over the watched path. The old inode is
+	// unlinked (watch torn down); only the sweep recovers the new one, parent unwatched.
+	tmp := filepath.Join(dir, "data.tmp")
+	if err := os.WriteFile(tmp, []byte("replaced"), 0o600); err != nil {
+		t.Fatalf("write temp: %v", err)
+	}
+	if err := os.Rename(tmp, file); err != nil {
+		t.Fatalf("rename over file: %v", err)
+	}
+
+	// Fire-on-converge: the first callback after the replace — old-inode teardown or the
+	// sweep re-adding the new inode — is the convergence trigger, the behavioral contract.
+	awaitEvent(t, h, "x", nil)
+	h.drainUntilQuiet(200 * time.Millisecond)
+
+	// The watch is re-established on the new inode: a subsequent write fires again.
+	awaitEvent(t, h, "x", writePoke(t, file))
+}
+
+func TestRunWatchedFilePicksUpLateFile(t *testing.T) {
+	shrinkRewatch(t)
+	dir := t.TempDir()
+	late := filepath.Join(dir, "data") // does not exist when Run starts
+	sentinel := t.TempDir()            // exists at startup, a deterministic barrier
+	h := startFsnotify(t, map[string][]string{"late": {late}, "sentinel": {sentinel}})
+
+	// The startup walk and the select loop share one goroutine, so a sentinel event can
+	// only arrive once startup finished — proving the late path was already recorded as
+	// not-yet-watchable, no sleep-based race with the startup walk.
+	awaitEvent(t, h, "sentinel", createPoke(t, sentinel))
+	h.drain()
+
+	if err := os.WriteFile(late, []byte("init"), 0o600); err != nil {
+		t.Fatalf("create late file: %v", err)
+	}
+
+	// Fire-on-add: the sweep re-walks the declared path, finds the file now present,
+	// watches it, and fires the id. The parent dir is unwatched, so only the sweep can
+	// pick it up.
+	awaitEvent(t, h, "late", nil)
+
+	// The newly watched file delivers events: a subsequent write fires.
+	h.drain()
+	awaitEvent(t, h, "late", writePoke(t, late))
+}
+
+func TestRunFileAndDirOverlap(t *testing.T) {
+	parent := t.TempDir()
+	file := filepath.Join(parent, "data")
+	if err := os.WriteFile(file, []byte("init"), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	// A watches the parent dir recursively; B declares the file inside it directly.
+	h := startFsnotify(t, map[string][]string{"A": {parent}, "B": {file}})
+
+	// Prove both watches are live: a create in parent fires A, and B's file watch is
+	// established in the same synchronous startup pass. Then settle.
+	awaitEvent(t, h, "A", createPoke(t, parent))
+	h.drainUntilQuiet(200 * time.Millisecond)
+
+	// One write to the file must reach BOTH owners: B via its exact-path watch, A via the
+	// parent-dir ids in the union. Collecting with nil poke proves one write fanned out.
+	if err := os.WriteFile(file, []byte("changed"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	counts := h.collectFires(2*time.Second, 200*time.Millisecond)
+	if counts["A"] < 1 || counts["B"] < 1 {
+		t.Fatalf("fires = %v, want both A>=1 and B>=1", counts)
+	}
+
+	// A sibling create in parent (a path other than the watched file) has no exact match,
+	// so it fires only A's dir watch, never B's file watch.
+	h.drainUntilQuiet(200 * time.Millisecond)
+	awaitOnly(t, h, "A", "B", createPoke(t, parent))
+}
+
+func TestRunSameIDFileAndDirFiresOnce(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "data")
+	if err := os.WriteFile(file, []byte("init"), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	// x declares BOTH the parent dir and the file: the file matches x as an exact-path
+	// owner and a parent-dir owner, but the union must collapse them to one fire per event.
+	h := startFsnotify(t, map[string][]string{"x": {dir, file}})
+
+	// Prove the watches are live (a create in dir fires x, and the file watch is set in the
+	// same synchronous startup pass), then settle.
+	awaitEvent(t, h, "x", createPoke(t, dir))
+	h.drainUntilQuiet(200 * time.Millisecond)
+
+	// A single append is one write syscall — exactly one kqueue NOTE_WRITE — so darwin can
+	// assert an exact count; os.WriteFile's O_TRUNC could add a NOTE_ATTRIB event and race.
+	f, err := os.OpenFile(file, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: file is a test-owned temp path
+	if err != nil {
+		t.Fatalf("open file: %v", err)
+	}
+	if _, err := f.Write([]byte("x")); err != nil {
+		t.Fatalf("append file: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close file: %v", err)
+	}
+
+	counts := h.collectFires(2*time.Second, 200*time.Millisecond)
+	if runtime.GOOS == "darwin" {
+		// kqueue delivers one coalesced event, so the union fires x exactly once. A
+		// double-fire bug (per exact owner AND per dir owner) would give 2 — the discriminator.
+		if counts["x"] != 1 || len(counts) != 1 {
+			t.Fatalf("fires = %v, want map[x:1]", counts)
+		}
+		return
+	}
+	// inotify reports the modify on both the dir and file descriptors, so an exact count is
+	// meaningless here; assert at-least-once and that only x fired.
+	if counts["x"] < 1 || len(counts) != 1 {
+		t.Fatalf("fires = %v, want x>=1 and only x", counts)
+	}
 }

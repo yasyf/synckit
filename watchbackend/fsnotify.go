@@ -18,14 +18,18 @@ var rewatchInterval = 30 * time.Second
 
 // Run recursively watches every directory tree in dirsByID and fans each
 // filesystem event out to every id whose declared tree covers it, until ctx is
-// canceled — so overlapping declared roots each fire. It holds one kqueue/inotify
-// fd per watched directory. Every rewatchInterval it re-walks each declared root,
-// so a root missing at startup, deleted and recreated, or grown a nested directory
-// is watched again and its id fired on the next sweep; a Create of a subdirectory
-// is watched immediately by the fast-path. A queue overflow fires every declared id,
+// canceled — so overlapping declared roots each fire. A declared path may be a
+// directory (watched recursively) or a regular file (watched individually). On kqueue it
+// costs one fd per watched directory and file; on inotify, one watch descriptor per path.
+// Every rewatchInterval it re-walks each declared root, so a root missing at startup,
+// deleted and recreated, or grown a nested directory is watched again and its id fired on
+// the next sweep; a Create of a subdirectory is watched immediately by the fast-path.
+// A queue overflow fires every declared id,
 // since the lost events are unknown. Only NewWatcher failure is fatal; an
-// unwatchable dir is logged and retried by the sweep. Returns ctx.Err() on
-// cancellation.
+// unwatchable dir is logged and retried by the sweep. On Linux, replacing a watched file
+// by rename while a reader still holds the old inode open delays watch teardown — fsnotify
+// emits Chmod until the last handle closes — so sweep recovery of the new inode waits for
+// that close; the reconcile floor covers the gap. Returns ctx.Err() on cancellation.
 func Run(ctx context.Context, dirsByID map[string][]string, onEvent EventFunc) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -130,19 +134,30 @@ func Run(ctx context.Context, dirsByID map[string][]string, onEvent EventFunc) e
 			if !ok {
 				return nil
 			}
-			ids := idsByDir[filepath.Dir(event.Name)]
-			if len(ids) == 0 {
+			// Union the exact-match owners (a watched file fires on its own path) with the
+			// parent-dir owners (a dir watch fires on its children); each distinct id fires
+			// once below. A sibling has no exact match, so it never fires a file watcher.
+			exactIDs := idsByDir[event.Name]
+			dirIDs := idsByDir[filepath.Dir(event.Name)]
+			if len(exactIDs) == 0 && len(dirIDs) == 0 {
 				continue
+			}
+			ids := make(map[string]struct{}, len(exactIDs)+len(dirIDs))
+			for id := range exactIDs {
+				ids[id] = struct{}{}
+			}
+			for id := range dirIDs {
+				ids[id] = struct{}{}
 			}
 			// Watch a newly created subdir before firing, so an event in it before
 			// the next sweep is not missed; the triggering event fans out below.
 			// Lstat, not Stat: a newly created symlink-to-dir is not descended, matching
 			// the sweep's entry.IsDir() Lstat semantics — persistent watches stay inside
-			// the declared tree.
+			// the declared tree. Only parent-dir owners recurse into the new subdir.
 			if event.Op.Has(fsnotify.Create) {
 				if info, err := os.Lstat(event.Name); err == nil && info.Mode().IsDir() {
 					watched := watchedSet()
-					for id := range ids {
+					for id := range dirIDs {
 						addTree(event.Name, id, watched)
 					}
 				}
@@ -166,14 +181,22 @@ func Run(ctx context.Context, dirsByID map[string][]string, onEvent EventFunc) e
 	}
 }
 
-// walkDirs visits dir and every real subdirectory beneath it. os.Stat follows a
-// symlinked declared root, so a consumer may declare a symlink (e.g. macOS /tmp),
+// walkDirs visits dir: a regular file is visited alone (watched individually), a
+// directory is visited along with every real subdirectory beneath it. os.Stat follows
+// a symlinked declared root, so a consumer may declare a symlink (e.g. macOS /tmp),
 // while os.ReadDir with entry.IsDir() keeps Lstat semantics on nested entries so a
-// symlinked subdirectory is never descended. A path that vanishes or is not a
-// directory is skipped.
+// symlinked subdirectory is never descended. A path that vanishes or is neither a
+// regular file nor a directory is skipped.
 func walkDirs(dir string, visit func(path string)) {
 	info, err := os.Stat(dir)
-	if err != nil || !info.IsDir() {
+	if err != nil {
+		return
+	}
+	if info.Mode().IsRegular() {
+		visit(dir)
+		return
+	}
+	if !info.IsDir() {
 		return
 	}
 	visit(dir)
