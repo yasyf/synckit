@@ -534,6 +534,164 @@ func TestListForEngineCtxCancel(t *testing.T) {
 	}
 }
 
+func TestBackoffAfter(t *testing.T) {
+	tests := []struct {
+		name    string
+		prev    time.Duration
+		healthy bool
+		want    time.Duration
+	}{
+		{"first fast failure waits base", 0, false, watchBackoffBase},
+		{"fast failure doubles", watchBackoffBase, false, 2 * watchBackoffBase},
+		{"fast failure doubles below cap", 40 * time.Second, false, 80 * time.Second},
+		{"fast failure clamps to cap", 80 * time.Second, false, watchBackoffMax},
+		{"healthy run resets to base", watchBackoffMax, true, watchBackoffBase},
+		{"healthy run from zero is base", 0, true, watchBackoffBase},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := backoffAfter(tt.prev, tt.healthy); got != tt.want {
+				t.Errorf("backoffAfter(%v, %v) = %v, want %v", tt.prev, tt.healthy, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSuperviseWatchRestartsWithBackoff(t *testing.T) {
+	prevBase, prevMax, prevHealthy := watchBackoffBase, watchBackoffMax, watchHealthyRun
+	watchBackoffBase = 20 * time.Millisecond
+	watchBackoffMax = 1 * time.Second
+	watchHealthyRun = time.Hour // the always-failing backend is never "healthy"
+	t.Cleanup(func() {
+		watchBackoffBase, watchBackoffMax, watchHealthyRun = prevBase, prevMax, prevHealthy
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var at []time.Time
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		superviseWatch(ctx, "stub", func(context.Context) (time.Duration, error) {
+			mu.Lock()
+			at = append(at, time.Now())
+			n := len(at)
+			mu.Unlock()
+			if n >= 5 {
+				cancel() // ctx cancel must escape the supervisor promptly
+			}
+			return 0, errFakeDown
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("superviseWatch did not return promptly after ctx cancel")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(at) < 4 {
+		t.Fatalf("supervise made %d attempts, want the backend restarted several times", len(at))
+	}
+	// TestBackoffAfter covers the exact doubling and cap; here we assert only that
+	// the gaps grow — a later restart waits strictly longer than the first — proving
+	// the backoff is wired into the supervisor loop.
+	first := at[1].Sub(at[0])
+	last := at[len(at)-1].Sub(at[len(at)-2])
+	if last <= first {
+		t.Errorf("restart gaps did not grow: first=%v last=%v, want backoff to widen them", first, last)
+	}
+}
+
+func TestSuperviseWatchCancelDuringBackoff(t *testing.T) {
+	prevBase, prevMax, prevHealthy := watchBackoffBase, watchBackoffMax, watchHealthyRun
+	watchBackoffBase = 10 * time.Second // long enough that cancel lands mid-sleep
+	watchBackoffMax = 10 * time.Second
+	watchHealthyRun = time.Hour
+	t.Cleanup(func() {
+		watchBackoffBase, watchBackoffMax, watchHealthyRun = prevBase, prevMax, prevHealthy
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		superviseWatch(ctx, "stub", func(context.Context) (time.Duration, error) {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			return 0, errFakeDown // instant fail → the supervisor enters the long backoff
+		})
+	}()
+
+	<-started
+	time.Sleep(20 * time.Millisecond) // let the supervisor reach the backoff sleep
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("superviseWatch did not return promptly when ctx was canceled mid-backoff")
+	}
+}
+
+func TestSuperviseWatchListFailureNeverHealthy(t *testing.T) {
+	prevBase, prevMax, prevHealthy := watchBackoffBase, watchBackoffMax, watchHealthyRun
+	watchBackoffBase = 20 * time.Millisecond
+	watchBackoffMax = 1 * time.Second
+	watchHealthyRun = 5 * time.Millisecond // shorter than the wall-clock the run burns
+	t.Cleanup(func() {
+		watchBackoffBase, watchBackoffMax, watchHealthyRun = prevBase, prevMax, prevHealthy
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var at []time.Time
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		superviseWatch(ctx, "stub", func(context.Context) (time.Duration, error) {
+			mu.Lock()
+			at = append(at, time.Now())
+			n := len(at)
+			mu.Unlock()
+			// Burn more wall-clock than watchHealthyRun, but report zero backend time:
+			// the list phase failed before the backend ever ran, so it is never healthy.
+			time.Sleep(10 * time.Millisecond)
+			if n >= 4 {
+				cancel()
+			}
+			return 0, errFakeDown
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("superviseWatch did not return after ctx cancel")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(at) < 4 {
+		t.Fatalf("supervise made %d attempts, want at least 4", len(at))
+	}
+	// A run that never reached the backend must not reset the backoff: the gaps keep
+	// growing rather than collapsing back to base every restart.
+	first := at[1].Sub(at[0])
+	last := at[len(at)-1].Sub(at[len(at)-2])
+	if last <= first {
+		t.Errorf("backoff reset despite the backend never being reached: first=%v last=%v", first, last)
+	}
+}
+
 // shrinkBackoff shrinks the engine-startup retry knobs so a retry test runs fast,
 // restoring them on cleanup.
 func shrinkBackoff(t *testing.T) {

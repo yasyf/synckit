@@ -30,6 +30,17 @@ var listBackoff = 5 * time.Second
 // and the next reload re-bind. It is a package var so tests can shrink it.
 var listRetryBudget = 60 * time.Second
 
+// watchBackoffBase, watchBackoffMax, and watchHealthyRun bound the exponential
+// backoff the watch supervisor applies when a backend exits with ctx still live:
+// the first restart waits watchBackoffBase, each repeated fast failure doubles up
+// to watchBackoffMax, and a run that lasted at least watchHealthyRun resets the
+// delay to base. They are package vars so tests can shrink them.
+var (
+	watchBackoffBase = 1 * time.Second
+	watchBackoffMax  = 90 * time.Second
+	watchHealthyRun  = 30 * time.Second
+)
+
 func newServeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
@@ -167,33 +178,71 @@ func (s *supervisor) reload(parent context.Context) error {
 }
 
 // startEngine builds one manifest's long-lived local client and watch engine and
-// launches its watch goroutine. The client is built without any I/O — Socket does
-// not dial and Stdio does not spawn until the first Do — so the first round trip
-// happens asynchronously in the goroutine with bounded retry, keeping reload
-// prompt. The caller holds s.mu, so appending to s.clients is safe.
+// launches its supervised watch goroutine. The client is built without any I/O —
+// Socket does not dial and Stdio does not spawn until the first Do — so the first
+// round trip happens asynchronously under superviseWatch, keeping reload prompt.
+// The caller holds s.mu, so appending to s.clients is safe.
 func (s *supervisor) startEngine(ctx context.Context, wg *sync.WaitGroup, m manifest.Manifest, reg *hostregistry.Registry) {
 	local := syncservice.NewClient(dialTransport(m, reg.Self, reg.Self))
 	s.clients = append(s.clients, local)
 	eng := buildEngine(ctx, local, m, reg)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		items, err := listForEngine(ctx, local, m.Name)
+	// run returns how long it spent inside the backend, so a run that dies in the
+	// list phase (never reaching the backend) reports zero and never counts healthy.
+	run := func(rctx context.Context) (time.Duration, error) {
+		items, err := listForEngine(rctx, local, m.Name)
 		if err != nil {
-			slog.ErrorContext(ctx, "serve: list watch items", "manifest", m.Name, "err", err)
-			return
+			return 0, err
 		}
 		dirsByID := make(map[string][]string, len(items))
 		for _, it := range items {
 			dirsByID[it.ID] = it.WatchDirs
 		}
-		if err := watchbackend.Run(ctx, m.Watch.Backend, dirsByID, func(id string) {
-			eng.OnEvent(ctx, id)
-		}); err != nil && ctx.Err() == nil {
-			slog.ErrorContext(ctx, "serve: watch backend", "manifest", m.Name, "err", err)
-		}
+		start := time.Now()
+		err = watchbackend.Run(rctx, m.Watch.Backend, dirsByID, func(id string) {
+			eng.OnEvent(rctx, id)
+		})
+		return time.Since(start), err
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		superviseWatch(ctx, m.Name, run)
 	}()
+}
+
+// superviseWatch runs the watch backend, restarting it with exponential backoff
+// whenever it exits while ctx is live: a watchman death or a transient list
+// failure must not silently drop a manifest's watches until the next reload. A run
+// counts healthy only by the time run reports it spent inside the backend, so a
+// slow list that then fails fast never resets the delay. Each restart re-runs run
+// from scratch, so the backend rebuilds all state and drops any missed events — the
+// periodic reconcile is the floor that covers the gap. It returns once ctx is
+// canceled.
+func superviseWatch(ctx context.Context, name string, run func(context.Context) (time.Duration, error)) {
+	var delay time.Duration
+	for {
+		if err := sleepCtx(ctx, delay); err != nil {
+			return
+		}
+		backendDur, err := run(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		delay = backoffAfter(delay, backendDur >= watchHealthyRun)
+		slog.ErrorContext(ctx, "serve: watch backend exited, restarting", "manifest", name, "backoff", delay, "err", err)
+	}
+}
+
+// backoffAfter is the delay before the next watch restart given the last delay and
+// whether the run that just exited was healthy (lasted at least watchHealthyRun). A
+// healthy run resets to base; otherwise the delay doubles, capped at watchBackoffMax.
+func backoffAfter(prev time.Duration, healthy bool) time.Duration {
+	if healthy || prev == 0 {
+		return watchBackoffBase
+	}
+	return min(2*prev, watchBackoffMax)
 }
 
 // listForEngine does the Capabilities handshake then List against the consumer's

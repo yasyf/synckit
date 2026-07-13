@@ -1,6 +1,6 @@
 version: '3'
 
-# synckit is a library module (no binary); `build` compiles every package.
+# synckit ships the synckitd daemon (cmd/synckitd); `build` compiles every package.
 
 tasks:
   build:
