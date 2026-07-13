@@ -37,7 +37,7 @@ func newStatusCmd() *cobra.Command {
 				cmd.Println("host: " + h)
 			}
 			for _, m := range manifests {
-				cmd.Printf("manifest: %s (binary=%s backend=%s)\n", m.Name, m.Binary, m.Watch.Backend)
+				cmd.Printf("manifest: %s (binary=%s)\n", m.Name, m.Binary)
 			}
 			cmd.Println("socket: " + sock)
 			if daemonLive(cmd.Context(), sock) {

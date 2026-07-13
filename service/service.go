@@ -29,8 +29,8 @@ const (
 )
 
 // DefaultDaemonPATH is the PATH a LaunchAgent should run with on Homebrew installs.
-// launchd's default PATH omits the Homebrew prefixes where tools like jj and
-// watchman live, so a scheduled job fails to find them; EnvironmentVariables
+// launchd's default PATH omits the Homebrew prefixes where tools like jj live,
+// so a scheduled job fails to find them; EnvironmentVariables
 // replaces the process PATH outright, so the system dirs are kept too. Both arches
 // are listed so a single plist works on Apple Silicon and Intel.
 const DefaultDaemonPATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -57,7 +57,7 @@ type AgentSpec struct {
 // LogName maps a full agent label to a HOME-relative log path (both StandardOutPath
 // and StandardErrorPath point at it). PreflightCheck, when set, runs before an agent
 // is loaded and aborts the install if it fails — the seam for a per-agent
-// dependency check (e.g. watchman for a file-watch daemon); it is never called for
+// dependency check (e.g. a required external tool); it is never called for
 // agents that supply no check.
 type ToolConfig struct {
 	BinaryName     string

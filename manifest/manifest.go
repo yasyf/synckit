@@ -1,7 +1,7 @@
 // Package manifest defines the JSON manifest a synckit consumer registers under
 // ~/.config/synckit/manifests/, plus discovery and validation.
 //
-// A consumer describes its binary, watch backend, and a typed service block.
+// A consumer describes its binary, watch debounce, and a typed service block.
 // synckitd starts the consumer's RPC server with the service's serve args and
 // drives reconcile/sync/state over that typed RPC transport rather than rendering
 // argv templates, so no shell or string interpolation is ever involved.
@@ -30,9 +30,8 @@ type Manifest struct {
 	Helper  *HelperSpec  `json:"helper,omitempty"`
 }
 
-// WatchSpec configures the watch backend and debounce window.
+// WatchSpec configures the watch debounce window.
 type WatchSpec struct {
-	Backend  string         `json:"backend"`
 	Debounce codec.Duration `json:"debounce"`
 }
 
@@ -58,10 +57,6 @@ type HelperSpec struct {
 	Label       string `json:"label"`
 }
 
-func validBackend(b string) bool {
-	return b == "fsnotify" || b == "watchman"
-}
-
 func validTransport(t string) bool {
 	return t == "socket" || t == "stdio"
 }
@@ -73,8 +68,6 @@ func (m Manifest) Validate() error {
 		return fmt.Errorf("manifest: field %q is required", "name")
 	case m.Binary == "":
 		return fmt.Errorf("manifest %q: field %q is required", m.Name, "binary")
-	case !validBackend(m.Watch.Backend):
-		return fmt.Errorf("manifest %q: field %q must be one of fsnotify or watchman, got %q", m.Name, "watch.backend", m.Watch.Backend)
 	case !validTransport(m.Service.Transport):
 		return fmt.Errorf("manifest %q: field %q must be one of socket or stdio, got %q", m.Name, "service.transport", m.Service.Transport)
 	case len(m.Service.ServeArgs) == 0:

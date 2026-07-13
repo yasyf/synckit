@@ -102,7 +102,7 @@ A pass fetches every peer's registry read-only, folds them in with the CRDT merg
 | `rpc` | Newline-JSON `{method,params}` over a unix socket: peer-UID check, 16 MiB line bound, read/dispatch timeouts |
 | `syncservice` | The typed sync contract over `rpc` (capabilities, list, reconcile, sync, get_state) plus the client and its three transports |
 | `watch` | The generic anti-echo watch engine: debounce, fingerprint dedupe, record-before-notify, concurrent peer fan-out, busy gating |
-| `watchbackend` | Filesystem events mapped to watch ids, over fsnotify or watchman |
+| `watchbackend` | Filesystem events mapped to watch ids over recursive fsnotify (inotify/kqueue) |
 | `hostregistry` | The host mesh: reachability detection, Tailscale and Bonjour discovery, an ssh runner, flock-guarded `state.json` |
 | `cregistry` | LWW-element-set CRDT registry with per-item payloads; pure and clock-free |
 | `converge` | The pull-only convergent-reconcile pass over a `cregistry` registry |

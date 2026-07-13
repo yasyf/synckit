@@ -199,7 +199,7 @@ func (s *supervisor) startEngine(ctx context.Context, wg *sync.WaitGroup, m mani
 			dirsByID[it.ID] = it.WatchDirs
 		}
 		start := time.Now()
-		err = watchbackend.Run(rctx, m.Watch.Backend, dirsByID, func(id string) {
+		err = watchbackend.Run(rctx, dirsByID, func(id string) {
 			eng.OnEvent(rctx, id)
 		})
 		return time.Since(start), err
@@ -213,7 +213,7 @@ func (s *supervisor) startEngine(ctx context.Context, wg *sync.WaitGroup, m mani
 }
 
 // superviseWatch runs the watch backend, restarting it with exponential backoff
-// whenever it exits while ctx is live: a watchman death or a transient list
+// whenever it exits while ctx is live: a backend death or a transient list
 // failure must not silently drop a manifest's watches until the next reload. A run
 // counts healthy only by the time run reports it spent inside the backend, so a
 // slow list that then fails fast never resets the delay. Each restart re-runs run

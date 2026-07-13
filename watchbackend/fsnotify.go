@@ -11,12 +11,12 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// rewatchInterval is how often RunFsnotify re-walks each declared root to pick up
+// rewatchInterval is how often Run re-walks each declared root to pick up
 // directories that appeared, or were deleted and recreated, since the last sweep.
 // It is a package var so tests can shrink it.
 var rewatchInterval = 30 * time.Second
 
-// RunFsnotify recursively watches every directory tree in dirsByID and fans each
+// Run recursively watches every directory tree in dirsByID and fans each
 // filesystem event out to every id whose declared tree covers it, until ctx is
 // canceled — so overlapping declared roots each fire. It holds one kqueue/inotify
 // fd per watched directory. Every rewatchInterval it re-walks each declared root,
@@ -26,7 +26,7 @@ var rewatchInterval = 30 * time.Second
 // since the lost events are unknown. Only NewWatcher failure is fatal; an
 // unwatchable dir is logged and retried by the sweep. Returns ctx.Err() on
 // cancellation.
-func RunFsnotify(ctx context.Context, dirsByID map[string][]string, onEvent EventFunc) error {
+func Run(ctx context.Context, dirsByID map[string][]string, onEvent EventFunc) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err

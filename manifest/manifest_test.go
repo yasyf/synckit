@@ -17,7 +17,6 @@ func cookiesyncManifest() Manifest {
 		Binary: "cookiesync",
 		Brew:   "yasyf/tap/cookiesync",
 		Watch: WatchSpec{
-			Backend:  "fsnotify",
 			Debounce: codec.Duration(2 * time.Second),
 		},
 		Service: ServiceSpec{
@@ -39,7 +38,6 @@ func reposyncManifest() Manifest {
 		Name:   "reposync",
 		Binary: "reposync",
 		Watch: WatchSpec{
-			Backend:  "watchman",
 			Debounce: codec.Duration(500 * time.Millisecond),
 		},
 		Service: ServiceSpec{
@@ -90,8 +88,6 @@ func TestValidate(t *testing.T) {
 		}, false},
 		{"missing name", func(m *Manifest) { m.Name = "" }, true},
 		{"missing binary", func(m *Manifest) { m.Binary = "" }, true},
-		{"empty backend", func(m *Manifest) { m.Watch.Backend = "" }, true},
-		{"unknown backend", func(m *Manifest) { m.Watch.Backend = "inotify" }, true},
 		{"missing transport", func(m *Manifest) { m.Service.Transport = "" }, true},
 		{"invalid transport", func(m *Manifest) { m.Service.Transport = "http" }, true},
 		{"empty serve_args", func(m *Manifest) { m.Service.ServeArgs = nil }, true},
@@ -125,6 +121,27 @@ func TestLoad(t *testing.T) {
 	}
 	if got.Name != "cookiesync" {
 		t.Errorf("Load().Name = %q, want cookiesync", got.Name)
+	}
+}
+
+func TestLoadLegacyBackendField(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "reposync.json")
+	legacy := `{"name":"reposync","binary":"reposync","brew":"yasyf/tap/reposync","watch":{"backend":"watchman","debounce":"15s"},"service":{"transport":"stdio","serve_args":["rpc-serve"]}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// Manifests written before the Backend field was deleted still carry it;
+	// they must load cleanly, with the unknown key ignored.
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.Name != "reposync" {
+		t.Errorf("Load().Name = %q, want reposync", got.Name)
+	}
+	if time.Duration(got.Watch.Debounce) != 15*time.Second {
+		t.Errorf("Load().Watch.Debounce = %v, want 15s", got.Watch.Debounce)
 	}
 }
 

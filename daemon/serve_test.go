@@ -191,7 +191,6 @@ func testManifest() manifest.Manifest {
 		Name:   "stub",
 		Binary: "stub",
 		Watch: manifest.WatchSpec{
-			Backend:  "fsnotify",
 			Debounce: codec.Duration(10 * time.Millisecond),
 		},
 		Service: manifest.ServiceSpec{
