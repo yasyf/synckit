@@ -3,8 +3,15 @@ package rpc
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
+	"time"
 )
+
+// slowDispatchThreshold is how long a handler may run before Dispatch logs a WARN
+// naming the method while it is still in flight — a wedged handler never completes, so
+// completion-only logging would miss the interesting case. A var so tests shrink it.
+var slowDispatchThreshold = 5 * time.Second
 
 // Handler runs one method against the params of a Request and returns the result to
 // serialize into the Response, or an error to surface to the caller. The ctx carries
@@ -65,7 +72,32 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req *Request) *Response {
 	ctx, cancel := context.WithTimeout(ctx, DispatchTimeout)
 	defer cancel()
 
+	start := time.Now()
+	// logMu keeps the in-flight WARN from printing after the completion WARN: the
+	// callback logs only while completed is false, flipped under the lock before
+	// Dispatch logs completion.
+	var logMu sync.Mutex
+	completed := false
+	warn := time.AfterFunc(slowDispatchThreshold, func() {
+		logMu.Lock()
+		defer logMu.Unlock()
+		if completed {
+			return
+		}
+		slog.WarnContext(ctx, "rpc: handler still running", "method", req.Method, "threshold", slowDispatchThreshold)
+	})
+
 	result, err := invoke(ctx, handler, req.Params)
+	elapsed := time.Since(start)
+
+	warn.Stop()
+	logMu.Lock()
+	completed = true
+	logMu.Unlock()
+	// Completion keys off measured elapsed, never Stop()'s racy boolean.
+	if elapsed >= slowDispatchThreshold {
+		slog.WarnContext(ctx, "rpc: slow handler completed", "method", req.Method, "elapsed", elapsed)
+	}
 	if err != nil {
 		return &Response{OK: false, Error: err.Error()}
 	}

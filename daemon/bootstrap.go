@@ -12,6 +12,10 @@ import (
 // synckitdBrew is the Homebrew formula installed on a peer that lacks synckitd.
 const synckitdBrew = "yasyf/tap/synckitd"
 
+// localNodeDiscovery browses bonjour for the .local node labels on the LAN; a var so
+// tests inject a deterministic result instead of a live mDNS browse.
+var localNodeDiscovery = hostregistry.LocalNodes
+
 // AddHost registers target as a peer in the shared mesh and, unless noRecurse,
 // SSH-bootstraps the mesh on it: ensure synckitd is installed, install every
 // manifest's consumer binary that declares a Brew formula, register the inverse
@@ -47,6 +51,8 @@ func AddHost(ctx context.Context, r hostregistry.Runner, manifests []manifest.Ma
 		step("self identity: " + self)
 	}
 
+	recordLANAddr(ctx, target, self, step)
+
 	if noRecurse {
 		step("no-recurse: skipping remote bootstrap")
 		return nil
@@ -79,6 +85,27 @@ func AddHost(ctx context.Context, r hostregistry.Runner, manifests []manifest.Ma
 	}
 
 	return nil
+}
+
+// recordLANAddr records target's ".local" mDNS address as a LAN dial candidate when
+// bonjour sees target's node on the network, so a later ExecSSH reaches it over the LAN
+// (under sshd's TCC identity) before the tailnet. Best-effort: a browse miss or a
+// record failure is a note, never fatal.
+func recordLANAddr(ctx context.Context, target, self string, step func(string)) {
+	nodes, _ := localNodeDiscovery(ctx, hostregistry.HostNode(self))
+	tgtNode := hostregistry.HostNode(target)
+	for _, n := range nodes {
+		if !strings.EqualFold(n, tgtNode) {
+			continue
+		}
+		addr := hostregistry.LocalTarget(target)
+		if err := hostregistry.Mesh.AddAddr(ctx, target, addr); err != nil {
+			step(fmt.Sprintf("WARN record LAN address %s: %v", addr, err))
+			return
+		}
+		step("recorded LAN dial address " + addr)
+		return
+	}
 }
 
 // ensureRemoteDaemon installs synckitd on target over ssh unless it is already on

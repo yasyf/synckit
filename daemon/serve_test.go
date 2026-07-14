@@ -441,6 +441,111 @@ func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
 	}
 }
 
+// countingTransport is a Transport that records how many times it was closed, so a
+// test can assert the supervisor closes every transport it builds on teardown. Do
+// always fails, so the watch goroutine driving it never blocks on a real exchange.
+type countingTransport struct {
+	mu      sync.Mutex
+	closed  bool
+	onClose func()
+}
+
+func (*countingTransport) Do(context.Context, *rpc.Request) (*syncservice.Response, error) {
+	return nil, errFakeDown
+}
+
+func (t *countingTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.closed {
+		t.closed = true
+		t.onClose()
+	}
+	return nil
+}
+
+func (t *countingTransport) isClosed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closed
+}
+
+// TestReloadClosesEveryTransport proves generation teardown closes every transport the
+// supervisor built: a reload tears down and closes the prior generation's clients, and
+// stop closes the current one, so no ssh tunnel or child is leaked across a rebind.
+func TestReloadClosesEveryTransport(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if _, err := hostregistry.Mesh.Update(context.Background(), func(g *hostregistry.Registry) error {
+		g.Self = "me@self"
+		return nil
+	}); err != nil {
+		t.Fatalf("seed mesh: %v", err)
+	}
+
+	manifestsDir, err := ensureManifestsDir()
+	if err != nil {
+		t.Fatalf("ensure manifests dir: %v", err)
+	}
+	raw, err := json.Marshal(testManifest())
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestsDir, "stub.json"), raw, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	var (
+		mu         sync.Mutex
+		built      int
+		closed     int
+		transports []*countingTransport
+	)
+	prev := dialTransport
+	dialTransport = func(manifest.Manifest, string, string) syncservice.Transport {
+		transport := &countingTransport{onClose: func() {
+			mu.Lock()
+			closed++
+			mu.Unlock()
+		}}
+		mu.Lock()
+		built++
+		transports = append(transports, transport)
+		mu.Unlock()
+		return transport
+	}
+	t.Cleanup(func() { dialTransport = prev })
+
+	sup := newSupervisor()
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(sup.stop) }
+	t.Cleanup(stop)
+	ctx := context.Background()
+	if err := sup.reload(ctx); err != nil {
+		t.Fatalf("reload 1: %v", err)
+	}
+	mu.Lock()
+	generation1 := append([]*countingTransport(nil), transports...)
+	mu.Unlock()
+	if err := sup.reload(ctx); err != nil {
+		t.Fatalf("reload 2: %v", err)
+	}
+	for i, transport := range generation1 {
+		if !transport.isClosed() {
+			t.Fatalf("generation 1 transport %d was not closed by reload", i)
+		}
+	}
+	stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if built == 0 {
+		t.Fatal("no transports were built")
+	}
+	if closed != built {
+		t.Fatalf("closed %d of %d transports; generation teardown must close every one", closed, built)
+	}
+}
+
 // callReload invokes the reload rpc, retrying dial failures until the daemon has
 // bound its socket.
 func callReload(t *testing.T, sock string) *rpc.Response {

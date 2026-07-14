@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -9,8 +10,20 @@ import (
 	"github.com/yasyf/synckit/manifest"
 )
 
+// stubLocalNodes replaces the live bonjour browse with a fixed node list, so AddHost
+// tests neither wait on a 3s mDNS browse nor pick up real LAN hosts.
+func stubLocalNodes(t *testing.T, nodes ...string) {
+	t.Helper()
+	prev := localNodeDiscovery
+	localNodeDiscovery = func(context.Context, string) ([]string, []hostregistry.SkipNote) {
+		return nodes, nil
+	}
+	t.Cleanup(func() { localNodeDiscovery = prev })
+}
+
 func TestAddHostStepSequence(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	stubLocalNodes(t)
 
 	mock := hostregistry.NewMockRunner().
 		OnSSH("command -v synckitd", "", nil).   // synckitd not installed
@@ -62,6 +75,7 @@ func TestAddHostStepSequence(t *testing.T) {
 
 func TestAddHostNoRecurse(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	stubLocalNodes(t)
 	mock := hostregistry.NewMockRunner().DefaultSSH("", nil)
 
 	err := AddHost(context.Background(), mock, nil, "peer@node", "me@self", true, nil)
@@ -82,6 +96,7 @@ func TestAddHostNoRecurse(t *testing.T) {
 
 func TestAddHostConsumerAlreadyInstalled(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	stubLocalNodes(t)
 	mock := hostregistry.NewMockRunner().
 		OnSSH("command -v synckitd", "/opt/homebrew/bin/synckitd", nil).
 		OnSSH("command -v cookiesync", "/opt/homebrew/bin/cookiesync", nil).
@@ -98,6 +113,47 @@ func TestAddHostConsumerAlreadyInstalled(t *testing.T) {
 		if strings.Contains(c, "brew install") {
 			t.Errorf("brew install ran for an already-installed peer: %q", c)
 		}
+	}
+}
+
+// TestAddHostRecordsBonjourLocalAddr proves that when bonjour sees the peer's node on
+// the LAN, host add records its .local address as a dial candidate tried before the
+// tailnet FQDN.
+func TestAddHostRecordsBonjourLocalAddr(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	stubLocalNodes(t, "node")
+
+	mock := hostregistry.NewMockRunner().DefaultSSH("", nil)
+	if err := AddHost(context.Background(), mock, nil, "peer@node.tail.ts.net", "me@self", true, nil); err != nil {
+		t.Fatalf("AddHost: %v", err)
+	}
+
+	got, err := hostregistry.DialAddrs("peer@node.tail.ts.net")
+	if err != nil {
+		t.Fatalf("DialAddrs: %v", err)
+	}
+	want := []string{"peer@node.local", "peer@node.tail.ts.net"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("DialAddrs = %v, want %v (LAN .local first, tailnet last)", got, want)
+	}
+}
+
+// TestRemoteBrewInstallSurfacesNoFormulaFromStdout proves remoteBrewInstall reads brew's
+// missing-formula message off captured stdout — not only the error text — and turns it
+// into the actionable "publish a goreleaser release" hint.
+func TestRemoteBrewInstallSurfacesNoFormulaFromStdout(t *testing.T) {
+	mock := hostregistry.NewMockRunner().
+		OnSSH("brew install yasyf/tap/synckitd",
+			`Error: No available formula with the name "yasyf/tap/synckitd".`,
+			errors.New("ssh me@peer: exit status 1")).
+		DefaultSSH("", nil)
+
+	err := remoteBrewInstall(context.Background(), mock, "peer@node", "yasyf/tap/synckitd")
+	if err == nil {
+		t.Fatal("remoteBrewInstall succeeded, want the missing-formula error")
+	}
+	if !strings.Contains(err.Error(), "publish a goreleaser release") {
+		t.Fatalf("error = %v, want the actionable no-formula hint derived from captured stdout", err)
 	}
 }
 

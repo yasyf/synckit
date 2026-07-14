@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/brutella/dnssd"
 )
 
 const tailscaleStatusJSON = `{
@@ -297,6 +299,41 @@ func TestBonjourCandidatesSkipsSelf(t *testing.T) {
 				t.Fatalf("skip note reason = %q, want %q", notes[0].Reason, "self")
 			}
 		})
+	}
+}
+
+// TestLocalNodesHonorsRemoval drives the browse add/remove closures the way
+// dnssd.LookupType would — hello for two peers, then a goodbye for one — and proves the
+// departed peer no longer surfaces as a .local dial candidate, while the surviving peer
+// does. A goodbye keyed on the same service instance identity as its hello.
+func TestLocalNodesHonorsRemoval(t *testing.T) {
+	set := newBrowseSet()
+	hello := func(e dnssd.BrowseEntry) { set.add(e.ServiceInstanceName(), bonjourNode(e)) }
+	goodbye := func(e dnssd.BrowseEntry) { set.remove(e.ServiceInstanceName()) }
+
+	entry := func(name string) dnssd.BrowseEntry {
+		return dnssd.BrowseEntry{Name: name, Host: name + ".local", Type: "_ssh._tcp", Domain: "local"}
+	}
+	home := entry("yasyf-home")
+	air := entry("yasyf-air")
+
+	hello(home)
+	hello(air)
+	goodbye(home)
+
+	labels, notes := localNodes(set.nodes(), "yBook-Pro")
+	if strings.Join(labels, ",") != "yasyf-air" {
+		t.Fatalf("labels = %v, want [yasyf-air] (a peer that said goodbye mid-browse must not linger)", labels)
+	}
+	if len(notes) != 0 {
+		t.Fatalf("notes = %+v, want none", notes)
+	}
+
+	// A re-hello after the goodbye brings the peer back.
+	hello(home)
+	labels, _ = localNodes(set.nodes(), "yBook-Pro")
+	if strings.Join(labels, ",") != "yasyf-air,yasyf-home" {
+		t.Fatalf("labels = %v, want [yasyf-air yasyf-home] after re-advertise", labels)
 	}
 }
 

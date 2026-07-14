@@ -18,8 +18,36 @@ func newHostCmd() *cobra.Command {
 			return cmd.Help()
 		},
 	}
-	cmd.AddCommand(newHostAddCmd(), newHostLsCmd(), newHostRmCmd(), newHostVerifyCmd())
+	cmd.AddCommand(newHostAddCmd(), newHostAddrCmd(), newHostLsCmd(), newHostRmCmd(), newHostVerifyCmd())
 	return cmd
+}
+
+func newHostAddrCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "addr",
+		Short: "Manage a peer's alternate SSH dial addresses.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
+	}
+	cmd.AddCommand(newHostAddrAddCmd())
+	return cmd
+}
+
+func newHostAddrAddCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "add <target> <addr>",
+		Short: "Record a LAN/.local dial address tried before target's tailnet FQDN.",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := hostregistry.Mesh.AddAddr(cmd.Context(), args[0], args[1]); err != nil {
+				return err
+			}
+			cmd.Printf("recorded dial address %s for %s\n", args[1], args[0])
+			return nil
+		},
+	}
 }
 
 func newHostAddCmd() *cobra.Command {

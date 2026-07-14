@@ -197,18 +197,108 @@ func discoverBonjour(ctx context.Context, localUser, localHostName string) ([]Ho
 	ctx2, cancel := context.WithTimeout(ctx, bonjourTimeout)
 	defer cancel()
 
-	var nodes []string
-	add := func(e dnssd.BrowseEntry) {
-		nodes = append(nodes, bonjourNode(e))
-	}
-	rmv := func(dnssd.BrowseEntry) {}
+	set := newBrowseSet()
+	add := func(e dnssd.BrowseEntry) { set.add(e.ServiceInstanceName(), bonjourNode(e)) }
+	rmv := func(e dnssd.BrowseEntry) { set.remove(e.ServiceInstanceName()) }
 
 	err := dnssd.LookupType(ctx2, "_ssh._tcp.local.", add, rmv)
-	cands, notes := bonjourCandidates(nodes, localUser, localHostName)
+	cands, notes := bonjourCandidates(set.nodes(), localUser, localHostName)
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 		return cands, append(notes, SkipNote{Name: "bonjour", Reason: err.Error()})
 	}
 	return cands, notes
+}
+
+// LocalNodes browses _ssh._tcp.local for up to bonjourTimeout and returns the mDNS
+// node labels present on the LAN, excluding this host (matched case-insensitively
+// against localHostName). It is the source of the .local dial candidates host add
+// records for a peer. Best-effort: a failing browse yields whatever it saw plus a note.
+func LocalNodes(ctx context.Context, localHostName string) ([]string, []SkipNote) {
+	ctx2, cancel := context.WithTimeout(ctx, bonjourTimeout)
+	defer cancel()
+
+	set := newBrowseSet()
+	add := func(e dnssd.BrowseEntry) { set.add(e.ServiceInstanceName(), bonjourNode(e)) }
+	rmv := func(e dnssd.BrowseEntry) { set.remove(e.ServiceInstanceName()) }
+
+	err := dnssd.LookupType(ctx2, "_ssh._tcp.local.", add, rmv)
+	labels, notes := localNodes(set.nodes(), localHostName)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		return labels, append(notes, SkipNote{Name: "bonjour", Reason: err.Error()})
+	}
+	return labels, notes
+}
+
+// browseSet tracks the mDNS service instances currently present on the LAN as browse
+// add/remove callbacks fire, keyed by service instance identity so a goodbye drops
+// exactly the record its hello added. First-seen order is preserved so the derived node
+// list stays stable. dnssd.LookupType invokes the callbacks synchronously from its own
+// browse loop, so no locking is needed.
+type browseSet struct {
+	order  []string
+	labels map[string]string
+}
+
+func newBrowseSet() *browseSet {
+	return &browseSet{labels: map[string]string{}}
+}
+
+func (s *browseSet) add(id, label string) {
+	if _, ok := s.labels[id]; !ok {
+		s.order = append(s.order, id)
+	}
+	s.labels[id] = label
+}
+
+func (s *browseSet) remove(id string) {
+	if _, ok := s.labels[id]; !ok {
+		return
+	}
+	delete(s.labels, id)
+	for i, existing := range s.order {
+		if existing == id {
+			s.order = append(s.order[:i], s.order[i+1:]...)
+			break
+		}
+	}
+}
+
+func (s *browseSet) nodes() []string {
+	out := make([]string, 0, len(s.order))
+	for _, id := range s.order {
+		out = append(out, s.labels[id])
+	}
+	return out
+}
+
+// localNodes dedupes browsed node labels case-insensitively, dropping empties and any
+// entry matching localHostName. Factored out because dnssd.LookupType is not mockable.
+func localNodes(nodes []string, localHostName string) ([]string, []SkipNote) {
+	var (
+		labels   []string
+		notes    []SkipNote
+		seenSelf bool
+	)
+	seen := map[string]struct{}{}
+	for _, node := range nodes {
+		if node == "" {
+			continue
+		}
+		if strings.EqualFold(node, localHostName) {
+			if !seenSelf {
+				notes = append(notes, SkipNote{Name: node, Reason: "self"})
+				seenSelf = true
+			}
+			continue
+		}
+		key := strings.ToLower(node)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		labels = append(labels, node)
+	}
+	return labels, notes
 }
 
 // bonjourCandidates dedupes browsed node labels into candidates, dropping any

@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/yasyf/synckit/debug"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
@@ -61,6 +62,18 @@ func serve(ctx context.Context) error {
 		return fmt.Errorf("migrate legacy mesh: %w", err)
 	}
 	if _, err := ensureManifestsDir(); err != nil {
+		return err
+	}
+
+	dir, err := hostregistry.Mesh.Dir()
+	if err != nil {
+		return err
+	}
+	// Scope the dump listener to a ctx serve cancels on return, so an early error below
+	// (a bound socket, a reload failure) never leaks its goroutine or SIGUSR1 registration.
+	dumpCtx, stopDump := context.WithCancel(ctx)
+	defer stopDump()
+	if err := debug.DumpOnSIGUSR1(dumpCtx, dir); err != nil {
 		return err
 	}
 
