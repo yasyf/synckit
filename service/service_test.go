@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const fakeExe = "/opt/homebrew/Cellar/synckit/1.2.3/bin/synckit"
@@ -362,22 +365,46 @@ func keyOrder(xmlStr string, want []string) bool {
 }
 
 // fakeLauncher records the plist paths passed to Bootstrap and the labels passed to
-// Bootout, in call order, and can be told to fail Bootstrap/Bootout.
+// Bootout, in call order. bootstrapErrs and bootoutErrs are per-call error queues:
+// each call pops the next error (an empty queue means success), so a test can script
+// a bootstrap that fails a few times then succeeds. events is one interleaved log of
+// bootstrap/bootout/sleep in true call order (the sleep entries come from the sleep
+// method a retry test wires into the manager), and delays captures the backoff
+// durations, so a test pins ordering, not just counts.
 type fakeLauncher struct {
-	bootstrapped []string // plist paths
-	bootedOut    []string // launchd labels
-	bootoutErr   error
-	bootstrapErr error
+	bootstrapped  []string // plist paths
+	bootedOut     []string // launchd labels
+	bootstrapErrs []error
+	bootoutErrs   []error
+	events        []string
+	delays        []time.Duration
 }
 
 func (f *fakeLauncher) Bootstrap(_ context.Context, plistPath string) error {
 	f.bootstrapped = append(f.bootstrapped, plistPath)
-	return f.bootstrapErr
+	f.events = append(f.events, "bootstrap")
+	return popErr(&f.bootstrapErrs)
 }
 
 func (f *fakeLauncher) Bootout(_ context.Context, label string) error {
 	f.bootedOut = append(f.bootedOut, label)
-	return f.bootoutErr
+	f.events = append(f.events, "bootout")
+	return popErr(&f.bootoutErrs)
+}
+
+func (f *fakeLauncher) sleep(_ context.Context, d time.Duration) error {
+	f.delays = append(f.delays, d)
+	f.events = append(f.events, "sleep "+d.String())
+	return nil
+}
+
+func popErr(q *[]error) error {
+	if len(*q) == 0 {
+		return nil
+	}
+	err := (*q)[0]
+	*q = (*q)[1:]
+	return err
 }
 
 func skipNonDarwin(t *testing.T) {
@@ -597,4 +624,225 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func equalDurations(a, b []time.Duration) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		//nolint:gosec // G602: guarded above by len(a) != len(b), so b[i] is in range for every i in range a.
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// wrapExit wraps a real exit-N error the way the production launcher does
+// (launchctl bootstrap %s: %w: %s), so a test proves isInFlux/errors.As reach the
+// ExitError through the wrap rather than passing only against a bare exit error.
+func wrapExit(t *testing.T, n int) error {
+	t.Helper()
+	return fmt.Errorf("launchctl bootstrap /p.plist: %w: %s", exitErr(t, n), "Bootstrap failed: 5: Input/output error")
+}
+
+// TestInstallBootstrapRetryThenSucceed proves a bootstrap that hits launchd's EIO
+// (exit 5) twice then succeeds installs cleanly, and pins the exact interleaving of
+// bootstrap, backoff sleep, and re-bootout — a count-only check would pass a broken
+// order.
+func TestInstallBootstrapRetryThenSucceed(t *testing.T) {
+	skipNonDarwin(t)
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig()
+
+	f := &fakeLauncher{bootstrapErrs: []error{wrapExit(t, 5), wrapExit(t, 5)}}
+	m := NewLaunchdManager(f)
+	m.sleep = f.sleep
+
+	if err := m.Install(context.Background(), cfg, true); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	// The leading bootout is installAgent's reload bootout; the rest is the retry loop.
+	wantEvents := []string{
+		"bootout",
+		"bootstrap", "sleep 200ms", "bootout",
+		"bootstrap", "sleep 400ms", "bootout",
+		"bootstrap",
+	}
+	if !equalStrings(f.events, wantEvents) {
+		t.Errorf("event order = %v, want %v", f.events, wantEvents)
+	}
+}
+
+// TestInstallBootstrapRetryExhaustion proves a bootstrap that hits EIO on every one
+// of bootstrapAttempts tries fails install, sleeps the full doubling schedule, boots
+// out once per retry (no extra bootout after the final failed bootstrap), and
+// surfaces the exact final queued error — identity-pinned and reachable as an
+// *exec.ExitError (code 5) through the production-style wrap.
+func TestInstallBootstrapRetryExhaustion(t *testing.T) {
+	skipNonDarwin(t)
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig()
+
+	errs := make([]error, bootstrapAttempts)
+	for i := range errs {
+		errs[i] = wrapExit(t, 5)
+	}
+	f := &fakeLauncher{bootstrapErrs: errs}
+	m := NewLaunchdManager(f)
+	m.sleep = f.sleep
+
+	err := m.Install(context.Background(), cfg, true)
+	if err == nil {
+		t.Fatal("Install should fail after exhausting bootstrap retries")
+	}
+	if len(f.bootstrapped) != bootstrapAttempts {
+		t.Errorf("Bootstrap calls = %d, want %d", len(f.bootstrapped), bootstrapAttempts)
+	}
+	// 1 initial bootout + 5 retry bootouts; none after the sixth (final) bootstrap.
+	if len(f.bootedOut) != bootstrapAttempts {
+		t.Errorf("Bootout calls = %d, want %d (1 initial + 5 retry)", len(f.bootedOut), bootstrapAttempts)
+	}
+	wantDelays := []time.Duration{
+		200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond,
+		1600 * time.Millisecond, 3200 * time.Millisecond,
+	}
+	if !equalDurations(f.delays, wantDelays) {
+		t.Errorf("sleeps = %v, want %v", f.delays, wantDelays)
+	}
+	// The distinct final queued error is the one surfaced, pinned through the wrap chain.
+	if !errors.Is(err, errs[bootstrapAttempts-1]) {
+		t.Errorf("errors.Is did not reach the final queued error; err = %v", err)
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 5 {
+		t.Errorf("errors.As = %v, want *exec.ExitError with code 5", err)
+	}
+	if !strings.Contains(err.Error(), "bootstrap com.example.synckit.tick") {
+		t.Errorf("error %q missing labeled bootstrap wrap", err)
+	}
+}
+
+// TestInstallSessionTypeHint proves the parenthetical hint appears only when a
+// persistent EIO exhausts the retries on a session-limited agent, and that a non-EIO
+// exit fails at once with no retry, no sleep, and no hint.
+func TestInstallSessionTypeHint(t *testing.T) {
+	skipNonDarwin(t)
+
+	exhaust := func() []error {
+		errs := make([]error, bootstrapAttempts)
+		for i := range errs {
+			errs[i] = exitErr(t, 5)
+		}
+		return errs
+	}
+
+	for _, tt := range []struct {
+		name          string
+		agentLabel    string
+		bootstrapErrs []error
+		wantBootstrap int
+		wantBootout   int
+		wantSleeps    int
+		wantHint      bool
+	}{
+		{"aqua-limited EIO exhaustion gets hint", "watch", exhaust(), bootstrapAttempts, bootstrapAttempts, bootstrapAttempts - 1, true},
+		{"non-limited EIO exhaustion gets no hint", "tick", exhaust(), bootstrapAttempts, bootstrapAttempts, bootstrapAttempts - 1, false},
+		{"exit 1 fails at once without retry or hint", "watch", []error{exitErr(t, 1)}, 1, 1, 0, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			cfg := testConfig()
+			cfg.Agents = []AgentSpec{agentByLabel(cfg, tt.agentLabel)}
+			f := &fakeLauncher{bootstrapErrs: tt.bootstrapErrs}
+			m := NewLaunchdManager(f)
+			m.sleep = f.sleep
+
+			err := m.Install(context.Background(), cfg, false)
+			if err == nil {
+				t.Fatal("Install should fail")
+			}
+			if len(f.bootstrapped) != tt.wantBootstrap {
+				t.Errorf("Bootstrap calls = %d, want %d", len(f.bootstrapped), tt.wantBootstrap)
+			}
+			if len(f.bootedOut) != tt.wantBootout {
+				t.Errorf("Bootout calls = %d, want %d", len(f.bootedOut), tt.wantBootout)
+			}
+			if len(f.delays) != tt.wantSleeps {
+				t.Errorf("sleeps = %d, want %d", len(f.delays), tt.wantSleeps)
+			}
+			gotHint := strings.Contains(err.Error(), "limited to session type Aqua")
+			if gotHint != tt.wantHint {
+				t.Errorf("hint present = %v, want %v (err: %q)", gotHint, tt.wantHint, err)
+			}
+		})
+	}
+}
+
+// TestInstallBootstrapRetryBootoutFails proves that when the retry bootout itself
+// fails with EIO, install fails after exactly one bootstrap with the bootout-retry
+// wrap and — critically — does NOT misdiagnose it with the session-type hint, even on
+// a session-limited agent whose bootout error also carries exit 5.
+func TestInstallBootstrapRetryBootoutFails(t *testing.T) {
+	skipNonDarwin(t)
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig()
+	cfg.Agents = []AgentSpec{agentByLabel(cfg, "watch")} // Aqua-limited
+
+	f := &fakeLauncher{
+		bootstrapErrs: []error{exitErr(t, 5)},
+		bootoutErrs:   []error{nil, exitErr(t, 5)}, // initial bootout ok; retry bootout fails
+	}
+	m := NewLaunchdManager(f)
+	m.sleep = f.sleep
+
+	err := m.Install(context.Background(), cfg, false)
+	if err == nil {
+		t.Fatal("Install should fail when the retry bootout fails")
+	}
+	if len(f.bootstrapped) != 1 {
+		t.Errorf("Bootstrap calls = %d, want 1", len(f.bootstrapped))
+	}
+	if len(f.bootedOut) != 2 {
+		t.Errorf("Bootout calls = %d, want 2 (initial + retry)", len(f.bootedOut))
+	}
+	wantDelays := []time.Duration{200 * time.Millisecond}
+	if !equalDurations(f.delays, wantDelays) {
+		t.Errorf("sleeps = %v, want %v", f.delays, wantDelays)
+	}
+	if !strings.Contains(err.Error(), "bootout com.example.synckit.watch before retry") {
+		t.Errorf("error %q missing bootout-before-retry wrap", err)
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 5 {
+		t.Errorf("errors.As = %v, want *exec.ExitError with code 5", err)
+	}
+	if strings.Contains(err.Error(), "limited to session type") {
+		t.Errorf("bootout failure wrongly carries the session-type hint: %q", err)
+	}
+}
+
+// TestInstallBootstrapCtxCancel proves a context canceled during the first backoff
+// aborts install through the real sleepCtx after exactly one bootstrap attempt.
+func TestInstallBootstrapCtxCancel(t *testing.T) {
+	skipNonDarwin(t)
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig()
+
+	f := &fakeLauncher{bootstrapErrs: []error{exitErr(t, 5)}}
+	m := NewLaunchdManager(f)
+	ctx, cancel := context.WithCancel(context.Background())
+	m.sleep = func(c context.Context, d time.Duration) error {
+		cancel()
+		return sleepCtx(c, d)
+	}
+
+	err := m.Install(ctx, cfg, true)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Install error = %v, want context.Canceled", err)
+	}
+	if len(f.bootstrapped) != 1 {
+		t.Errorf("Bootstrap calls = %d, want 1", len(f.bootstrapped))
+	}
 }

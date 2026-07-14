@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 )
 
 const (
@@ -26,6 +27,11 @@ const (
 
 	plistFileMode = 0o644
 	agentsDirMode = 0o755
+
+	// bootstrapAttempts bounds the bootout/bootstrap retries on launchd EIO; the
+	// doubling backoff from bootstrapBaseDelay caps the total wait near 6.2s.
+	bootstrapAttempts  = 6
+	bootstrapBaseDelay = 200 * time.Millisecond
 )
 
 // DefaultDaemonPATH is the PATH a LaunchAgent should run with on Homebrew installs.
@@ -76,8 +82,9 @@ func (c ToolConfig) FullLabel(agent AgentSpec) string {
 
 // Launcher bootstraps and boots out launchd jobs in the user's GUI domain; the
 // launchctl boundary tests inject. Bootout tolerates a not-loaded agent so a
-// reinstall is idempotent; Bootstrap tolerates nothing, since install boots out
-// first and a nonzero bootstrap (e.g. a malformed plist) is a real error.
+// reinstall is idempotent. Bootstrap surfaces every nonzero exit; install itself
+// retries the launchd EIO (exit 5) that a still-draining bootout or a respawning
+// KeepAlive job races, so the Launcher stays a thin, agent-agnostic shell.
 type Launcher interface {
 	// Bootstrap registers the job described by the plist at plistPath.
 	Bootstrap(ctx context.Context, plistPath string) error
@@ -89,16 +96,32 @@ type Launcher interface {
 // Launcher. Construct it with NewLaunchdManager.
 type LaunchdManager struct {
 	launcher Launcher
+	sleep    func(ctx context.Context, d time.Duration) error
 }
 
 // NewLaunchdManager returns a manager that drives launchd through launcher.
 func NewLaunchdManager(launcher Launcher) *LaunchdManager {
-	return &LaunchdManager{launcher: launcher}
+	return &LaunchdManager{launcher: launcher, sleep: sleepCtx}
+}
+
+// sleepCtx waits d or until ctx is done, returning ctx.Err() if ctx is canceled
+// first, so a backoff honors process shutdown.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // Install resolves this executable, then for each agent (tickOnly stops after the
 // first) renders its plist, writes it, runs the agent's preflight check, and loads
-// it. Each agent is booted out before bootstrap so re-install picks up plist changes.
+// it. Each agent is booted out before bootstrap so re-install picks up plist changes;
+// a bootstrap that hits launchd's EIO (exit 5) — a still-draining bootout or a
+// respawning KeepAlive job — retries the bootout/bootstrap pair on a doubling backoff.
 func (m *LaunchdManager) Install(ctx context.Context, cfg ToolConfig, tickOnly bool) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("install requires macOS launchd, not %s", runtime.GOOS)
@@ -167,10 +190,56 @@ func (m *LaunchdManager) installAgent(ctx context.Context, cfg ToolConfig, agent
 	if err := m.launcher.Bootout(ctx, label); err != nil {
 		return fmt.Errorf("bootout %s before reload: %w", label, err)
 	}
-	if err := m.launcher.Bootstrap(ctx, path); err != nil {
+	if err := m.bootstrapWithRetry(ctx, agent, label, path); err != nil {
 		return fmt.Errorf("bootstrap %s: %w", label, err)
 	}
 	return nil
+}
+
+// bootstrapWithRetry bootstraps the plist at path, retrying the bootout/bootstrap
+// pair on launchd's EIO (exit 5) — a bootout of a running KeepAlive agent is
+// asynchronous, so its registration can still be draining or the job can have
+// respawned when the immediate bootstrap lands. The first attempt is a bare
+// bootstrap (installAgent already booted out); each retry sleeps a doubling backoff,
+// re-boots out, and bootstraps again, up to bootstrapAttempts. A non-EIO bootstrap
+// error, a bootout failure, or ctx cancellation returns at once. Only a bootstrap
+// that gives up with an EIO carries sessionTypeHint — the bootout-retry failure
+// never does, since it is not a wrong-session symptom.
+func (m *LaunchdManager) bootstrapWithRetry(ctx context.Context, agent AgentSpec, label, path string) error {
+	delay := bootstrapBaseDelay
+	for attempt := 0; ; attempt++ {
+		err := m.launcher.Bootstrap(ctx, path)
+		if err == nil {
+			return nil
+		}
+		if attempt == bootstrapAttempts-1 || !isInFlux(err) {
+			if hint := sessionTypeHint(agent, err); hint != "" {
+				return fmt.Errorf("%w%s", err, hint)
+			}
+			return err
+		}
+		if err := m.sleep(ctx, delay); err != nil {
+			return err
+		}
+		delay *= 2
+		if err := m.launcher.Bootout(ctx, label); err != nil {
+			return fmt.Errorf("bootout %s before retry: %w", label, err)
+		}
+	}
+}
+
+// sessionTypeHint returns a parenthetical naming the likely cause of a persistent
+// EIO on a session-limited agent — a bootstrap from outside its session type, e.g.
+// over ssh — or "" when err is not an EIO or the agent sets no LimitLoadToSessionType.
+func sessionTypeHint(agent AgentSpec, err error) string {
+	if !isInFlux(err) {
+		return ""
+	}
+	sessionType, ok := agent.ExtraKeys["LimitLoadToSessionType"].(string)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf(" (agent is limited to session type %s; bootstrapping from outside that session (e.g. over ssh) fails — run install from a terminal in the GUI session)", sessionType)
 }
 
 // exePath returns the path used to invoke this binary, deliberately NOT resolving

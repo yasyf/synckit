@@ -9,9 +9,15 @@ import (
 	"os/exec"
 )
 
-// notLoadedExit is launchctl bootout's exit code (ESRCH) when the target agent
-// isn't loaded — the only tolerated bootout failure, by code, never by stderr text.
-const notLoadedExit = 3
+const (
+	// notLoadedExit is launchctl bootout's exit code (ESRCH) when the target agent
+	// isn't loaded — the only tolerated bootout failure, by code, never by stderr text.
+	notLoadedExit = 3
+	// inFluxExit is launchd's catch-all EIO exit code (Input/output error). It surfaces
+	// when a booted-out registration is still draining, when KeepAlive respawned the
+	// job, or when bootstrapping a session-limited agent from the wrong session type.
+	inFluxExit = 5
+)
 
 // launchctlLauncher is the production Launcher: it shells out to launchctl's modern
 // domain API (bootstrap/bootout gui/<uid>), which reports failures via exit code.
@@ -44,11 +50,26 @@ func (launchctlLauncher) Bootout(ctx context.Context, label string) error {
 	return fmt.Errorf("launchctl bootout %s: %w: %s", label, err, bytes.TrimSpace(out))
 }
 
-// isNotLoaded reports whether err is launchctl bootout's ESRCH exit (the agent
-// isn't loaded) — expected on a first install and during reload. The decision is by
-// exit code only, never by stderr text, since the code is stable across macOS
-// versions while the message is not.
-func isNotLoaded(err error) bool {
+// launchctlExitCode returns the process exit code carried by err, or -1 when err is
+// nil or not an *exec.ExitError. Classification is by exit code only, never by stderr
+// text, since the code is stable across macOS versions while the message is not.
+func launchctlExitCode(err error) int {
 	var exitErr *exec.ExitError
-	return errors.As(err, &exitErr) && exitErr.ExitCode() == notLoadedExit
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+// isNotLoaded reports whether err is launchctl bootout's ESRCH exit (the agent
+// isn't loaded) — expected on a first install and during reload.
+func isNotLoaded(err error) bool {
+	return launchctlExitCode(err) == notLoadedExit
+}
+
+// isInFlux reports whether err is launchd's catch-all EIO exit (exit 5): a
+// booted-out registration still draining, KeepAlive having respawned the job, or a
+// session-limited agent bootstrapped from the wrong session type.
+func isInFlux(err error) bool {
+	return launchctlExitCode(err) == inFluxExit
 }

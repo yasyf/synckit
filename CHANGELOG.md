@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the shared mesh.
 
 ### Fixed
+- `install` no longer fails with launchd's EIO (`Bootstrap failed: 5: Input/output error`) when it
+  reloads a running KeepAlive agent. Booting out a live KeepAlive job is asynchronous — the old
+  registration can still be draining, or KeepAlive can have respawned the job — so the immediate
+  bootstrap raced launchd's catch-all EIO; install now retries the bootout-then-bootstrap pair on
+  exit 5 with a doubling backoff. A persistent EIO on a session-limited agent
+  (`LimitLoadToSessionType`) now names the likely cause — installing from outside that session type,
+  e.g. over ssh — instead of surfacing the bare exit code.
 - The shared TUI no longer renders past the bottom of the terminal. The master-detail split
   double-subtracted each panel's horizontal padding, so a row sized to the full column width wrapped
   onto a second line and pushed the layout off-screen; both panes now render at their budgeted width
