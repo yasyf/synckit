@@ -110,6 +110,28 @@ func (r Registry[V]) Present() Registry[V] {
 	return present
 }
 
+// Compact returns a copy of r with expired tombstones dropped: every present
+// (non-removed) entry is kept, every tombstone whose Removed stamp is within the
+// horizon of now (Removed >= now-horizon) is kept, and every older tombstone —
+// including an Added==0 zero-value phantom left by a [Registry.Remove] that never
+// saw an add — is dropped. The receiver is not modified.
+//
+// The drop trades space for a resurrection hazard: a dropped tombstone re-admits
+// its id if this registry is later merged with a peer that stayed offline longer
+// than the horizon and still carries the item as a live add, because [Merge] no
+// longer has the remove stamp to out-order it. Callers must choose horizon well
+// above the longest expected peer offline time.
+func (r Registry[V]) Compact(now, horizon Micros) Registry[V] {
+	cutoff := now - horizon
+	compacted := make(Registry[V])
+	for id, entry := range r {
+		if entry.Present() || entry.Removed >= cutoff {
+			compacted[id] = entry
+		}
+	}
+	return compacted
+}
+
 // Merge is the lattice join of two registries: a new registry where each id present
 // in either input takes the per-field maximum of its stamps — the newest add, the
 // newest remove — and the value of whichever side has the strictly-newer add. When

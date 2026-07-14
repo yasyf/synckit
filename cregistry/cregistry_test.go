@@ -404,6 +404,132 @@ func TestPresentSubset(t *testing.T) {
 	}
 }
 
+// ---- COMPACTION: horizon-gated tombstone drop and its resurrection hazard ----
+
+func TestCompact(t *testing.T) {
+	const now, horizon = Micros(1_000), Micros(100)
+	const cutoff = now - horizon // 900: a tombstone is expired iff Removed < cutoff
+
+	tests := []struct {
+		name  string
+		build func(r Registry[val])
+		want  []string
+	}{
+		{
+			name:  "present entry always kept",
+			build: func(r Registry[val]) { r.Add("live", val{Tag: "a"}, 500) },
+			want:  []string{"live"},
+		},
+		{
+			name: "re-added entry kept despite an expired remove stamp",
+			build: func(r Registry[val]) {
+				r.Add("readd", val{Tag: "a"}, 100)
+				r.Remove("readd", 500) // expired, but…
+				r.Add("readd", val{Tag: "b"}, 950)
+			},
+			want: []string{"readd"},
+		},
+		{
+			name: "young tombstone kept",
+			build: func(r Registry[val]) {
+				r.Add("recent", val{Tag: "b"}, 800)
+				r.Remove("recent", 950) // 950 >= 900
+			},
+			want: []string{"recent"},
+		},
+		{
+			name: "tombstone exactly at the cutoff kept",
+			build: func(r Registry[val]) {
+				r.Add("edge", val{Tag: "c"}, 400)
+				r.Remove("edge", cutoff) // 900 >= 900
+			},
+			want: []string{"edge"},
+		},
+		{
+			name: "old tombstone dropped",
+			build: func(r Registry[val]) {
+				r.Add("stale", val{Tag: "d"}, 100)
+				r.Remove("stale", 500) // 500 < 900
+			},
+			want: []string{},
+		},
+		{
+			name:  "zero-value phantom dropped past horizon",
+			build: func(r Registry[val]) { r.Remove("phantom", 500) }, // Added==0, Removed 500 < 900
+			want:  []string{},
+		},
+		{
+			name:  "phantom within horizon kept",
+			build: func(r Registry[val]) { r.Remove("phantom", 950) }, // Added==0, Removed 950 >= 900
+			want:  []string{"phantom"},
+		},
+		{
+			name: "mixed set keeps live and young, drops expired",
+			build: func(r Registry[val]) {
+				r.Add("live", val{Tag: "a"}, 500)
+				r.Add("recent", val{Tag: "b"}, 800)
+				r.Remove("recent", 950)
+				r.Add("stale", val{Tag: "d"}, 100)
+				r.Remove("stale", 500)
+				r.Remove("phantom", 400)
+			},
+			want: []string{"live", "recent"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := New[val]()
+			tt.build(r)
+			before := mustJSON(t, r)
+
+			compacted := r.Compact(now, horizon)
+			got := slices.Sorted(maps.Keys(compacted))
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("Compact ids = %v, want %v", got, tt.want)
+			}
+			for id, e := range compacted {
+				if e != r[id] {
+					t.Fatalf("Compact altered surviving entry %q: got %+v, want %+v", id, e, r[id])
+				}
+			}
+			if after := mustJSON(t, r); after != before {
+				t.Fatalf("Compact mutated the receiver:\n before=%s\n  after=%s", before, after)
+			}
+		})
+	}
+}
+
+// TestCompactResurrectionPastHorizon documents the hazard Compact trades space
+// for: dropping an expired tombstone lets a long-offline peer resurrect the id.
+// Registry A removes X and compacts the tombstone away past the horizon; peer B
+// stayed offline longer than the horizon and still carries X as a live add.
+// Merging B back in has no remove stamp left to out-order the add, so X returns to
+// the present set — proof that horizon must exceed the longest peer offline time.
+func TestCompactResurrectionPastHorizon(t *testing.T) {
+	const now, horizon = Micros(1_000), Micros(100)
+
+	a := New[val]()
+	a.Add("x", val{Tag: "live"}, 200)
+	a.Remove("x", 500) // 500 < now-horizon (900): an expired tombstone
+	if a["x"].Present() {
+		t.Fatal("precondition: X must be removed in A before compaction")
+	}
+
+	compacted := a.Compact(now, horizon)
+	if _, ok := compacted["x"]; ok {
+		t.Fatal("Compact kept a tombstone older than the horizon; the hazard needs it dropped")
+	}
+
+	// B is the offline peer that never saw the remove: it still carries X live.
+	b := New[val]()
+	b.Add("x", val{Tag: "live"}, 200)
+
+	merged := Merge(compacted, b)
+	if !merged["x"].Present() {
+		t.Fatal("resurrection hazard not reproduced: X should be present again after merging a stale peer")
+	}
+}
+
 // ---- JSON: deterministic, exact round-trip ----
 
 func TestRegistryJSONRoundTrip(t *testing.T) {

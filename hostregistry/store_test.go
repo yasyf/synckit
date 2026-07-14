@@ -241,3 +241,48 @@ func TestDirHonorsConfigName(t *testing.T) {
 		}
 	}
 }
+
+func TestDirHonorsDirEnvOverride(t *testing.T) {
+	const envName = "COOKIESYNC_CONFIG_DIR"
+	override := t.TempDir()
+
+	tests := []struct {
+		name    string
+		cfg     Config
+		envVal  string
+		wantDir func(base string) string
+	}{
+		{
+			name:    "override wins over XDG and default, returned verbatim",
+			cfg:     Config{Name: "cookiesync", DirEnv: envName},
+			envVal:  override,
+			wantDir: func(string) string { return override },
+		},
+		{
+			name:    "DirEnv set but env empty falls through to XDG",
+			cfg:     Config{Name: "cookiesync", DirEnv: envName},
+			envVal:  "",
+			wantDir: func(base string) string { return filepath.Join(base, "cookiesync") },
+		},
+		{
+			name:    "zero-value DirEnv ignores the env, uses XDG unchanged",
+			cfg:     Config{Name: "cookiesync"},
+			envVal:  override, // set, but a zero-value Config must never read it
+			wantDir: func(base string) string { return filepath.Join(base, "cookiesync") },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", base)
+			t.Setenv(envName, tt.envVal)
+			got, err := tt.cfg.Dir()
+			if err != nil {
+				t.Fatalf("Dir: %v", err)
+			}
+			if want := tt.wantDir(base); got != want {
+				t.Fatalf("Dir() = %q, want %q", got, want)
+			}
+		})
+	}
+}

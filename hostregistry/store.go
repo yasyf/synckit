@@ -47,10 +47,23 @@ type Config struct {
 	// shared mesh's config dir is named "synckit" but the installed daemon is
 	// "synckitd".
 	Binary string
+	// DirEnv names an environment variable that, when set to a non-empty value,
+	// pins Dir to that value verbatim — an absolute directory used as-is, with no
+	// Name suffix appended. It lets a per-tool env var (e.g. COOKIESYNC_CONFIG_DIR)
+	// override that one tool's config dir without redirecting other tools sharing
+	// the process, notably the shared hostregistry.Mesh whose own Config leaves
+	// DirEnv empty. The variable is read live on each Dir call.
+	DirEnv string
 }
 
-// Dir returns the config directory under XDG_CONFIG_HOME or ~/.config.
+// Dir returns the config directory: the DirEnv override verbatim when that env
+// var is set, otherwise XDG_CONFIG_HOME or ~/.config joined with Name.
 func (c Config) Dir() (string, error) {
+	if c.DirEnv != "" {
+		if override := os.Getenv(c.DirEnv); override != "" {
+			return override, nil
+		}
+	}
 	base := os.Getenv("XDG_CONFIG_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
