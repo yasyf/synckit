@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/spf13/cobra"
 
@@ -17,7 +16,7 @@ var newLauncher = service.NewLauncher
 func newInstallCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "install",
-		Short: "Install the synckitd LaunchAgents (reconcile tick, serve daemon, consumer helpers) and supersede legacy per-tool agents.",
+		Short: "Install the synckitd LaunchAgents (reconcile tick, serve daemon, consumer helpers).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := install(cmd.Context(), newLauncher()); err != nil {
@@ -44,23 +43,14 @@ func newUninstallCmd() *cobra.Command {
 	}
 }
 
-// install installs the synckitd agents for every discovered manifest, then boots
-// out the legacy per-tool agents the one shared daemon supersedes.
+// install installs the synckitd agents for every discovered manifest.
 func install(ctx context.Context, launcher service.Launcher) error {
 	manifests, err := discoverManifests()
 	if err != nil {
 		return err
 	}
 	cfg := toolConfig(manifests)
-	if err := service.NewLaunchdManager(launcher).Install(ctx, cfg, false); err != nil {
-		return err
-	}
-	for _, label := range legacyLabels {
-		if err := launcher.Bootout(ctx, label); err != nil {
-			return fmt.Errorf("bootout legacy agent %s: %w", label, err)
-		}
-	}
-	return nil
+	return service.NewLaunchdManager(launcher).Install(ctx, cfg, false)
 }
 
 // uninstall removes the synckitd agents for every discovered manifest.

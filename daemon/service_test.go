@@ -14,7 +14,7 @@ import (
 )
 
 // fakeLauncher records every bootstrap and bootout it is asked to perform without
-// touching launchd, so a test can assert the agent set and the legacy bootouts.
+// touching launchd, so a test can assert the agent set and the reinstall bootouts.
 type fakeLauncher struct {
 	bootstrapped []string // plist paths
 	bootedOut    []string // labels
@@ -92,7 +92,7 @@ func TestToolConfigAgents(t *testing.T) {
 	}
 }
 
-func TestInstallBuildsAgentsAndBootsOutLegacy(t *testing.T) {
+func TestInstallBuildsAndReinstallsAgents(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("install requires macOS launchd")
 	}
@@ -126,7 +126,7 @@ func TestInstallBuildsAgentsAndBootsOutLegacy(t *testing.T) {
 	}
 
 	// Three agents installed: reconcile, serve, helper.cookiesync. Each is booted
-	// out before bootstrap, so it appears in bootedOut too.
+	// out before bootstrap (idempotent reinstall), so it appears in bootedOut too.
 	if len(fake.bootstrapped) != 3 {
 		t.Errorf("bootstrapped %d plists, want 3: %v", len(fake.bootstrapped), fake.bootstrapped)
 	}
@@ -134,14 +134,10 @@ func TestInstallBuildsAgentsAndBootsOutLegacy(t *testing.T) {
 		"com.github.yasyf.synckit.reconcile":         true,
 		"com.github.yasyf.synckit.serve":             true,
 		"com.github.yasyf.synckit.helper.cookiesync": true,
-		"com.github.yasyf.reposync.reconcile":        true,
-		"com.github.yasyf.reposync.watch":            true,
-		"com.github.yasyf.cookiesync.reconcile":      true,
-		"com.github.yasyf.cookiesync.watch":          true,
 	}
 	for want := range wantBootout {
 		if !contains(fake.bootedOut, want) {
-			t.Errorf("legacy/agent bootout missing %q (have %v)", want, fake.bootedOut)
+			t.Errorf("agent bootout missing %q (have %v)", want, fake.bootedOut)
 		}
 	}
 }

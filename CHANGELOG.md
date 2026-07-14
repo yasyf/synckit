@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- The pre-cutover legacy-mesh migration and per-tool LaunchAgent bootout. `synckitd` no
+  longer seeds its shared host mesh from the retired per-tool `reposync`/`cookiesync`
+  registries (`hostregistry.MigrateLegacyMesh` is deleted, along with the `serve`/`reconcile`
+  calls to it), and `synckitd install` no longer boots out the retired
+  `com.github.yasyf.{reposync,cookiesync}.{reconcile,watch}` agents. Both were one-time
+  cutover aids from before the single shared daemon; every host has long since converged onto
+  the shared mesh.
+
 ### Fixed
 - The shared TUI no longer renders past the bottom of the terminal. The master-detail split
   double-subtracted each panel's horizontal padding, so a row sized to the full column width wrapped

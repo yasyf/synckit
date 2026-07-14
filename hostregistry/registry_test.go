@@ -323,3 +323,30 @@ func contains(s []string, want string) bool {
 	}
 	return false
 }
+
+// TestVerifyBinary pins the binary parameterization: VerifyBinary must probe the
+// given binary rather than the Config's Name, so a mesh Config whose Name is not
+// an installed tool can still verify an installed consumer binary.
+func TestVerifyBinary(t *testing.T) {
+	r := NewMockRunner().
+		OnSSH("command -v cookiesync", "/opt/homebrew/bin/cookiesync\n", nil).
+		OnSSH("cookiesync --version", "cookiesync 9.9.9\n", nil)
+
+	res := Mesh.VerifyBinary(context.Background(), r, "yasyf@host", "cookiesync")
+	if !res.Reachable || !res.Bootstrapped {
+		t.Fatalf("VerifyBinary: %+v, want reachable+bootstrapped", res)
+	}
+	if res.Version != "cookiesync 9.9.9" {
+		t.Fatalf("Version = %q, want cookiesync 9.9.9", res.Version)
+	}
+	cmds := r.SSHCmds("yasyf@host")
+	want := []string{"command -v cookiesync", "cookiesync --version"}
+	if len(cmds) != len(want) {
+		t.Fatalf("ssh cmds = %v, want %v", cmds, want)
+	}
+	for i := range want {
+		if cmds[i] != want[i] {
+			t.Fatalf("ssh cmd[%d] = %q, want %q", i, cmds[i], want[i])
+		}
+	}
+}

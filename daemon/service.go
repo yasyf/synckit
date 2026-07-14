@@ -12,16 +12,6 @@ const (
 	reconcileInterval = 900
 )
 
-// legacyLabels are the pre-cutover per-tool LaunchAgent labels synckitd boots out
-// on install, so the one shared daemon supersedes the per-tool reconcile/watch
-// agents reposync and cookiesync used to install.
-var legacyLabels = []string{
-	"com.github.yasyf.reposync.reconcile",
-	"com.github.yasyf.reposync.watch",
-	"com.github.yasyf.cookiesync.reconcile",
-	"com.github.yasyf.cookiesync.watch",
-}
-
 // toolConfig builds the launchd ToolConfig for synckitd: a periodic reconcile
 // tick, the resident serve daemon, and one helper agent per manifest that ships a
 // Helper block. A helper agent runs the consumer's own binary (AgentSpec.Binary),

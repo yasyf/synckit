@@ -53,14 +53,11 @@ func newServeCmd() *cobra.Command {
 	}
 }
 
-// serve is the resident process: it migrates any legacy per-tool mesh into the
-// shared mesh, binds the rpc socket, registers the status/reconcile/reload
-// handlers, and supervises one watch engine per discovered manifest. It blocks
-// until ctx is canceled (SIGINT/SIGTERM), rebuilding the supervisor on SIGHUP.
+// serve is the resident process: it binds the rpc socket, registers the
+// status/reconcile/reload handlers, and supervises one watch engine per
+// discovered manifest. It blocks until ctx is canceled (SIGINT/SIGTERM),
+// rebuilding the supervisor on SIGHUP.
 func serve(ctx context.Context) error {
-	if err := hostregistry.MigrateLegacyMesh(ctx, "reposync", "cookiesync"); err != nil {
-		return fmt.Errorf("migrate legacy mesh: %w", err)
-	}
 	if _, err := ensureManifestsDir(); err != nil {
 		return err
 	}

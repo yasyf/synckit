@@ -40,14 +40,11 @@ type reconcileResult struct {
 	Err  string `json:"err,omitempty"`
 }
 
-// reconcileAll migrates the legacy mesh, discovers every manifest, and drives each
-// consumer's typed reconcile over its local sync service — convergence happens in
-// the consumer, which pull-merges its peers from the mesh internally. A
-// per-consumer failure is captured in its result, never aborting the others.
+// reconcileAll discovers every manifest and drives each consumer's typed
+// reconcile over its local sync service — convergence happens in the consumer,
+// which pull-merges its peers from the mesh internally. A per-consumer failure
+// is captured in its result, never aborting the others.
 func reconcileAll(ctx context.Context) ([]reconcileResult, error) {
-	if err := hostregistry.MigrateLegacyMesh(ctx, "reposync", "cookiesync"); err != nil {
-		return nil, fmt.Errorf("migrate legacy mesh: %w", err)
-	}
 	reg, err := hostregistry.Mesh.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load mesh: %w", err)

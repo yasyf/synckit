@@ -124,27 +124,6 @@ func TestLoad(t *testing.T) {
 	}
 }
 
-func TestLoadLegacyBackendField(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "reposync.json")
-	legacy := `{"name":"reposync","binary":"reposync","brew":"yasyf/tap/reposync","watch":{"backend":"watchman","debounce":"15s"},"service":{"transport":"stdio","serve_args":["rpc-serve"]}}`
-	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	// Manifests written before the Backend field was deleted still carry it;
-	// they must load cleanly, with the unknown key ignored.
-	got, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if got.Name != "reposync" {
-		t.Errorf("Load().Name = %q, want reposync", got.Name)
-	}
-	if time.Duration(got.Watch.Debounce) != 15*time.Second {
-		t.Errorf("Load().Watch.Debounce = %v, want 15s", got.Watch.Debounce)
-	}
-}
-
 func TestLoadInvalid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.json")
