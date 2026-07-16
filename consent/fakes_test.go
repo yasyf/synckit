@@ -215,3 +215,8 @@ func (p *fakePrompter) prompts() []Request {
 func staticResolve(peers ...string) ResolveFunc {
 	return func(_ context.Context) ([]string, error) { return peers, nil }
 }
+
+// staticSelf resolves a fixed host identity.
+func staticSelf(name string) SelfFunc {
+	return func(_ context.Context) (string, error) { return name, nil }
+}

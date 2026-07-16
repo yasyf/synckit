@@ -183,7 +183,7 @@ func TestRelayHandlerDeniedCarriesStatusOnly(t *testing.T) {
 // answers the bare unavailable status without prompting.
 func TestRelayHandlerUnattendedIsUnavailable(t *testing.T) {
 	prompter := &fakePrompter{}
-	e := NewEngine("me@laptop", prompter, staticProbe(presence.SessionSnapshot{}), nil, nil)
+	e := NewEngine(staticSelf("me@laptop"), prompter, staticProbe(presence.SessionSnapshot{}), nil, nil)
 
 	got, err := e.handleRelay(context.Background(), relayParams())
 	if err != nil {
@@ -201,7 +201,7 @@ func TestRelayHandlerUnattendedIsUnavailable(t *testing.T) {
 // TestPresenceHandlerAnswersWireSnapshot proves consent.presence returns the
 // probe's snapshot, which serializes with the wire keys Live parses.
 func TestPresenceHandlerAnswersWireSnapshot(t *testing.T) {
-	e := NewEngine("me@laptop", &fakePrompter{}, staticProbe(attendedSession(t)), nil, nil)
+	e := NewEngine(staticSelf("me@laptop"), &fakePrompter{}, staticProbe(attendedSession(t)), nil, nil)
 
 	got, err := e.handlePresence(context.Background(), nil)
 	if err != nil {

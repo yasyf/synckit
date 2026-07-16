@@ -14,7 +14,7 @@ import (
 
 func newTestEngine(t *testing.T, prompter Prompter, probe Probe, runner Runner, peers ...string) *Engine {
 	t.Helper()
-	return NewEngine("me@laptop", prompter, probe, NewRouter(runner, PresenceCommand), staticResolve(peers...))
+	return NewEngine(staticSelf("me@laptop"), prompter, probe, NewRouter(runner, PresenceCommand), staticResolve(peers...))
 }
 
 func decideReq(ttl time.Duration) Request {
@@ -309,6 +309,67 @@ func TestDecideRouteExhaustedIsUnavailable(t *testing.T) {
 	}
 }
 
+// TestDecideRouteForwardsCurrentIdentity proves Self resolves fresh per routed
+// request: an engine built before the mesh bootstrap (empty identity) forwards
+// the identity registered later — never the startup snapshot, whose empty
+// origin the peer would sign as a local subject.
+func TestDecideRouteForwardsCurrentIdentity(t *testing.T) {
+	peer := "you@desktop"
+	nonce := "echo-nonce"
+	var mu sync.Mutex
+	self := ""
+	selfFn := func(context.Context) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return self, nil
+	}
+	runner := &approverMesh{
+		presence: map[string]string{peer: livePresence},
+		relay:    map[string]string{peer: approvedReply(t, nonce, "late@laptop:sha256:cafe")},
+	}
+	e := NewEngine(selfFn, &fakePrompter{}, staticProbe(presence.SessionSnapshot{}), pinnedRouter(runner, nonce), staticResolve(peer))
+
+	mu.Lock()
+	self = "late@laptop"
+	mu.Unlock()
+
+	d, err := e.Decide(context.Background(), decideReq(0))
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if d.Verdict != VerdictOK || !d.Routed {
+		t.Fatalf("Decide = %+v, want a routed OK", d)
+	}
+	stdins := runner.relayStdins()
+	if len(stdins) != 1 {
+		t.Fatalf("relay legs = %d, want 1", len(stdins))
+	}
+	var relay RelayRequest
+	if err := json.Unmarshal([]byte(stdins[0]), &relay); err != nil {
+		t.Fatalf("parse relay stdin: %v", err)
+	}
+	if relay.Origin != "late@laptop" || relay.Endpoint != "late@laptop:sha256:cafe" {
+		t.Fatalf("relay payload = %+v, want the updated identity forwarded as origin and endpoint", relay)
+	}
+}
+
+// TestDecideRouteEmptyIdentityFailsClosed proves a routed request never
+// forwards the empty (local-reserved) origin: an unresolved identity at route
+// time is fatal, and no relay leg fires.
+func TestDecideRouteEmptyIdentityFailsClosed(t *testing.T) {
+	peer := "you@desktop"
+	runner := &approverMesh{presence: map[string]string{peer: livePresence}}
+	e := NewEngine(staticSelf(""), &fakePrompter{}, staticProbe(presence.SessionSnapshot{}), pinnedRouter(runner, "n"), staticResolve(peer))
+
+	_, err := e.Decide(context.Background(), decideReq(0))
+	if err == nil || !strings.Contains(err.Error(), "mesh identity") {
+		t.Fatalf("Decide = %v, want the missing-identity refusal", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("an identity-less route must not touch the mesh, got %v", runner.calls)
+	}
+}
+
 // serializingPrompter fails the test if two prompts ever overlap.
 type serializingPrompter struct {
 	t        *testing.T
@@ -419,7 +480,7 @@ func TestRelaySignPathKeepsReasonAndOrigin(t *testing.T) {
 // resolver or router wired, so any routing attempt would crash.
 func TestRelayUnattendedIsUnavailable(t *testing.T) {
 	prompter := &fakePrompter{}
-	e := NewEngine("me@laptop", prompter, staticProbe(presence.SessionSnapshot{}), nil, nil)
+	e := NewEngine(staticSelf("me@laptop"), prompter, staticProbe(presence.SessionSnapshot{}), nil, nil)
 
 	d, err := e.Relay(context.Background(), decideReq(0))
 	if err != nil {
@@ -439,7 +500,7 @@ func TestRelayProbeErrorIsUnavailable(t *testing.T) {
 	probe := func(_ context.Context) (presence.SessionSnapshot, error) {
 		return presence.SessionSnapshot{}, context.DeadlineExceeded
 	}
-	e := NewEngine("me@laptop", &fakePrompter{}, probe, nil, nil)
+	e := NewEngine(staticSelf("me@laptop"), &fakePrompter{}, probe, nil, nil)
 
 	d, err := e.Relay(context.Background(), decideReq(0))
 	if err != nil {
@@ -454,7 +515,7 @@ func TestRelayProbeErrorIsUnavailable(t *testing.T) {
 // no router or resolver is consulted (none is wired; routing would crash).
 func TestRelayDeniedNeverRoutesOnward(t *testing.T) {
 	prompter := &fakePrompter{result: PromptResult{Verdict: VerdictDenied}}
-	e := NewEngine("me@laptop", prompter, staticProbe(attendedSession(t)), nil, nil)
+	e := NewEngine(staticSelf("me@laptop"), prompter, staticProbe(attendedSession(t)), nil, nil)
 
 	d, err := e.Relay(context.Background(), decideReq(0))
 	if err != nil {

@@ -37,18 +37,25 @@ func (execSSHRunner) Run(ctx context.Context, target, remoteCmd string, stdin []
 
 // buildConsentEngine constructs the consent engine over the live mesh: the
 // signed authkit helper prompts locally, presence.Session probes this host's
-// console, the router walks the mesh peers over ssh, and resolvePeers lists
-// every peer but self. A package var so a test swaps in fake collaborators
-// without an installed helper or a real console.
+// console, the router walks the mesh peers over ssh, and selfIdentity +
+// resolvePeers read the registry fresh per request. A package var so a test
+// swaps in fake collaborators without an installed helper or a real console.
 var buildConsentEngine = defaultConsentEngine
 
-func defaultConsentEngine() (*consent.Engine, error) {
+func defaultConsentEngine() *consent.Engine {
+	router := consent.NewRouter(execSSHRunner{}, consent.PresenceCommand)
+	return consent.NewEngine(selfIdentity, authkit.Gate{}, presence.Session, router, resolvePeers)
+}
+
+// selfIdentity resolves this host's mesh identity — reloaded each call, like
+// resolvePeers, so a daemon that started before the mesh bootstrap stamps and
+// forwards the live identity rather than a startup snapshot.
+func selfIdentity(context.Context) (string, error) {
 	reg, err := hostregistry.Mesh.Load()
 	if err != nil {
-		return nil, fmt.Errorf("load mesh for consent engine: %w", err)
+		return "", fmt.Errorf("resolve consent self identity: %w", err)
 	}
-	router := consent.NewRouter(execSSHRunner{}, consent.PresenceCommand)
-	return consent.NewEngine(reg.Self, authkit.Gate{}, presence.Session, router, resolvePeers), nil
+	return reg.Self, nil
 }
 
 // resolvePeers resolves the routed-consent approver candidates — every mesh peer
@@ -66,13 +73,8 @@ func resolvePeers(context.Context) ([]string, error) {
 // built engine, via plain consent.Register — NEVER RegisterExclusive, since a
 // 10-minute Touch ID prompt behind the exclusive mutex would wedge the reconcile
 // and reload handlers that share it.
-func registerConsent(d *rpc.Dispatcher) error {
-	engine, err := buildConsentEngine()
-	if err != nil {
-		return err
-	}
-	consent.Register(d, engine)
-	return nil
+func registerConsent(d *rpc.Dispatcher) {
+	consent.Register(d, buildConsentEngine())
 }
 
 // newConsentCmd builds the consent command tree and documents the FROZEN consent

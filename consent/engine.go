@@ -3,6 +3,7 @@ package consent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -24,6 +25,12 @@ type Probe func(ctx context.Context) (presence.SessionSnapshot, error)
 // ResolveFunc resolves the ordered approver candidates for a routed consent —
 // every mesh peer except this host.
 type ResolveFunc func(ctx context.Context) ([]string, error)
+
+// SelfFunc resolves this host's current mesh identity. Resolved fresh per
+// request — never captured at engine construction — so an engine built before
+// the mesh bootstrap stamps and forwards the live identity, not a startup
+// snapshot.
+type SelfFunc func(ctx context.Context) (string, error)
 
 // Request is one consent ask. Requestor derives server-side from the calling
 // connection's credentials — never client-supplied. Argv and Nonce are the
@@ -94,7 +101,7 @@ type RelayRequest struct {
 // host prompts locally behind an internal mutex (two sheets never stack), and
 // a host that cannot prompt routes the gate to a live peer.
 type Engine struct {
-	Self     string
+	Self     SelfFunc
 	Prompter Prompter
 	Probe    Probe
 	Grants   *Grants
@@ -106,7 +113,7 @@ type Engine struct {
 
 // NewEngine builds an engine over injected collaborators with a fresh grant
 // store.
-func NewEngine(self string, prompter Prompter, probe Probe, router *Router, resolve ResolveFunc) *Engine {
+func NewEngine(self SelfFunc, prompter Prompter, probe Probe, router *Router, resolve ResolveFunc) *Engine {
 	return &Engine{
 		Self:     self,
 		Prompter: prompter,
@@ -143,10 +150,14 @@ func (e *Engine) Decide(ctx context.Context, req Request) (Decision, error) {
 		}
 		switch res.Verdict {
 		case VerdictOK:
-			if res.Attestation != nil {
-				res.Attestation.SignedBy = e.Self
+			self, err := e.Self(ctx)
+			if err != nil {
+				return Decision{}, err
 			}
-			return e.approve(req, Decision{Verdict: VerdictOK, ApprovedBy: e.Self, Attestation: res.Attestation}), nil
+			if res.Attestation != nil {
+				res.Attestation.SignedBy = self
+			}
+			return e.approve(req, Decision{Verdict: VerdictOK, ApprovedBy: self, Attestation: res.Attestation}), nil
 		case VerdictDenied:
 			return Decision{Verdict: VerdictDenied}, nil
 		case VerdictUnavailable:
@@ -192,7 +203,11 @@ func (e *Engine) Relay(ctx context.Context, req Request) (Decision, error) {
 	}
 	d := Decision{Verdict: res.Verdict}
 	if res.Attestation != nil {
-		res.Attestation.SignedBy = e.Self
+		self, err := e.Self(ctx)
+		if err != nil {
+			return Decision{}, err
+		}
+		res.Attestation.SignedBy = self
 		d.Attestation = res.Attestation
 	}
 	return d, nil
@@ -223,17 +238,26 @@ func (e *Engine) approve(req Request, d Decision) Decision {
 // binding. A denial or an exhausted walk folds into the wire verdict; any
 // other failure propagates fatally.
 func (e *Engine) route(ctx context.Context, req Request) (Decision, error) {
+	self, err := e.Self(ctx)
+	if err != nil {
+		return Decision{}, err
+	}
+	if self == "" {
+		// The empty origin is reserved for local requests: a peer signing it
+		// would bind the wrong subject.
+		return Decision{}, errors.New("consent: cannot route without this host's mesh identity")
+	}
 	candidates, err := e.Resolve(ctx)
 	if err != nil {
 		return Decision{}, err
 	}
-	endpoint := e.Self + ":" + req.Subject
+	endpoint := self + ":" + req.Subject
 	relay := RelayRequest{
 		Client:    req.Client,
 		Reason:    req.Reason,
 		Subject:   req.Subject,
 		Endpoint:  endpoint,
-		Origin:    e.Self,
+		Origin:    self,
 		Argv:      req.Argv,
 		SignNonce: req.Nonce,
 	}

@@ -70,6 +70,10 @@ func staticResolve(peers ...string) consent.ResolveFunc {
 	return func(context.Context) ([]string, error) { return peers, nil }
 }
 
+func staticSelf(name string) consent.SelfFunc {
+	return func(context.Context) (string, error) { return name, nil }
+}
+
 func currentUser(t *testing.T) string {
 	t.Helper()
 	me, err := user.Current()
@@ -141,7 +145,7 @@ func TestConsentRequestCLIApprovesOverSocket(t *testing.T) {
 		Verdict:     consent.VerdictOK,
 		Attestation: &consent.Attestation{KeyID: "k1", Sig: "c2ln"},
 	}}
-	engine := consent.NewEngine("me@self", gate, staticProbe(attendedSnapshot(t)),
+	engine := consent.NewEngine(staticSelf("me@self"), gate, staticProbe(attendedSnapshot(t)),
 		consent.NewRouter(&recordingRunner{}, consent.PresenceCommand), staticResolve())
 	serveConsentEngine(t, engine)
 
@@ -182,7 +186,7 @@ func TestConsentRelayCLIForwardsAndEchoes(t *testing.T) {
 		Verdict:     consent.VerdictOK,
 		Attestation: &consent.Attestation{KeyID: "k1", Sig: "c2ln"},
 	}}
-	engine := consent.NewEngine("me@peer", gate, staticProbe(attendedSnapshot(t)),
+	engine := consent.NewEngine(staticSelf("me@peer"), gate, staticProbe(attendedSnapshot(t)),
 		consent.NewRouter(&recordingRunner{}, consent.PresenceCommand), staticResolve())
 	serveConsentEngine(t, engine)
 
@@ -221,7 +225,7 @@ func TestConsentRelayCLIForwardsAndEchoes(t *testing.T) {
 // terminal rather than routing around to another approver.
 func TestConsentRelayCLIDeniedIsTerminal(t *testing.T) {
 	gate := &fakeGate{result: consent.PromptResult{Verdict: consent.VerdictDenied}}
-	engine := consent.NewEngine("me@peer", gate, staticProbe(attendedSnapshot(t)),
+	engine := consent.NewEngine(staticSelf("me@peer"), gate, staticProbe(attendedSnapshot(t)),
 		consent.NewRouter(&recordingRunner{}, consent.PresenceCommand), staticResolve())
 	serveConsentEngine(t, engine)
 
@@ -249,7 +253,7 @@ func TestConsentRelayCLIDeniedIsTerminal(t *testing.T) {
 func TestConsentRelayCLINeverRoutesOnward(t *testing.T) {
 	runner := &recordingRunner{}
 	gate := &fakeGate{result: consent.PromptResult{Verdict: consent.VerdictOK}}
-	engine := consent.NewEngine("me@peer", gate, staticProbe(attendedSnapshot(t)),
+	engine := consent.NewEngine(staticSelf("me@peer"), gate, staticProbe(attendedSnapshot(t)),
 		consent.NewRouter(runner, consent.PresenceCommand), staticResolve("other@peer2"))
 	serveConsentEngine(t, engine)
 
@@ -303,7 +307,7 @@ func TestConsentRelayCLINeverExits255(t *testing.T) {
 // unmarshals into presence.SessionSnapshot when probe-gating a candidate.
 func TestConsentPresenceCLIPrintsWireSnapshot(t *testing.T) {
 	snap := presence.SessionSnapshot{OnConsole: true, ConsoleUser: currentUser(t)}
-	engine := consent.NewEngine("me@self", &fakeGate{}, staticProbe(snap),
+	engine := consent.NewEngine(staticSelf("me@self"), &fakeGate{}, staticProbe(snap),
 		consent.NewRouter(&recordingRunner{}, consent.PresenceCommand), staticResolve())
 	serveConsentEngine(t, engine)
 
@@ -329,9 +333,9 @@ func TestConsentPresenceCLIPrintsWireSnapshot(t *testing.T) {
 func TestConsentDispatchesUnderParkedExclusive(t *testing.T) {
 	orig := buildConsentEngine
 	t.Cleanup(func() { buildConsentEngine = orig })
-	buildConsentEngine = func() (*consent.Engine, error) {
-		return consent.NewEngine("me@self", &fakeGate{}, staticProbe(presence.SessionSnapshot{}),
-			consent.NewRouter(&recordingRunner{}, consent.PresenceCommand), staticResolve()), nil
+	buildConsentEngine = func() *consent.Engine {
+		return consent.NewEngine(staticSelf("me@self"), &fakeGate{}, staticProbe(presence.SessionSnapshot{}),
+			consent.NewRouter(&recordingRunner{}, consent.PresenceCommand), staticResolve())
 	}
 
 	d := rpc.NewDispatcher()
@@ -342,9 +346,7 @@ func TestConsentDispatchesUnderParkedExclusive(t *testing.T) {
 		<-release
 		return nil, nil
 	})
-	if err := registerConsent(d); err != nil {
-		t.Fatalf("registerConsent: %v", err)
-	}
+	registerConsent(d)
 
 	go d.Dispatch(context.Background(), &rpc.Request{Method: "reconcile"})
 	<-entered
