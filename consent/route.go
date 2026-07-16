@@ -89,10 +89,10 @@ func NewRouter(runner Runner, probeCmd string) *Router {
 // status, a relay leg's real remote exit — propagates fatally rather than
 // masquerading as peer-offline. A denial is terminal (*Denied) — a human said
 // no, and no other peer is ever asked — and an approval that fails to echo the
-// exact nonce and endpoint this host sent fails closed with *AuthRequired: a
-// mismatch is a security failure, never a retry. Each attempt binds its own
-// fresh nonce, minted inside the per-peer loop. Candidates exhausted is
-// *AuthRequired.
+// exact nonce and endpoint this host sent stops the walk with
+// *BindingMismatch: an unbound approval is fatal, never a retry. Each attempt
+// binds its own fresh nonce, minted inside the per-peer loop. Candidates
+// exhausted is *AuthRequired.
 func (r *Router) Route(ctx context.Context, candidates []string, endpoint string, attempt Attempt) (*Reply, error) {
 	var lastErr error
 	for _, peer := range candidates {
@@ -119,7 +119,7 @@ func (r *Router) Route(ctx context.Context, candidates []string, endpoint string
 // for it. next reports whether Route should advance to another approver — the
 // relay leg failed at the transport (routesAround), or the peer answered an
 // explicit unavailable; next false carries the terminal outcome: the bound
-// reply, a denial, an unbound approval's *AuthRequired, or a fatal protocol
+// reply, a denial, an unbound approval's *BindingMismatch, or a fatal protocol
 // failure (an unparseable reply or an unexpected status).
 func (r *Router) relay(ctx context.Context, peer, endpoint string, attempt Attempt) (reply *Reply, next bool, err error) {
 	nonce, err := r.Nonce()
@@ -153,7 +153,7 @@ func (r *Router) relay(ctx context.Context, peer, endpoint string, attempt Attem
 		return nil, false, fmt.Errorf("consent from %s answered unexpected status %q", peer, rep.Status)
 	}
 	if rep.Nonce != nonce || rep.Endpoint != endpoint {
-		return nil, false, &AuthRequired{Msg: fmt.Sprintf("consent approved from %s did not echo this request's nonce and endpoint", peer)}
+		return nil, false, &BindingMismatch{Peer: peer}
 	}
 	rep.Peer = peer
 	return &rep, false, nil

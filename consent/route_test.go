@@ -101,8 +101,8 @@ func TestRouteFallsThroughLockedCandidate(t *testing.T) {
 }
 
 // TestRouteNonceMismatchFailsClosed proves a reply whose nonce does not echo
-// the one sent is rejected as a security failure (*AuthRequired), never
-// retried against another candidate.
+// the one sent is rejected as a fatal security failure (*BindingMismatch),
+// never retried against another candidate.
 func TestRouteNonceMismatchFailsClosed(t *testing.T) {
 	liar := "liar@box"
 	next := "next@box"
@@ -118,9 +118,12 @@ func TestRouteNonceMismatchFailsClosed(t *testing.T) {
 	r := pinnedRouter(runner, "the-real-nonce")
 
 	_, err := r.Route(context.Background(), []string{liar, next}, endpoint, testAttempt)
-	var authErr *AuthRequired
-	if !errors.As(err, &authErr) {
-		t.Fatalf("nonce mismatch = %v, want *AuthRequired", err)
+	var mismatch *BindingMismatch
+	if !errors.As(err, &mismatch) || mismatch.Peer != liar {
+		t.Fatalf("nonce mismatch = %v, want *BindingMismatch from %s", err, liar)
+	}
+	if Classify(err) != VerdictFatal {
+		t.Fatalf("Classify(%v) = %v, want fatal — an unbound approval must never look unavailable", err, Classify(err))
 	}
 	if asked := runner.relayTargets(); len(asked) != 1 || asked[0] != liar {
 		t.Fatalf("relay dials = %v, want only %s (an unbound approval is terminal)", asked, liar)
@@ -128,7 +131,8 @@ func TestRouteNonceMismatchFailsClosed(t *testing.T) {
 }
 
 // TestRouteEndpointMismatchFailsClosed proves a reply whose endpoint does not
-// echo the one sent is rejected as *AuthRequired even when the nonce matches.
+// echo the one sent is rejected as *BindingMismatch even when the nonce
+// matches.
 func TestRouteEndpointMismatchFailsClosed(t *testing.T) {
 	peer := "you@desktop"
 	nonce := "n1"
@@ -140,9 +144,12 @@ func TestRouteEndpointMismatchFailsClosed(t *testing.T) {
 	r := pinnedRouter(runner, nonce)
 
 	_, err := r.Route(context.Background(), []string{peer}, "me@laptop:sha256:cafe", testAttempt)
-	var authErr *AuthRequired
-	if !errors.As(err, &authErr) {
-		t.Fatalf("endpoint mismatch = %v, want *AuthRequired", err)
+	var mismatch *BindingMismatch
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("endpoint mismatch = %v, want *BindingMismatch", err)
+	}
+	if Classify(err) != VerdictFatal {
+		t.Fatalf("Classify(%v) = %v, want fatal", err, Classify(err))
 	}
 }
 

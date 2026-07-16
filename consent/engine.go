@@ -136,8 +136,9 @@ func NewEngine(self SelfFunc, prompter Prompter, probe Probe, router *Router, re
 // local gate that answers unavailable — or a host that is not attended —
 // routes to a live peer unless req.LocalOnly pins the gate here. A denial,
 // local or routed, is Denied; a routed walk that binds no approval is
-// Unavailable; a fatal (or unrecognized) prompt verdict and protocol failures
-// are fatal errors — never a fallback route.
+// Unavailable; a fatal (or unrecognized) prompt verdict, an unbound routed
+// approval (*BindingMismatch), and protocol failures are fatal errors — never
+// a fallback route.
 func (e *Engine) Decide(ctx context.Context, req Request) (Decision, error) {
 	if !req.attests() {
 		if until, ok := e.Grants.Granted(req.Requestor, req.Subject); ok {
@@ -245,8 +246,8 @@ func (e *Engine) approve(req Request, d Decision) Decision {
 
 // route sends the gate across the approver candidates, carrying the display
 // material and the opaque attestation extension; the Router owns the echo
-// binding. A denial or an exhausted walk folds into the wire verdict; any
-// other failure propagates fatally.
+// binding. A denial or an exhausted walk folds into the wire verdict; a
+// *BindingMismatch and any other failure propagates fatally.
 func (e *Engine) route(ctx context.Context, req Request) (Decision, error) {
 	self, err := e.Self(ctx)
 	if err != nil {

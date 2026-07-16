@@ -40,15 +40,27 @@ func (v Verdict) String() string {
 }
 
 // AuthRequired reports that no live session — local or routed — could gate the
-// request. It is the error the consent path fails closed with, and a routed
-// approval that fails to bind (a nonce or endpoint mismatch) raises it too: an
-// unbound approval is a security failure, never a retry. Callers branch on it
-// via errors.As.
+// request. It is the error the consent path fails closed with when no valid
+// answer was obtained; callers may retry or degrade per their own policy.
+// Callers branch on it via errors.As.
 type AuthRequired struct {
 	Msg string
 }
 
 func (e *AuthRequired) Error() string { return e.Msg }
+
+// BindingMismatch reports a routed approval that failed to echo the exact
+// nonce and endpoint this host sent: an unbound approval is an attack or
+// corruption signal, never a live-approver problem, so Classify maps it to
+// VerdictFatal — the whole request stops. It is never VerdictUnavailable and
+// never retried. Callers branch on it via errors.As.
+type BindingMismatch struct {
+	Peer string
+}
+
+func (e *BindingMismatch) Error() string {
+	return "consent approved from " + e.Peer + " did not echo this request's nonce and endpoint"
+}
 
 // Denied reports that a human on Peer declined a routed consent prompt. A
 // denial is terminal: no other approver is ever asked.
@@ -60,11 +72,15 @@ func (e *Denied) Error() string { return "consent denied from " + e.Peer }
 
 // Classify maps a consent error to the verdict a caller branches on: nil is
 // OK, a fail-closed AuthRequired is Unavailable, a human denial is Denied, and
-// anything else is Fatal. Domain wrappers layer their own error types in front
-// and delegate the rest here.
+// anything else — a *BindingMismatch included — is Fatal. Domain wrappers
+// layer their own error types in front and delegate the rest here.
 func Classify(err error) Verdict {
 	if err == nil {
 		return VerdictOK
+	}
+	var mismatch *BindingMismatch
+	if errors.As(err, &mismatch) {
+		return VerdictFatal
 	}
 	var authErr *AuthRequired
 	if errors.As(err, &authErr) {

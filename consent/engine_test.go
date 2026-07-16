@@ -3,6 +3,7 @@ package consent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
@@ -426,6 +427,28 @@ func TestDecideRouteExhaustedIsUnavailable(t *testing.T) {
 	}
 	if d.Verdict != VerdictUnavailable || !d.Routed {
 		t.Fatalf("Decide = %+v, want a routed unavailable", d)
+	}
+}
+
+// TestDecideRoutedBindingMismatchIsFatal proves a routed reply that answers
+// "approved" over the wrong nonce fails the whole Decide as a fatal
+// *BindingMismatch error — never the successful unavailable Decision a
+// route-exhausted walk answers, which a caller would silently retry.
+func TestDecideRoutedBindingMismatchIsFatal(t *testing.T) {
+	peer := "liar@box"
+	runner := &approverMesh{
+		presence: map[string]string{peer: livePresence},
+		relay:    map[string]string{peer: approvedReply(t, "WRONG-nonce", "me@laptop:sha256:cafe")},
+	}
+	e := NewEngine(staticSelf("me@laptop"), &fakePrompter{}, staticProbe(presence.SessionSnapshot{}), pinnedRouter(runner, "the-real-nonce"), staticResolve(peer))
+
+	d, err := e.Decide(context.Background(), decideReq(0))
+	var mismatch *BindingMismatch
+	if !errors.As(err, &mismatch) || mismatch.Peer != peer {
+		t.Fatalf("Decide = (%+v, %v), want a *BindingMismatch error from %s", d, err, peer)
+	}
+	if d.Verdict == VerdictUnavailable || d.Routed {
+		t.Fatalf("Decide = %+v, want no successful decision — an unbound approval must not answer unavailable", d)
 	}
 }
 
