@@ -32,6 +32,7 @@ func TestPromptVerdictOnlyMapsExitCodes(t *testing.T) {
 		{"denied", 1, consent.VerdictDenied, false},
 		{"unavailable", 2, consent.VerdictUnavailable, false},
 		{"screen-locked routes as unavailable", 3, consent.VerdictUnavailable, false},
+		{"caller-rejected is fatal, never routed around", 4, consent.VerdictFatal, true},
 		{"unknown exit is fatal", 9, consent.VerdictFatal, true},
 	}
 	for _, tc := range tests {
@@ -120,6 +121,18 @@ func TestPromptSignPathScreenLockedIsUnavailable(t *testing.T) {
 	}
 	if res.Verdict != consent.VerdictUnavailable || res.Attestation != nil {
 		t.Fatalf("result = %+v, want a bare unavailable so the engine routes", res)
+	}
+}
+
+func TestPromptSignPathCallerRejectedIsFatal(t *testing.T) {
+	g := Gate{Bridge: Bridge{Binary: fakeHelper(t, `printf 'caller pin failed' >&2; exit 4`)}}
+
+	res, err := g.Prompt(context.Background(), signReq())
+	if err == nil || !strings.Contains(err.Error(), "rejected the caller") {
+		t.Fatalf("exit 4 = %v, want the fatal caller-rejection error", err)
+	}
+	if res.Verdict != consent.VerdictFatal || res.Attestation != nil {
+		t.Fatalf("result = %+v, want a bare fatal verdict — never unavailable-routes-around", res)
 	}
 }
 

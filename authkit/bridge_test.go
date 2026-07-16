@@ -28,6 +28,7 @@ func TestRunReportsContractExitCodes(t *testing.T) {
 		{"denied", CodeDenied},
 		{"unavailable", CodeUnavailable},
 		{"screen-locked", CodeScreenLocked},
+		{"caller-rejected", CodeCallerRejected},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

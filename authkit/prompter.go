@@ -29,7 +29,8 @@ type signRequest struct {
 // consent.Prompter: a request carrying the attestation extension runs
 // consent-sign; a bare request runs the verdict-only consent subcommand with
 // the reason in AUTHKIT_REASON. A screen-locked helper (exit 3) reports
-// Unavailable so the engine routes the gate to a live peer.
+// Unavailable so the engine routes the gate to a live peer; a caller-pin or
+// usage failure (exit 4) is a fatal error the engine never routes around.
 type Gate struct {
 	Bridge Bridge
 }
@@ -71,8 +72,9 @@ func (g Gate) sign(ctx context.Context, req consent.Request) (consent.PromptResu
 
 // verdictFor maps the helper's exit-code contract to a consent verdict: 0
 // approved, 1 denied, 2 unavailable, and 3 (screen-locked) unavailable too, so
-// the engine routes instead of failing. Any other exit is a fatal helper error
-// carrying the stderr diagnostic.
+// the engine routes instead of failing. 4 (a caller-pin rejection or usage
+// error) is a fatal error the engine must never route around, as is any other
+// exit; both carry the stderr diagnostic.
 func verdictFor(res Result) (consent.Verdict, error) {
 	switch res.Code {
 	case CodeApproved:
@@ -81,6 +83,8 @@ func verdictFor(res Result) (consent.Verdict, error) {
 		return consent.VerdictDenied, nil
 	case CodeUnavailable, CodeScreenLocked:
 		return consent.VerdictUnavailable, nil
+	case CodeCallerRejected:
+		return consent.VerdictFatal, fmt.Errorf("authkit helper rejected the caller or invocation (exit %d): %s", res.Code, bytes.TrimSpace(res.Stderr))
 	default:
 		return consent.VerdictFatal, fmt.Errorf("authkit helper exited %d: %s", res.Code, bytes.TrimSpace(res.Stderr))
 	}

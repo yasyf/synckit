@@ -5,7 +5,8 @@
 // ad-hoc helper is SIGKILLed at exec by AMFI and refused the Enclave. Each
 // call returns the helper's raw exit code, stdout, and stderr so callers
 // branch on the documented 0 (approved) / 1 (denied) / 2 (unavailable) / 3
-// (screen-locked) contract and log the helper's stderr diagnostics.
+// (screen-locked) / 4 (caller-rejected-or-usage-error) contract and log the
+// helper's stderr diagnostics.
 package authkit
 
 import (
@@ -22,14 +23,19 @@ const (
 	CodeApproved = 0
 	// CodeDenied is a cancelled or denied prompt; do not retry.
 	CodeDenied = 1
-	// CodeUnavailable is unavailable/not-found: no biometry, a missing item,
-	// or a genuine misconfiguration; may be recoverable.
+	// CodeUnavailable means only that the device auth mechanism is unavailable
+	// (no biometry or passcode) or an item is not found — the sole outcome a
+	// consumer may degrade on.
 	CodeUnavailable = 2
 	// CodeScreenLocked is a Secure-Enclave call the data-protection keybag
 	// refused with errSecInteractionNotAllowed (-25308): the screen is locked
 	// or no user is present. Distinct from CodeUnavailable so callers route
 	// the gate instead of failing; retry after unlock.
 	CodeScreenLocked = 3
+	// CodeCallerRejected is a non-pinned caller, a malformed invocation, or
+	// any misconfiguration: a hard failure no consumer may degrade on or
+	// route around.
+	CodeCallerRejected = 4
 )
 
 // Result is the outcome of one helper subcommand: the raw exit code and the
@@ -63,7 +69,7 @@ func (b Bridge) binary() (string, error) {
 // Run executes one helper subcommand, feeding stdin (when non-nil) and
 // appending extraEnv to the inherited environment. It returns the helper's
 // exit code, stdout, and stderr; a non-zero exit is reported in Result.Code,
-// not as an error, so callers branch on the 0/1/2/3 contract. err is non-nil
+// not as an error, so callers branch on the 0/1/2/3/4 contract. err is non-nil
 // only when the helper cannot be resolved or spawned, or it dies on a signal.
 func (b Bridge) Run(ctx context.Context, stdin []byte, extraEnv []string, args ...string) (Result, error) {
 	bin, err := b.binary()
