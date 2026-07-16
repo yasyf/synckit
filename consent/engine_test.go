@@ -130,6 +130,44 @@ func TestDecideDeniedLocallyIsDenied(t *testing.T) {
 	}
 }
 
+// TestDecideFatalPromptIsError proves a fatal — or unrecognized — local-prompt
+// verdict surfaces as a fatal error: never approved, never downgraded to
+// unavailable (LocalOnly included), and the router is never invoked.
+func TestDecideFatalPromptIsError(t *testing.T) {
+	tests := []struct {
+		name      string
+		verdict   Verdict
+		localOnly bool
+	}{
+		{name: "fatal", verdict: VerdictFatal},
+		{name: "fatal local-only", verdict: VerdictFatal, localOnly: true},
+		{name: "unrecognized verdict", verdict: Verdict(42)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prompter := &fakePrompter{result: PromptResult{Verdict: tc.verdict}}
+			runner := &approverMesh{presence: map[string]string{"you@desktop": livePresence}}
+			e := newTestEngine(t, prompter, staticProbe(attendedSession(t)), runner, "you@desktop")
+
+			req := decideReq(time.Hour)
+			req.LocalOnly = tc.localOnly
+			_, err := e.Decide(context.Background(), req)
+			if err == nil || !strings.Contains(err.Error(), "verdict") {
+				t.Fatalf("Decide = %v, want the fatal prompt error", err)
+			}
+			if Classify(err) != VerdictFatal {
+				t.Fatalf("Classify = %v, want VerdictFatal (the RPC layer must answer ok:false)", Classify(err))
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("a fatal prompt must never route, got %v", runner.calls)
+			}
+			if _, ok := e.Grants.Granted("sid:501", "sha256:cafe"); ok {
+				t.Fatal("a fatal prompt must never grant")
+			}
+		})
+	}
+}
+
 // TestDecideUnattendedRoutes proves an unattended host routes the gate: the
 // relay payload carries the opaque extension, and the peer's signed reply
 // comes back as the decision's attestation.

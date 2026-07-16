@@ -3,6 +3,7 @@ package consent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -121,7 +122,8 @@ func NewEngine(self string, prompter Prompter, probe Probe, router *Router, reso
 // local gate that answers unavailable — or a host that is not attended —
 // routes to a live peer unless req.LocalOnly pins the gate here. A denial,
 // local or routed, is Denied; a routed walk that binds no approval is
-// Unavailable; protocol failures are fatal errors.
+// Unavailable; a fatal (or unrecognized) prompt verdict and protocol failures
+// are fatal errors — never a fallback route.
 func (e *Engine) Decide(ctx context.Context, req Request) (Decision, error) {
 	if until, ok := e.Grants.Granted(req.Requestor, req.Subject); ok {
 		return Decision{Verdict: VerdictOK, Cached: true, GrantedUntil: until}, nil
@@ -147,8 +149,11 @@ func (e *Engine) Decide(ctx context.Context, req Request) (Decision, error) {
 			return e.approve(req, Decision{Verdict: VerdictOK, ApprovedBy: e.Self, Attestation: res.Attestation}), nil
 		case VerdictDenied:
 			return Decision{Verdict: VerdictDenied}, nil
-		case VerdictUnavailable, VerdictFatal:
+		case VerdictUnavailable:
 			// The local gate cannot fire right now; fall through to the route.
+		default:
+			// Fatal/unrecognized verdicts are errors — never routable.
+			return Decision{}, fmt.Errorf("consent: local prompt returned %s verdict", res.Verdict)
 		}
 	}
 	if req.LocalOnly {
