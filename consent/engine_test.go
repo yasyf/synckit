@@ -29,15 +29,24 @@ func decideReq(ttl time.Duration) Request {
 	}
 }
 
-// TestDecideGrantHitIsServedSilently proves a live grant answers without
-// touching the prompter or the mesh.
+// verdictReq is decideReq without the attestation extension: the verdict-only
+// shape cookiesync sends, the only shape the grant store serves.
+func verdictReq(ttl time.Duration) Request {
+	req := decideReq(ttl)
+	req.Argv = nil
+	req.Nonce = ""
+	return req
+}
+
+// TestDecideGrantHitIsServedSilently proves a live grant answers a
+// verdict-only request without touching the prompter or the mesh.
 func TestDecideGrantHitIsServedSilently(t *testing.T) {
 	prompter := &fakePrompter{}
 	runner := &approverMesh{}
 	e := newTestEngine(t, prompter, staticProbe(attendedSession(t)), runner, "you@desktop")
 	e.Grants.Grant("sid:501", []string{"sha256:cafe"}, time.Hour)
 
-	d, err := e.Decide(context.Background(), decideReq(time.Hour))
+	d, err := e.Decide(context.Background(), verdictReq(time.Hour))
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -56,7 +65,8 @@ func TestDecideGrantHitIsServedSilently(t *testing.T) {
 }
 
 // TestDecideAttendedPromptsLocally proves an attended host prompts locally:
-// the approval stamps self as signer, grants the requestor, and never routes.
+// the approval stamps self as signer, records no grant (attestation asks are
+// never cached), and never routes.
 func TestDecideAttendedPromptsLocally(t *testing.T) {
 	prompter := &fakePrompter{result: PromptResult{
 		Verdict:     VerdictOK,
@@ -78,13 +88,93 @@ func TestDecideAttendedPromptsLocally(t *testing.T) {
 	if len(runner.calls) != 0 {
 		t.Fatalf("an attended approval must not touch the mesh, got %v", runner.calls)
 	}
-	if until, ok := e.Grants.Granted("sid:501", "sha256:cafe"); !ok || until.IsZero() {
-		t.Fatal("an approval with a TTL must record a grant")
+	if !d.GrantedUntil.IsZero() {
+		t.Fatalf("GrantedUntil = %v, want none — attestation approvals never grant", d.GrantedUntil)
+	}
+	if _, ok := e.Grants.Granted("sid:501", "sha256:cafe"); ok {
+		t.Fatal("an attestation approval must not record a grant — grants are verdict-only")
 	}
 	// The prompter saw the request verbatim: the opaque extension untouched.
 	reqs := prompter.prompts()
 	if len(reqs) != 1 || reqs[0].Nonce != "root-nonce" || len(reqs[0].Argv) != 2 {
 		t.Fatalf("prompted requests = %+v, want the opaque argv+nonce passed through", reqs)
+	}
+}
+
+// TestDecideVerdictOnlyApprovalGrants proves a verdict-only approval under a
+// positive TTL records a grant the next call is served from silently.
+func TestDecideVerdictOnlyApprovalGrants(t *testing.T) {
+	prompter := &fakePrompter{result: PromptResult{Verdict: VerdictOK}}
+	e := newTestEngine(t, prompter, staticProbe(attendedSession(t)), &approverMesh{})
+
+	first, err := e.Decide(context.Background(), verdictReq(time.Hour))
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if first.Verdict != VerdictOK || first.Cached || first.GrantedUntil.IsZero() {
+		t.Fatalf("Decide = %+v, want an uncached OK with a grant window", first)
+	}
+	second, err := e.Decide(context.Background(), verdictReq(time.Hour))
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if second.Verdict != VerdictOK || !second.Cached {
+		t.Fatalf("Decide = %+v, want a cached OK from the grant", second)
+	}
+	if got := len(prompter.prompts()); got != 1 {
+		t.Fatalf("prompts = %d, want 1 — the second call rides the grant", got)
+	}
+}
+
+// TestDecideAttestationAlwaysPromptsFresh proves the grant cache is
+// verdict-only: two attestation asks for one subject under a positive TTL both
+// prompt and both return a fresh signature — a cached verdict would carry no
+// signature over the second nonce — and neither records a grant.
+func TestDecideAttestationAlwaysPromptsFresh(t *testing.T) {
+	prompter := &fakePrompter{result: PromptResult{
+		Verdict:     VerdictOK,
+		Attestation: &Attestation{KeyID: "k1", Sig: "c2ln"},
+	}}
+	e := newTestEngine(t, prompter, staticProbe(attendedSession(t)), &approverMesh{})
+
+	for _, nonce := range []string{"root-nonce-1", "root-nonce-2"} {
+		req := decideReq(time.Hour)
+		req.Nonce = nonce
+		d, err := e.Decide(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Decide(%s): %v", nonce, err)
+		}
+		if d.Verdict != VerdictOK || d.Cached || d.Attestation == nil || !d.GrantedUntil.IsZero() {
+			t.Fatalf("Decide(%s) = %+v, want a fresh signed approval, never a cache hit", nonce, d)
+		}
+	}
+	if got := len(prompter.prompts()); got != 2 {
+		t.Fatalf("prompts = %d, want one fresh prompt per attestation ask", got)
+	}
+	if _, ok := e.Grants.Granted("sid:501", "sha256:cafe"); ok {
+		t.Fatal("attestation approvals must not record grants")
+	}
+}
+
+// TestDecideAttestationBypassesLiveGrant proves an attestation ask prompts
+// fresh even while the requestor holds a live grant for the same subject.
+func TestDecideAttestationBypassesLiveGrant(t *testing.T) {
+	prompter := &fakePrompter{result: PromptResult{
+		Verdict:     VerdictOK,
+		Attestation: &Attestation{KeyID: "k1", Sig: "c2ln"},
+	}}
+	e := newTestEngine(t, prompter, staticProbe(attendedSession(t)), &approverMesh{})
+	e.Grants.Grant("sid:501", []string{"sha256:cafe"}, time.Hour)
+
+	d, err := e.Decide(context.Background(), decideReq(time.Hour))
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if d.Verdict != VerdictOK || d.Cached || d.Attestation == nil {
+		t.Fatalf("Decide = %+v, want a fresh signed approval despite the live grant", d)
+	}
+	if got := len(prompter.prompts()); got != 1 {
+		t.Fatalf("prompts = %d, want the grant bypassed with one fresh prompt", got)
 	}
 }
 
@@ -196,8 +286,8 @@ func TestDecideUnattendedRoutes(t *testing.T) {
 	if len(prompter.prompts()) != 0 {
 		t.Fatalf("a routing origin must not prompt locally, got %v", prompter.prompts())
 	}
-	if until, ok := e.Grants.Granted("sid:501", "sha256:cafe"); !ok || until.IsZero() {
-		t.Fatal("a routed approval with a TTL must record a grant")
+	if _, ok := e.Grants.Granted("sid:501", "sha256:cafe"); ok {
+		t.Fatal("a routed attestation approval must not record a grant — grants are verdict-only")
 	}
 
 	stdins := runner.relayStdins()

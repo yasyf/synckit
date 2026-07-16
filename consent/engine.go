@@ -50,6 +50,12 @@ type Request struct {
 	LocalOnly bool
 }
 
+// attests reports whether req carries the attestation extension — an argv the
+// helper hashes, displays, and signs. An attestation ask always prompts and
+// signs fresh: grants are verdict-only, because a cached verdict carries no
+// signature over the new nonce.
+func (r Request) attests() bool { return len(r.Argv) > 0 }
+
 // Attestation is the opaque signature material an approved
 // attestation-carrying prompt returns: the signing key id, the signature, and
 // the host whose Secure Enclave key signed.
@@ -125,15 +131,18 @@ func NewEngine(self SelfFunc, prompter Prompter, probe Probe, router *Router, re
 }
 
 // Decide runs the consent ladder for req: a live grant for the requestor and
-// subject is served silently (Cached), an attended host prompts locally, a
+// subject is served silently (Cached) — verdict-only requests: an attestation
+// ask skips the grant store both ways — an attended host prompts locally, a
 // local gate that answers unavailable — or a host that is not attended —
 // routes to a live peer unless req.LocalOnly pins the gate here. A denial,
 // local or routed, is Denied; a routed walk that binds no approval is
 // Unavailable; a fatal (or unrecognized) prompt verdict and protocol failures
 // are fatal errors — never a fallback route.
 func (e *Engine) Decide(ctx context.Context, req Request) (Decision, error) {
-	if until, ok := e.Grants.Granted(req.Requestor, req.Subject); ok {
-		return Decision{Verdict: VerdictOK, Cached: true, GrantedUntil: until}, nil
+	if !req.attests() {
+		if until, ok := e.Grants.Granted(req.Requestor, req.Subject); ok {
+			return Decision{Verdict: VerdictOK, Cached: true, GrantedUntil: until}, nil
+		}
 	}
 	snap, err := e.Probe(ctx)
 	if err != nil {
@@ -222,10 +231,11 @@ func (e *Engine) prompt(ctx context.Context, req Request) (PromptResult, error) 
 	return e.Prompter.Prompt(ctx, req)
 }
 
-// approve records the grant an approval earns — a zero TTL records nothing,
-// so every call prompts — and stamps the decision's grant window.
+// approve records the grant an approval earns — a zero TTL or an attestation
+// ask records nothing, so every such call prompts — and stamps the decision's
+// grant window.
 func (e *Engine) approve(req Request, d Decision) Decision {
-	if req.TTL <= 0 {
+	if req.TTL <= 0 || req.attests() {
 		return d
 	}
 	e.Grants.Grant(req.Requestor, []string{req.Subject}, req.TTL)

@@ -96,8 +96,8 @@ func TestRequestDerivesRequestorFromPeerSID(t *testing.T) {
 	if result["verdict"] != "approved" || result["routed"] != false || result["cached"] != false {
 		t.Fatalf("result = %v, want an un-routed uncached approval", result)
 	}
-	if _, ok := result["granted_until"]; !ok {
-		t.Fatalf("result = %v, want granted_until for a ttl'd approval", result)
+	if _, ok := result["granted_until"]; ok {
+		t.Fatalf("result = %v, want no granted_until — an attestation approval never grants", result)
 	}
 	att, ok := result["attestation"].(map[string]any)
 	if !ok {

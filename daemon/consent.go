@@ -95,6 +95,9 @@ func registerConsent(d *rpc.Dispatcher) {
 // subject_bytes = sha256(canonical(argv) ‖ 0x00 ‖ utf8(origin_host)) and
 // origin_host is the requested_from value ("" for a local, non-routed request).
 // synckitd forwards argv+nonce+requested_from opaquely and verifies nothing.
+// An attestation request ALWAYS prompts and signs fresh — grants are
+// verdict-only: ttl_ms records and serves a grant only for a request without
+// argv, since a cached verdict carries no signature over a new nonce.
 //
 // consent.relay (approver leg a routed walk shells as `synckitd consent relay`,
 // the request fed as one JSON line on stdin so command text stays off the remote
