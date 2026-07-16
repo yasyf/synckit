@@ -9,10 +9,11 @@ import (
 	"github.com/yasyf/synckit/consent"
 )
 
-// reasonEnvVar carries the prompt text into the helper's verdict-only consent
-// subcommand, always set to the engine's composed reason so the helper never
-// falls back to its generic default.
-const reasonEnvVar = "AUTHKIT_REASON"
+// ReasonEnvVar carries the prompt text into the helper's verdict-only consent
+// subcommand. Exported so a consumer shelling the helper directly over
+// Bridge.Run (cookiesync's vault wrappers) sets it rather than hard-coding the
+// name.
+const ReasonEnvVar = "AUTHKIT_REASON"
 
 // signRequest is the consent-sign stdin payload: the nonce and argv the helper
 // hashes, displays, and signs itself — never a pre-composed reason, so a lying
@@ -38,7 +39,7 @@ func (g Gate) Prompt(ctx context.Context, req consent.Request) (consent.PromptRe
 	if len(req.Argv) > 0 {
 		return g.sign(ctx, req)
 	}
-	res, err := g.Bridge.Run(ctx, nil, []string{reasonEnvVar + "=" + req.Reason}, "consent")
+	res, err := g.Bridge.Run(ctx, nil, []string{ReasonEnvVar + "=" + req.Reason}, "consent")
 	if err != nil {
 		return consent.PromptResult{}, err
 	}
