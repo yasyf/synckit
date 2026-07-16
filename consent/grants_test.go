@@ -49,14 +49,17 @@ func TestCapOnlyShortens(t *testing.T) {
 	if !ok {
 		t.Fatal("Cap must not revoke the grant")
 	}
-	if remaining := time.Until(until); remaining > time.Minute {
-		t.Fatalf("capped expiry %v away, want <= 1m", remaining)
+	if remaining := time.Until(until); remaining > time.Minute || remaining < 59*time.Second {
+		t.Fatalf("capped expiry %v away, want ~1m", remaining)
 	}
 
 	g.Cap("sid:501", "sha256:aaaa", 2*time.Hour)
-	after, _ := g.Granted("sid:501", "sha256:aaaa")
-	if after.After(until) {
-		t.Fatalf("Cap extended the expiry from %v to %v; it must only shorten", until, after)
+	after, ok := g.Granted("sid:501", "sha256:aaaa")
+	if !ok {
+		t.Fatal("a no-op Cap must not revoke the grant")
+	}
+	if !after.Equal(until) {
+		t.Fatalf("Cap moved the expiry from %v to %v; a longer TTL is a no-op", until, after)
 	}
 
 	g.Cap("sid:502", "sha256:aaaa", time.Minute)
