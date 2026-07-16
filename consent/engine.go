@@ -290,10 +290,10 @@ func (e *Engine) route(ctx context.Context, req Request) (Decision, error) {
 			return Decision{}, err
 		}
 	}
+	// ApprovedBy is the AUTHENTICATED candidate the router bound, never wire
+	// metadata; signed_by rides only inside the attestation, as the key
+	// selector for a signature that is actually present.
 	d := Decision{Verdict: VerdictOK, ApprovedBy: reply.Peer, Routed: true}
-	if reply.SignedBy != "" {
-		d.ApprovedBy = reply.SignedBy
-	}
 	if reply.Sig != "" {
 		d.Attestation = &Attestation{KeyID: reply.KeyID, Sig: reply.Sig, SignedBy: reply.SignedBy}
 	}

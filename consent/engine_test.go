@@ -362,6 +362,35 @@ func TestDecideLocalOnlyNeverRoutes(t *testing.T) {
 	}
 }
 
+// TestDecideRoutedApprovedByIsAuthenticatedPeer proves ApprovedBy reflects the
+// authenticated relay peer, never wire metadata: an approved reply with a
+// correct echo, a claimed signed_by, and NO signature yields the peer the
+// router actually bound and no attestation.
+func TestDecideRoutedApprovedByIsAuthenticatedPeer(t *testing.T) {
+	peer := "evil@peer"
+	nonce := "echo-nonce"
+	endpoint := "me@laptop:sha256:cafe"
+	runner := &approverMesh{
+		presence: map[string]string{peer: livePresence},
+		relay: map[string]string{peer: relayReply(t, map[string]any{
+			"status": "approved", "nonce": nonce, "endpoint": endpoint, "signed_by": "studio",
+		})},
+	}
+	e := newTestEngine(t, &fakePrompter{}, staticProbe(presence.SessionSnapshot{}), runner, peer)
+	e.Router.Nonce = func() (string, error) { return nonce, nil }
+
+	d, err := e.Decide(context.Background(), decideReq(0))
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if d.Verdict != VerdictOK || !d.Routed || d.ApprovedBy != peer {
+		t.Fatalf("Decide = %+v, want ApprovedBy %q — the authenticated peer, never the wire signed_by", d, peer)
+	}
+	if d.Attestation != nil {
+		t.Fatalf("attestation = %+v, want none for a signature-less reply", d.Attestation)
+	}
+}
+
 // TestDecideRoutedDenialIsDenied proves a peer's denial folds into a denied
 // decision, not an error, and grants nothing.
 func TestDecideRoutedDenialIsDenied(t *testing.T) {
