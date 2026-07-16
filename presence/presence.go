@@ -41,12 +41,13 @@ const (
 // SessionSnapshot is a point-in-time read of this host's console GUI session: whether
 // a GUI session owns the physical console, whether its screen is locked, the console
 // user's short name (empty when no GUI session is attached), and whether an inbound
-// screen share is mirroring the console.
+// screen share is mirroring the console. It serializes with the wire keys the consent
+// presence probe answers with, so a peer's liveness read parses the snapshot directly.
 type SessionSnapshot struct {
-	OnConsole    bool
-	Locked       bool
-	ConsoleUser  string
-	ScreenShared bool
+	OnConsole    bool   `json:"on_console"`
+	Locked       bool   `json:"locked"`
+	ConsoleUser  string `json:"console_user"`
+	ScreenShared bool   `json:"screen_shared"`
 }
 
 // Console reads this host's console GUI session from ioreg alone: whether a GUI
