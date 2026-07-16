@@ -52,6 +52,7 @@ func newRoot(version string) *cobra.Command {
 		newStatusCmd(),
 		newInstallCmd(),
 		newUninstallCmd(),
+		newConsentCmd(),
 	)
 	return root
 }

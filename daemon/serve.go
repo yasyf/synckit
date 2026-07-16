@@ -107,6 +107,12 @@ func serve(ctx context.Context) error {
 		}
 		return map[string]any{"reloaded": true}, nil
 	})
+	// consent.request|relay|presence ride plain Register (concurrent), never the
+	// exclusive mutex reconcile/reload share: a 10-min Touch ID prompt behind it
+	// would wedge the daemon.
+	if err := registerConsent(d); err != nil {
+		return err
+	}
 
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
