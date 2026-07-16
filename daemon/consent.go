@@ -106,7 +106,8 @@ func registerConsent(d *rpc.Dispatcher) {
 //	stdin  {client, reason, subject, nonce, endpoint, origin, argv?, sign_nonce?}
 //	reply  {status, nonce, endpoint, key_id?, sig?, signed_by?}
 //
-// An approval echoes the request's nonce+endpoint verbatim; denied and
+// client is required: an omitted or empty client is rejected before any
+// prompt. An approval echoes the request's nonce+endpoint verbatim; denied and
 // unavailable are the bare {status}. The leg never routes onward and never
 // exits 255 (see newConsentRelayCmd).
 //

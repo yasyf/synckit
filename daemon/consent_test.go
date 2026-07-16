@@ -229,7 +229,7 @@ func TestConsentRelayCLIDeniedIsTerminal(t *testing.T) {
 		consent.NewRouter(&recordingRunner{}, consent.PresenceCommand), staticResolve())
 	serveConsentEngine(t, engine)
 
-	stdin := `{"reason":"r","subject":"s","nonce":"n","endpoint":"e","origin":"you@origin"}`
+	stdin := `{"client":"cc-sudo","reason":"r","subject":"s","nonce":"n","endpoint":"e","origin":"you@origin"}`
 	var out bytes.Buffer
 	cmd := newConsentRelayCmd()
 	cmd.SetIn(strings.NewReader(stdin))
@@ -257,7 +257,7 @@ func TestConsentRelayCLINeverRoutesOnward(t *testing.T) {
 		consent.NewRouter(runner, consent.PresenceCommand), staticResolve("other@peer2"))
 	serveConsentEngine(t, engine)
 
-	stdin := `{"reason":"r","subject":"s","nonce":"n","endpoint":"e","origin":"you@origin","route_to":"attacker@evil"}`
+	stdin := `{"client":"cc-sudo","reason":"r","subject":"s","nonce":"n","endpoint":"e","origin":"you@origin","route_to":"attacker@evil"}`
 	var out bytes.Buffer
 	cmd := newConsentRelayCmd()
 	cmd.SetIn(strings.NewReader(stdin))

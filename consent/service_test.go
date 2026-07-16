@@ -163,6 +163,34 @@ func TestRelayHandlerEchoesVerbatim(t *testing.T) {
 	}
 }
 
+// TestRelayHandlerRequiresClient proves the frozen relay shape's required
+// client is enforced fail-closed: an omitted or empty client is rejected
+// before any prompt fires.
+func TestRelayHandlerRequiresClient(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"omitted", func(p map[string]any) { delete(p, "client") }},
+		{"empty", func(p map[string]any) { p["client"] = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prompter := &fakePrompter{result: PromptResult{Verdict: VerdictOK}}
+			e := newTestEngine(t, prompter, staticProbe(attendedSession(t)), &approverMesh{})
+
+			params := relayParams()
+			tc.mutate(params)
+			_, err := e.handleRelay(context.Background(), params)
+			if err == nil || !strings.Contains(err.Error(), "client") {
+				t.Fatalf("handleRelay = %v, want the missing-client refusal", err)
+			}
+			if got := prompter.prompts(); len(got) != 0 {
+				t.Fatalf("a client-less relay must be rejected before any prompt, got %v", got)
+			}
+		})
+	}
+}
+
 // TestRelayHandlerDeniedCarriesStatusOnly proves a denial replies with the
 // bare status — no echo material a requestor could mistake for a binding.
 func TestRelayHandlerDeniedCarriesStatusOnly(t *testing.T) {

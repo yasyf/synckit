@@ -121,9 +121,12 @@ func (e *Engine) handleRelay(ctx context.Context, params map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
-	client, err := optionalString(params, "client")
+	client, err := stringParam(params, "client")
 	if err != nil {
 		return nil, err
+	}
+	if client == "" {
+		return nil, errors.New(`consent.relay: param "client" must not be empty`)
 	}
 	argv, err := stringsParam(params, "argv")
 	if err != nil {
