@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -172,7 +173,7 @@ func TestConsentRequestCLIApprovesOverSocket(t *testing.T) {
 		t.Fatalf("attestation = %v, want key k1 sig c2ln signed by me@self", res["attestation"])
 	}
 	reqs := gate.prompts()
-	if len(reqs) != 1 || reqs[0].Nonce != "root-nonce" || strings.Join(reqs[0].Argv, " ") != "dscacheutil -flushcache" {
+	if len(reqs) != 1 || reqs[0].Nonce != "root-nonce" || !slices.Equal(reqs[0].Argv, []string{"dscacheutil", "-flushcache"}) {
 		t.Fatalf("prompted = %+v, want the argv and nonce carried through", reqs)
 	}
 }
@@ -215,7 +216,10 @@ func TestConsentRelayCLIForwardsAndEchoes(t *testing.T) {
 	if len(reqs) != 1 || reqs[0].Requestor != "host:you@origin" {
 		t.Fatalf("prompted = %+v, want one prompt as host:you@origin", reqs)
 	}
-	if reqs[0].Nonce != "origin-nonce" || strings.Join(reqs[0].Argv, " ") != "dscacheutil -flushcache" {
+	if reqs[0].Origin != "you@origin" {
+		t.Fatalf("prompted origin = %q, want the sent origin bound through to the prompter", reqs[0].Origin)
+	}
+	if reqs[0].Nonce != "origin-nonce" || !slices.Equal(reqs[0].Argv, []string{"dscacheutil", "-flushcache"}) {
 		t.Fatalf("prompted request = %+v, want the opaque sign material passed through", reqs[0])
 	}
 }

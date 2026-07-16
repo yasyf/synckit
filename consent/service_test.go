@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -158,7 +159,10 @@ func TestRelayHandlerEchoesVerbatim(t *testing.T) {
 	if len(reqs) != 1 || reqs[0].Requestor != "host:you@desktop" {
 		t.Fatalf("prompted requests = %+v, want requestor host:you@desktop", reqs)
 	}
-	if reqs[0].Nonce != "origin-nonce" || len(reqs[0].Argv) != 2 {
+	if reqs[0].Origin != "you@desktop" {
+		t.Fatalf("prompted origin = %q, want the sent origin bound through to the prompter", reqs[0].Origin)
+	}
+	if reqs[0].Nonce != "origin-nonce" || !slices.Equal(reqs[0].Argv, []string{"dscacheutil", "-flushcache"}) {
 		t.Fatalf("prompted request = %+v, want the opaque sign material passed through", reqs[0])
 	}
 }

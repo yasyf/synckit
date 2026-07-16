@@ -3,6 +3,7 @@ package consent
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -310,7 +311,7 @@ func TestDecideUnattendedRoutes(t *testing.T) {
 	}
 	if relay.Client != want.Client || relay.Reason != want.Reason || relay.Subject != want.Subject ||
 		relay.Nonce != want.Nonce || relay.Endpoint != want.Endpoint || relay.Origin != want.Origin ||
-		relay.SignNonce != want.SignNonce || strings.Join(relay.Argv, " ") != strings.Join(want.Argv, " ") {
+		relay.SignNonce != want.SignNonce || !slices.Equal(relay.Argv, want.Argv) {
 		t.Fatalf("relay payload = %+v, want %+v", relay, want)
 	}
 }
