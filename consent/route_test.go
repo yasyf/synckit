@@ -41,6 +41,65 @@ func TestRouteApprovedBindsNonceAndEndpoint(t *testing.T) {
 	}
 }
 
+// TestRoutePrefersFirstLiveCandidate proves candidate order is preference:
+// with two live, healthy approvers the walk binds the first one's approval and
+// never dials the second.
+func TestRoutePrefersFirstLiveCandidate(t *testing.T) {
+	first := "first@box"
+	second := "second@box"
+	nonce := "prefer-nonce"
+	endpoint := "me@laptop:sha256:cafe"
+
+	runner := &approverMesh{
+		presence: map[string]string{first: livePresence, second: livePresence},
+		relay: map[string]string{
+			first:  approvedReply(t, nonce, endpoint),
+			second: approvedReply(t, nonce, endpoint),
+		},
+	}
+	r := pinnedRouter(runner, nonce)
+
+	reply, err := r.Route(context.Background(), []string{first, second}, endpoint, testAttempt)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if reply.Peer != first {
+		t.Fatalf("Route bound %s, want the preferred candidate %s", reply.Peer, first)
+	}
+	if asked := runner.relayTargets(); len(asked) != 1 || asked[0] != first {
+		t.Fatalf("relay dials = %v, want only [%s]", asked, first)
+	}
+}
+
+// TestRouteFallsThroughLockedCandidate proves a locked first candidate is
+// probed, never dialed, and the walk advances to the next live candidate.
+func TestRouteFallsThroughLockedCandidate(t *testing.T) {
+	locked := "locked@box"
+	healthy := "healthy@box"
+	nonce := "locked-nonce"
+	endpoint := "me@laptop:sha256:cafe"
+
+	runner := &approverMesh{
+		presence: map[string]string{locked: deadPresence, healthy: livePresence},
+		relay:    map[string]string{healthy: approvedReply(t, nonce, endpoint)},
+	}
+	r := pinnedRouter(runner, nonce)
+
+	reply, err := r.Route(context.Background(), []string{locked, healthy}, endpoint, testAttempt)
+	if err != nil {
+		t.Fatalf("Route across a locked candidate: %v", err)
+	}
+	if reply.Peer != healthy {
+		t.Fatalf("Route bound %s, want %s", reply.Peer, healthy)
+	}
+	if probed := runner.probedTargets(); len(probed) != 2 || probed[0] != locked || probed[1] != healthy {
+		t.Fatalf("presence probes = %v, want [%s %s]", probed, locked, healthy)
+	}
+	if asked := runner.relayTargets(); len(asked) != 1 || asked[0] != healthy {
+		t.Fatalf("relay dials = %v, want only %s (a locked peer is never dialed)", asked, healthy)
+	}
+}
+
 // TestRouteNonceMismatchFailsClosed proves a reply whose nonce does not echo
 // the one sent is rejected as a security failure (*AuthRequired), never
 // retried against another candidate.
@@ -236,6 +295,9 @@ func TestRouteAdvancesPastWedgedProbe(t *testing.T) {
 	}
 	if reply.Peer != healthy {
 		t.Fatalf("Route bound %s, want %s", reply.Peer, healthy)
+	}
+	if probed := runner.probedTargets(); len(probed) != 2 || probed[0] != wedged || probed[1] != healthy {
+		t.Fatalf("presence probes = %v, want [%s %s] (every candidate stays probe-gated)", probed, wedged, healthy)
 	}
 	if asked := runner.relayTargets(); len(asked) != 1 || asked[0] != healthy {
 		t.Fatalf("relay dials = %v, want only %s (the wedged probe is routed around)", asked, healthy)
