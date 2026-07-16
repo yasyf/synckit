@@ -4,7 +4,21 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.16.0] - 2026-07-16
+
+### Added
+- `consent/` and `authkit/` packages: a domain-agnostic consent engine plus a client for
+  the signed authkit helper, generalized from cookiesync's `internal/auth` so cc-sudo and
+  cookiesync share one implementation. The engine decides a local prompt versus a routed
+  peer approval and enforces the fail-closed routed handshake (a fresh nonce per attempt,
+  exact nonce+endpoint echo or terminal failure, a binding mismatch is fatal — never a
+  retry). It carries an optional attestation extension (`argv`/`nonce`/`signed_by`) that
+  binds a Secure Enclave signature over `nonce ‖ sha256(canonical(argv) ‖ 0x00 ‖ origin_host)`;
+  synckitd forwards it opaquely and never verifies it. The `authkit` client maps the helper's
+  exit codes, including the new `4` (caller-rejected/usage error — a hard failure, never
+  degraded or routed around).
+- `synckitd consent request|relay|presence` exposes the engine over the daemon socket; the
+  requestor is derived server-side from the peer's socket identity, never client-supplied.
 
 ### Removed
 - The pre-cutover legacy-mesh migration and per-tool LaunchAgent bootout. `synckitd` no
