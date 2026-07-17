@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-07-17
+
+### Added
+- `meshtrust/` package, extracted from cc-present's `internal/trust` + tailnet listener
+  factory: a fail-closed network-trust `Provider` over the shared host mesh
+  (`hostregistry.Mesh`) joined with live `tailscale status` addresses. `TrustedPeer` /
+  `TrustedOrigin` match cc-interact's `daemon.Config` hook shapes (no cc-interact import),
+  `SelfAddrs`/`Mesh` expose the resolved set, and `Listeners` prebinds one extra HTTP
+  listener per tailnet address (port-hint first, then ephemeral; unspecified addresses
+  refused) for a loopback-bound daemon. Snapshots cache for 30s with a single-flight
+  refresh; an unreadable registry, a registry naming no self identity, a non-`Running`
+  tailscale backend, or any unparseable address trusts nothing, and a refresh under a
+  canceled caller context is never cached.
+
 ## [0.16.0] - 2026-07-16
 
 ### Added
