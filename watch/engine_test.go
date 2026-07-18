@@ -606,3 +606,57 @@ func TestGateErrorLoggedTreatedNotBusy(t *testing.T) {
 		t.Errorf("gate consulted %d times, want 1", calls)
 	}
 }
+
+// orderingNotifier reads the engine's recorded lastDigest at the instant each Notify
+// fires, under the engine's own mutex. It is the seam for a true record-before-notify
+// ordering proof: unlike TestAntiEchoSameHashTerminatesLoop — whose second evaluate runs
+// only after the first has fully returned, so it passes even if the record moved after
+// the fanout — this observes the recorded state synchronously mid-fanout.
+type orderingNotifier struct {
+	eng *Engine[item]
+
+	mu   sync.Mutex
+	seen []string // the lastDigest value observed at each Notify, in call order
+}
+
+func (n *orderingNotifier) Notify(_ context.Context, _ string, it item) error {
+	n.eng.mu.Lock()
+	recorded := n.eng.lastDigest[it.key]
+	n.eng.mu.Unlock()
+	n.mu.Lock()
+	n.seen = append(n.seen, recorded)
+	n.mu.Unlock()
+	return nil
+}
+
+func (n *orderingNotifier) snapshot() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]string(nil), n.seen...)
+}
+
+// TestRecordBeforeNotifyOrdering is the true ordering proof for evaluate (S4): the new
+// fingerprint is recorded in lastDigest under mu *before* peers are notified. Each
+// notifier reads lastDigest at the moment its Notify fires and must already see the new
+// fingerprint; were the record deferred until after the fanout, a Notify would observe
+// the id unrecorded and this test would fail. This is what makes a self-induced echo
+// terminate the loop, not the loop terminating for some other reason.
+func TestRecordBeforeNotifyOrdering(t *testing.T) {
+	resolver := &fakeResolver{fingerprints: []string{"fpNew"}}
+	notifier := &orderingNotifier{}
+	hosts := []string{"peer1", "peer2", "peer3"}
+	eng := newTestEngine(resolver, notifier, time.Hour, hosts)
+	notifier.eng = eng
+
+	eng.evaluate(context.Background(), testItem())
+
+	seen := notifier.snapshot()
+	if len(seen) != len(hosts) {
+		t.Fatalf("notifies = %d, want %d (one per peer)", len(seen), len(hosts))
+	}
+	for i, recorded := range seen {
+		if recorded != "fpNew" {
+			t.Errorf("notify %d observed lastDigest=%q, want fpNew already recorded before the fanout", i, recorded)
+		}
+	}
+}

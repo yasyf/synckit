@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -19,6 +20,73 @@ import (
 	"github.com/yasyf/synckit/presence"
 	"github.com/yasyf/synckit/rpc"
 )
+
+// countingReader records how many bytes were read through it, so a test can prove the
+// consent relay caps its read at MaxLine (LimitReader truncation) and never touches the
+// bytes past the cap.
+type countingReader struct {
+	data []byte
+	pos  int
+	read int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	if c.pos >= len(c.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, c.data[c.pos:])
+	c.pos += n
+	c.read += n
+	return n, nil
+}
+
+// TestConsentRelayReadCapsAtMaxLine pins that the consent relay reads at most MaxLine
+// bytes (S1): it wraps its input in an io.LimitReader(rpc.MaxLine), so an oversize
+// request is truncated at the cap — the bytes past it are never read — rather than
+// rejected with the "exceeds" error the inbound server path (ReadLine) raises. The
+// valid JSON in the first MaxLine bytes still forwards, so a truncation is silent, not a
+// rejection.
+func TestConsentRelayReadCapsAtMaxLine(t *testing.T) {
+	shortConfigHome(t) // socket resolves, no daemon bound: callDaemon fails, not the read
+
+	obj := []byte(`{"origin":"host"}`)
+	pad := bytes.Repeat([]byte(" "), rpc.MaxLine-len(obj)) // whitespace keeps the JSON valid
+	overflow := bytes.Repeat([]byte("X"), 4096)            // past the cap; must never be read
+	cr := &countingReader{data: slices.Concat(obj, pad, overflow)}
+
+	_, err := relayReply(context.Background(), cr)
+	if cr.read != rpc.MaxLine {
+		t.Errorf("relay read %d bytes, want exactly MaxLine=%d — LimitReader must truncate the overflow", cr.read, rpc.MaxLine)
+	}
+	if err == nil {
+		t.Fatal("relayReply returned nil error, want the daemon-unreachable failure (proving it forwarded the truncated-but-valid request)")
+	}
+	if strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("relay rejected the oversize input with %v; it must truncate via LimitReader, never reject like the server path", err)
+	}
+}
+
+// TestConsentRelayOversizeDegradesNotRejects pins that an oversize relay request degrades
+// to an unavailable reply with a nil error (S1): the LimitReader truncates the never
+// terminated JSON mid-object, the parse fails, and runRelay folds that into unavailable —
+// never a non-zero exit that would risk tripping synckit's exit-255 ssh failover into a
+// double prompt.
+func TestConsentRelayOversizeDegradesNotRejects(t *testing.T) {
+	shortConfigHome(t)
+
+	oversize := slices.Concat([]byte(`{"origin":"`), bytes.Repeat([]byte("a"), rpc.MaxLine))
+	var out bytes.Buffer
+	if err := runRelay(context.Background(), bytes.NewReader(oversize), &out); err != nil {
+		t.Fatalf("runRelay surfaced an error on oversize input (would exit non-zero, risking 255): %v", err)
+	}
+	var reply map[string]any
+	if err := json.Unmarshal(out.Bytes(), &reply); err != nil {
+		t.Fatalf("relay output %q is not JSON: %v", out.Bytes(), err)
+	}
+	if reply["status"] != "unavailable" {
+		t.Errorf("relay status = %v, want unavailable (oversize truncated and folded, never rejected)", reply["status"])
+	}
+}
 
 // fakeGate scripts the local consent gate: it records every prompted request and
 // answers with the scripted result, standing in for the signed authkit helper so

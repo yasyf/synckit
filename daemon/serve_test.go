@@ -113,14 +113,20 @@ const errFakeDown = errString("fake consumer down")
 
 // pipeTransport frames typed rpc over one end of a net.Pipe to a fakeConsumer
 // served by rpc.ServeConn on the other end. It mirrors the real cmdTransport wire
-// (one json request line in, one response line out) without spawning a process.
+// (one json request line in, one response line out) without spawning a process. Do
+// is serialized behind mu like cmdTransport.Do: the engine drives one shared local
+// client from the gate and the self-notifier concurrently, which over a single pipe
+// would otherwise interleave exchanges and race the shared bufio.Reader.
 type pipeTransport struct {
+	mu   sync.Mutex
 	conn net.Conn
 	r    *bufio.Reader
 	done <-chan struct{}
 }
 
 func (t *pipeTransport) Do(_ context.Context, req *rpc.Request) (*syncservice.Response, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	line, err := json.Marshal(req)
 	if err != nil {
 		return nil, err

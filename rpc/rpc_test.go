@@ -2,8 +2,10 @@ package rpc
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -443,5 +445,204 @@ func TestPeerPIDAbsentOnBareContext(t *testing.T) {
 	}
 	if sid, ok := PeerSID(context.Background()); ok || sid != 0 {
 		t.Errorf("PeerSID(context.Background()) = (%d, %v), want (0, false)", sid, ok)
+	}
+}
+
+// TestReadLineBoundary pins the exact 16 MiB inbound line cap (S1): a line whose bytes
+// including the terminating '\n' total MaxLine — a payload of MaxLine-1 — is accepted
+// and returned with the newline stripped, while a MaxLine-byte payload overflows the
+// cap and is rejected, never truncated. The Framing-backed server the rewire adopts
+// must reproduce this boundary exactly.
+func TestReadLineBoundary(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload int // bytes before the terminating '\n'
+		wantErr bool
+	}{
+		{"MaxLine-1 payload plus LF is accepted", MaxLine - 1, false},
+		{"MaxLine payload overflows the cap", MaxLine, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := append(bytes.Repeat([]byte("a"), tt.payload), '\n')
+			got, err := ReadLine(bufio.NewReader(bytes.NewReader(data)), MaxLine)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ReadLine accepted a %d-byte payload, want an overflow rejection", tt.payload)
+				}
+				if !strings.Contains(err.Error(), "exceeds") {
+					t.Errorf("err = %v, want an overflow error mentioning exceeds", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ReadLine rejected a MaxLine-1 payload that fits under the cap: %v", err)
+			}
+			if len(got) != tt.payload {
+				t.Errorf("returned %d bytes, want %d (the payload with the newline stripped)", len(got), tt.payload)
+			}
+		})
+	}
+}
+
+// TestServeConnRejectsOversizedLine pins that ServeConn enforces the same MaxLine cap as
+// the unix Serve path (S1): an over-cap request line surfaces a read error that ends the
+// loop, rather than being buffered unbounded or silently truncated.
+func TestServeConnRejectsOversizedLine(t *testing.T) {
+	d := NewDispatcher()
+	d.Register("echo", func(context.Context, map[string]any) (any, error) { return nil, nil })
+
+	// MaxLine+1 bytes with no newline: ReadLine crosses the cap before any delimiter.
+	rw := struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(bytes.Repeat([]byte("a"), MaxLine+1)), io.Discard}
+
+	err := ServeConn(context.Background(), rw, d)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("ServeConn ended with %v, want an overflow error mentioning exceeds", err)
+	}
+}
+
+// TestServeConnAppliesNoPeerCheck pins that ServeConn trusts its transport and applies no
+// in-band credential gate (S2): it dispatches a request over a plain in-memory pipe with
+// no peer identity attached, so neither PeerPID nor PeerSID is present in the handler
+// ctx. Trust on this path is out of band (process ancestry, ssh auth); the resident unix
+// socket keeps its peercred check via Serve, and ServeConn must not grow one.
+func TestServeConnAppliesNoPeerCheck(t *testing.T) {
+	d := NewDispatcher()
+	d.Register("whoami", func(ctx context.Context, _ map[string]any) (any, error) {
+		_, pidOK := PeerPID(ctx)
+		_, sidOK := PeerSID(ctx)
+		return map[string]any{"pid": pidOK, "sid": sidOK}, nil
+	})
+	client, server := net.Pipe()
+	go func() { _ = ServeConn(context.Background(), server, d) }()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+
+	req, err := EncodeRequest(&Request{Method: "whoami"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if _, err := client.Write(req); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	line, err := ReadLine(bufio.NewReader(client), MaxLine)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	resp, err := DecodeResponse(line)
+	if err != nil {
+		t.Fatalf("decode response %q: %v", line, err)
+	}
+	if !resp.OK {
+		t.Fatalf("ok = false, error = %q", resp.Error)
+	}
+	got := resp.Result.(map[string]any)
+	if got["pid"] != false || got["sid"] != false {
+		t.Errorf("ServeConn attached peer identity %v, want pid and sid both absent", got)
+	}
+}
+
+// TestServeAdmitsEUIDEqualsUID pins the precondition the daemonkit trust.Policy swap
+// relies on (S2): synckit's peer check compares the peer UID against os.Getuid, while
+// trust.Policy.Check compares against os.Geteuid. For the normal, non-setuid daemon euid
+// equals uid, so the swap is behavior-preserving; this test fails loudly if that ever
+// diverges, flagging the swap for scrutiny. It also confirms the same-uid peer is
+// admitted — the check the swap replaces.
+func TestServeAdmitsEUIDEqualsUID(t *testing.T) {
+	if uid, euid := os.Getuid(), os.Geteuid(); uid != euid {
+		t.Fatalf("os.Getuid()=%d != os.Geteuid()=%d — the trust.Policy Getuid→Geteuid swap is not a no-op in this environment", uid, euid)
+	}
+	d := NewDispatcher()
+	d.Register("ping", func(context.Context, map[string]any) (any, error) { return "pong", nil })
+	sock := serve(t, d)
+	resp, err := Call(context.Background(), sock, &Request{Method: "ping"})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if !resp.OK || resp.Result != "pong" {
+		t.Errorf("got ok=%v result=%v, want the same-euid peer admitted", resp.OK, resp.Result)
+	}
+}
+
+// TestServeConnOuterCtxCancelPropagates pins that canceling the ctx passed to ServeConn
+// cancels an in-flight handler's ctx (S9). It is the only cancellation ServeConn honors:
+// unlike the unix Serve path it has no per-connection disconnect watcher.
+func TestServeConnOuterCtxCancelPropagates(t *testing.T) {
+	d := NewDispatcher()
+	entered := make(chan struct{})
+	ended := make(chan error, 1)
+	d.Register("park", func(ctx context.Context, _ map[string]any) (any, error) {
+		close(entered)
+		<-ctx.Done()
+		ended <- ctx.Err()
+		return nil, ctx.Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	client, server := net.Pipe()
+	go func() { _ = ServeConn(ctx, server, d) }()
+	t.Cleanup(func() { cancel(); _ = client.Close(); _ = server.Close() })
+
+	req, err := EncodeRequest(&Request{Method: "park"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if _, err := client.Write(req); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	<-entered
+	cancel()
+	select {
+	case err := <-ended:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("handler ctx ended with %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("outer ctx cancel did not reach the in-flight ServeConn handler")
+	}
+}
+
+// TestServeConnMidHandlerEOFDoesNotCancel pins that a client disconnect mid-handler does
+// NOT cancel a ServeConn handler's ctx (S9): ServeConn dispatches synchronously with no
+// disconnect watcher, so a handler already running is cut only by the outer ctx or
+// DispatchTimeout, never by the peer going away. This is the ServeConn↔Serve asymmetry
+// the rewire must preserve — the unix Serve path DOES cancel on disconnect
+// (TestClosingConnCancelsHandler).
+func TestServeConnMidHandlerEOFDoesNotCancel(t *testing.T) {
+	d := NewDispatcher()
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	sawCancel := make(chan bool, 1)
+	d.Register("park", func(ctx context.Context, _ map[string]any) (any, error) {
+		close(entered)
+		<-proceed
+		select {
+		case <-ctx.Done():
+			sawCancel <- true
+		default:
+			sawCancel <- false
+		}
+		return "done", nil
+	})
+	client, server := net.Pipe()
+	go func() { _ = ServeConn(context.Background(), server, d) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	req, err := EncodeRequest(&Request{Method: "park"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if _, err := client.Write(req); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	<-entered
+	_ = client.Close() // EOF on the server's read side, while the handler runs
+	// A disconnect watcher, if one existed, would cancel within this window; without one
+	// the handler ctx must stay live. This bounded wait proves the absence of a cancel.
+	time.Sleep(100 * time.Millisecond)
+	close(proceed)
+	if <-sawCancel {
+		t.Error("ServeConn canceled the handler ctx on mid-handler EOF; it must have no disconnect watcher")
 	}
 }

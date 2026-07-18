@@ -363,3 +363,80 @@ func TestBreakerRetryNoopsAfterGenerationCancel(t *testing.T) {
 		t.Fatalf("inner called %d times after generation cancel, want %d (stale retry must no-op)", got, before)
 	}
 }
+
+// perPeerInner is a watch.Notifier[string] that fails only for the peers in down, so a
+// test can drive one peer's breaker open while another stays healthy.
+type perPeerInner struct {
+	mu    sync.Mutex
+	down  map[string]bool
+	calls []notifyRec
+}
+
+func (f *perPeerInner) Notify(_ context.Context, peer, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, notifyRec{peer, id})
+	if f.down[peer] {
+		return errFakeDown
+	}
+	return nil
+}
+
+func (f *perPeerInner) callsFor(peer string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.calls {
+		if c.peer == peer {
+			n++
+		}
+	}
+	return n
+}
+
+// TestBreakerIsolatesPeers pins that the per-peer breaker keys entirely on peer (S5): one
+// peer failing opens only its own breaker, and its open state neither opens nor
+// suppresses a healthy peer. A down peer's outage must never gate notifications to the
+// peers that are still reachable.
+func TestBreakerIsolatesPeers(t *testing.T) {
+	captureSlog(t)
+	inner := &perPeerInner{down: map[string]bool{"down@node": true}}
+	b, h := newTestBreaker(context.Background(), t, inner, "me@self")
+	ctx := context.Background()
+
+	if err := b.Notify(ctx, "down@node", "id"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Notify(ctx, "up@node", "id"); err != nil {
+		t.Fatal(err)
+	}
+	h.waitSnapshot(t) // only the opened (down) peer snapshots
+
+	b.mu.Lock()
+	_, downOpen := b.open["down@node"]
+	_, upOpen := b.open["up@node"]
+	openCount := len(b.open)
+	b.mu.Unlock()
+	if !downOpen || upOpen || openCount != 1 {
+		t.Fatalf("open breakers: count=%d down=%v up=%v, want only down@node open", openCount, downOpen, upOpen)
+	}
+
+	// Further notifies: the down peer is suppressed (inner never re-called) while the
+	// healthy peer keeps flowing through — one peer's outage never gates another.
+	downBase := inner.callsFor("down@node")
+	upBase := inner.callsFor("up@node")
+	for i := 0; i < 3; i++ {
+		if err := b.Notify(ctx, "down@node", "x"); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Notify(ctx, "up@node", "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := inner.callsFor("down@node"); got != downBase {
+		t.Errorf("down@node inner calls = %d, want %d (its open breaker suppresses)", got, downBase)
+	}
+	if got := inner.callsFor("up@node"); got != upBase+3 {
+		t.Errorf("up@node inner calls = %d, want %d (healthy peer unaffected by the other's open breaker)", got, upBase+3)
+	}
+}
