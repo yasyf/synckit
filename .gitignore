@@ -29,3 +29,7 @@ coverage.txt
 
 # bootstrap verify binary smoke test
 .go-smoke/
+
+# Cross-repo dev wiring — untracked by fleet convention
+go.work
+go.work.sum
