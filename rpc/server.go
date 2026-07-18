@@ -9,7 +9,25 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/trust"
+	"github.com/yasyf/daemonkit/wire"
 )
+
+// ErrFrameTooLarge aliases wire.ErrFrameTooLarge: a request frame crossed the
+// MaxLine cap before its newline. Aliasing keeps a single sentinel identity across
+// the daemonkit boundary rather than re-declaring an equivalent error.
+var ErrFrameTooLarge = wire.ErrFrameTooLarge
+
+// ErrFrameContainsLF aliases wire.ErrFrameContainsLF: a raw frame handed to the
+// framing writer carried an embedded newline that would split the stream.
+var ErrFrameContainsLF = wire.ErrFrameContainsLF
+
+// peerPolicy is the resident socket's trust policy: the same-effective-UID floor
+// with no code-signing Requirement, the daemonkit equivalent of the LOCAL_PEERCRED
+// same-UID check the framing swap replaces.
+var peerPolicy = trust.Policy{}
 
 type peerPIDKey struct{}
 
@@ -33,17 +51,34 @@ func PeerSID(ctx context.Context) (int, bool) {
 	return sid, ok
 }
 
-// Listen binds a unix socket at sockPath, first unlinking any stale socket left by a
-// crashed daemon so a relaunch does not fail with EADDRINUSE.
-func Listen(sockPath string) (net.Listener, error) {
-	if err := os.Remove(sockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("remove stale rpc socket %s: %w", sockPath, err)
+// Listen binds a unix socket at sockPath under a proc.SingleEntrant flock, so a
+// second serve gets proc.ErrPeerStarting rather than stealing a running daemon's
+// socket. The returned listener holds the lock for its lifetime and releases it on
+// Close; a stale socket left by a crashed daemon (lock free) is unlinked and rebound.
+// ctx bounds SingleEntrant's post-eviction lock poll; the bind itself is prompt.
+func Listen(ctx context.Context, sockPath string) (net.Listener, error) {
+	se := proc.SingleEntrant{
+		Socket: sockPath,
+		Evict:  func() (bool, error) { return false, nil },
 	}
-	ln, err := net.Listen("unix", sockPath)
+	ln, lock, err := se.Listen(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listen on rpc socket %s: %w", sockPath, err)
+		return nil, err
 	}
-	return ln, nil
+	return &lockedListener{Listener: ln, lock: lock}, nil
+}
+
+// lockedListener releases the SingleEntrant socket lock when the listener closes,
+// keeping the bind single-entrant for the listener's whole lifetime.
+type lockedListener struct {
+	net.Listener
+	lock *os.File
+}
+
+func (l *lockedListener) Close() error {
+	err := l.Listener.Close()
+	_ = l.lock.Close()
+	return err
 }
 
 // Serve accepts and handles one request per connection until ctx is canceled, then
@@ -73,12 +108,17 @@ func Serve(ctx context.Context, ln net.Listener, d *Dispatcher) error {
 func handleConn(ctx context.Context, conn *net.UnixConn, d *Dispatcher) {
 	defer func() { _ = conn.Close() }()
 
-	switch uid, err := peerUID(conn); {
-	case err != nil:
-		writeResponse(conn, &Response{OK: false, Error: fmt.Sprintf("read peer uid: %v", err)})
+	fr := wire.NewFraming(conn)
+	// MaxLine-1: wire bounds the payload, ReadLine counted the '\n' — keeps the boundary.
+	fr.MaxLine = MaxLine - 1
+
+	peer, err := wire.PeerFromConn(conn)
+	if err != nil {
+		_ = fr.WriteJSON(&Response{OK: false, Error: fmt.Sprintf("read peer credentials: %v", err)})
 		return
-	case uid != os.Getuid():
-		writeResponse(conn, &Response{OK: false, Error: fmt.Sprintf("peer uid %d is not %d", uid, os.Getuid())})
+	}
+	if err := peerPolicy.Check(peer); err != nil {
+		_ = fr.WriteJSON(&Response{OK: false, Error: err.Error()})
 		return
 	}
 
@@ -92,31 +132,28 @@ func handleConn(ctx context.Context, conn *net.UnixConn, d *Dispatcher) {
 	if err := conn.SetReadDeadline(time.Now().Add(ReadTimeout)); err != nil {
 		return
 	}
-	line, err := ReadLine(bufio.NewReader(conn), MaxLine)
+	line, err := fr.ReadFrame()
 	if err != nil {
-		writeResponse(conn, &Response{OK: false, Error: fmt.Sprintf("read request: %v", err)})
+		_ = fr.WriteJSON(&Response{OK: false, Error: fmt.Sprintf("read request: %v", err)})
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{}) // clear; dispatch may run long
 
 	req, err := DecodeRequest(line)
 	if err != nil {
-		writeResponse(conn, &Response{OK: false, Error: err.Error()})
+		_ = fr.WriteJSON(&Response{OK: false, Error: err.Error()})
 		return
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	// The protocol allows no client bytes after the request line, so any Read result
-	// — a byte, EOF, or an error — means the client is gone or misbehaving. Reading
-	// the raw conn, not the bufio.Reader above, keeps bytes the reader already
-	// buffered past the line from firing this; the deferred Close unblocks the Read
-	// once the handler finishes, so the goroutine never outlives the connection.
+	// Read the raw conn, not the framing reader, so bytes it buffered past the line
+	// don't fire this; the deferred Close unblocks the Read when the handler returns.
 	go func() {
 		_, _ = conn.Read(make([]byte, 1))
 		cancel()
 	}()
-	writeResponse(conn, d.Dispatch(ctx, req))
+	_ = fr.WriteJSON(d.Dispatch(ctx, req))
 }
 
 // ServeConn runs a streaming request/response loop over one long-lived bidirectional

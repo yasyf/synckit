@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/yasyf/daemonkit/proc"
 )
 
 // testCfg is the Config the in-package tests drive; Name selects the per-tool
@@ -108,6 +109,18 @@ func TestWithLockContendedReturnsErrLockBusy(t *testing.T) {
 	}
 	if !acquired {
 		t.Error("fn did not run after the lock was released")
+	}
+}
+
+// TestErrLockBusyAliasesProc pins that hostregistry.ErrLockBusy is the same sentinel
+// as proc.ErrLockBusy, so a downstream errors.Is(err, hostregistry.ErrLockBusy) — which
+// reposync re-aliases as state.ErrLockBusy — keeps holding across the daemonkit swap.
+func TestErrLockBusyAliasesProc(t *testing.T) {
+	if !errors.Is(ErrLockBusy, proc.ErrLockBusy) {
+		t.Fatalf("hostregistry.ErrLockBusy (%v) is not proc.ErrLockBusy (%v)", ErrLockBusy, proc.ErrLockBusy)
+	}
+	if !errors.Is(ErrLockBusy, proc.ErrLockBusy) {
+		t.Error("errors.Is(hostregistry.ErrLockBusy, proc.ErrLockBusy) must hold")
 	}
 }
 

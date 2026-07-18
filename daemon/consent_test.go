@@ -184,7 +184,7 @@ func serveConsentEngine(t *testing.T, engine *consent.Engine) {
 	if err != nil {
 		t.Fatalf("sockpath: %v", err)
 	}
-	ln, err := rpc.Listen(sock)
+	ln, err := rpc.Listen(context.Background(), sock)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}

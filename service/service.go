@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/yasyf/daemonkit/proc"
 )
 
 const (
@@ -206,7 +208,9 @@ func (m *LaunchdManager) installAgent(ctx context.Context, cfg ToolConfig, agent
 // that gives up with an EIO carries sessionTypeHint — the bootout-retry failure
 // never does, since it is not a wrong-session symptom.
 func (m *LaunchdManager) bootstrapWithRetry(ctx context.Context, agent AgentSpec, label, path string) error {
-	delay := bootstrapBaseDelay
+	// Base 200ms doubling; the Cap is set above the last retry's wait so the six-attempt
+	// sequence (200ms…3.2s) is never clamped.
+	backoff := proc.Backoff{Base: bootstrapBaseDelay, Cap: bootstrapBaseDelay << bootstrapAttempts}
 	for attempt := 0; ; attempt++ {
 		err := m.launcher.Bootstrap(ctx, path)
 		if err == nil {
@@ -218,10 +222,9 @@ func (m *LaunchdManager) bootstrapWithRetry(ctx context.Context, agent AgentSpec
 			}
 			return err
 		}
-		if err := m.sleep(ctx, delay); err != nil {
+		if err := m.sleep(ctx, backoff.After(attempt+1)); err != nil {
 			return err
 		}
-		delay *= 2
 		if err := m.launcher.Bootout(ctx, label); err != nil {
 			return fmt.Errorf("bootout %s before retry: %w", label, err)
 		}

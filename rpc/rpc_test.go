@@ -14,6 +14,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yasyf/daemonkit/drain"
+	"github.com/yasyf/daemonkit/proc"
 )
 
 var errBoom = errors.New("boom")
@@ -30,7 +33,7 @@ func serve(t *testing.T, d *Dispatcher) string {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "s.sock")
 
-	ln, err := Listen(sock)
+	ln, err := Listen(context.Background(), sock)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -377,11 +380,135 @@ func TestServeUnlinksStaleSocket(t *testing.T) {
 	if err := os.WriteFile(sock, nil, 0o600); err != nil {
 		t.Fatalf("seed stale socket: %v", err)
 	}
-	ln, err := Listen(sock)
+	ln, err := Listen(context.Background(), sock)
 	if err != nil {
 		t.Fatalf("listen over stale socket: %v", err)
 	}
 	_ = ln.Close()
+}
+
+// TestListenRefusesSecondListener pins the proc.SingleEntrant guard rpc.Listen adopts:
+// a second bind on a live socket gets proc.ErrPeerStarting instead of stealing it, and
+// a fresh Listen succeeds once the first listener releases its socket lock on Close.
+func TestListenRefusesSecondListener(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rpcsock")
+	if err != nil {
+		t.Fatalf("mkdir sock dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
+
+	ln1, err := Listen(context.Background(), sock)
+	if err != nil {
+		t.Fatalf("first Listen: %v", err)
+	}
+
+	if _, err := Listen(context.Background(), sock); !errors.Is(err, proc.ErrPeerStarting) {
+		t.Fatalf("second Listen err = %v, want proc.ErrPeerStarting", err)
+	}
+
+	if err := ln1.Close(); err != nil {
+		t.Fatalf("close first listener: %v", err)
+	}
+	ln2, err := Listen(context.Background(), sock)
+	if err != nil {
+		t.Fatalf("Listen after first closed: %v", err)
+	}
+	_ = ln2.Close()
+}
+
+// TestServeDrainSettlesInflightAndRefuses proves the drain.Simple admission gate the
+// daemon installs via SetAdmission: a request admitted before drain runs to its
+// terminal response, a fresh dial after the listener is deactivated is refused, and a
+// request admitted during drain gets ErrDraining. It mirrors serve()'s shutdown wiring.
+func TestServeDrainSettlesInflightAndRefuses(t *testing.T) {
+	gate := &drain.Simple{}
+	d := NewDispatcher()
+	d.SetAdmission(gate.Admit)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	d.Register("park", func(_ context.Context, _ map[string]any) (any, error) {
+		close(entered)
+		<-release
+		return "done", nil
+	})
+
+	dir, err := os.MkdirTemp("", "rpcdrain")
+	if err != nil {
+		t.Fatalf("mkdir sock dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
+	ln, err := Listen(context.Background(), sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	execCtx, cancelExec := context.WithCancel(context.Background())
+	t.Cleanup(cancelExec)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- Serve(execCtx, ln, d) }()
+
+	// Admit one in-flight request and wait until it is inside the handler.
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	line, err := EncodeRequest(&Request{Method: "park"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if _, err := conn.Write(line); err != nil {
+		t.Fatalf("write park: %v", err)
+	}
+	<-entered
+
+	// Drain in the background: Deactivate closes the listener, then Settle blocks on
+	// the in-flight park until it settles.
+	deactivated := make(chan struct{})
+	drainDone := make(chan error, 1)
+	go func() {
+		drainDone <- gate.Drain(context.Background(), drain.SimpleConfig{
+			Deactivate: func(context.Context) error {
+				err := ln.Close()
+				close(deactivated)
+				return err
+			},
+			MarkClosing:     func() {},
+			CancelExecutors: cancelExec,
+		})
+	}()
+	<-deactivated
+
+	// A fresh dial is refused now that the listener is deactivated.
+	if c, derr := net.Dial("unix", sock); derr == nil {
+		_ = c.Close()
+		t.Fatal("dial after drain deactivated the listener succeeded, want refused")
+	}
+
+	// A request admitted during drain is refused with ErrDraining.
+	if resp := d.Dispatch(context.Background(), &Request{Method: "park"}); resp.OK || resp.Error != drain.ErrDraining.Error() {
+		t.Fatalf("dispatch during drain = %+v, want %q error", resp, drain.ErrDraining)
+	}
+
+	// Release the in-flight handler; it completes with its response over the live conn.
+	close(release)
+	respLine, err := ReadLine(bufio.NewReader(conn), MaxLine)
+	if err != nil {
+		t.Fatalf("read park response: %v", err)
+	}
+	resp, err := DecodeResponse(respLine)
+	if err != nil {
+		t.Fatalf("decode response %q: %v", respLine, err)
+	}
+	if !resp.OK || resp.Result != "done" {
+		t.Errorf("in-flight park response = %+v, want ok=true result=done", resp)
+	}
+	if err := <-drainDone; err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	<-serveErr // Serve returns once the listener closed; a shutdown-close error is benign
 }
 
 func TestServeRejectsOversizedLine(t *testing.T) {

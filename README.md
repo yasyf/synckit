@@ -32,7 +32,7 @@ func main() {
 		return map[string]any{"pong": p["msg"]}, nil
 	})
 
-	ln, _ := rpc.Listen("/tmp/app.sock")
+	ln, _ := rpc.Listen(ctx, "/tmp/app.sock")
 	go rpc.Serve(ctx, ln, d)
 
 	resp, _ := rpc.Call(ctx, "/tmp/app.sock", &rpc.Request{

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/yasyf/daemonkit/drain"
 
 	"github.com/yasyf/synckit/debug"
 	"github.com/yasyf/synckit/hostregistry"
@@ -41,6 +42,10 @@ var (
 	watchBackoffMax  = 90 * time.Second
 	watchHealthyRun  = 30 * time.Second
 )
+
+// drainGrace bounds how long shutdown waits for in-flight RPC handlers to settle
+// before it cancels them and returns. A package var so tests can shrink it.
+var drainGrace = 30 * time.Second
 
 func newServeCmd() *cobra.Command {
 	return &cobra.Command{
@@ -78,7 +83,7 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ln, err := rpc.Listen(sock)
+	ln, err := rpc.Listen(ctx, sock)
 	if err != nil {
 		return err
 	}
@@ -90,7 +95,9 @@ func serve(ctx context.Context) error {
 		return err
 	}
 
+	gate := &drain.Simple{}
 	d := rpc.NewDispatcher()
+	d.SetAdmission(gate.Admit)
 	d.Register("status", handleStatus)
 	// reconcile and reload mutate the engine generation, so they serialize behind
 	// the exclusive mutex — a reload never tears down the clients a reconcile pass
@@ -129,7 +136,30 @@ func serve(ctx context.Context) error {
 	}()
 
 	slog.InfoContext(ctx, "synckitd serving", "socket", sock)
-	return rpc.Serve(ctx, ln, d)
+
+	// Handlers run under execCtx, not the shutdown-signal ctx, so a drain can settle
+	// in-flight requests before canceling them. ln.Close (Deactivate) unblocks Accept.
+	execCtx, cancelExec := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelExec()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- rpc.Serve(execCtx, ln, d) }()
+
+	select {
+	case err := <-serveErr:
+		return err
+	case <-ctx.Done():
+		drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainGrace)
+		defer cancel()
+		if err := gate.Drain(drainCtx, drain.SimpleConfig{
+			Deactivate:      func(context.Context) error { return ln.Close() },
+			MarkClosing:     func() { slog.InfoContext(ctx, "synckitd draining", "socket", sock) },
+			CancelExecutors: cancelExec,
+		}); err != nil {
+			slog.ErrorContext(ctx, "serve: drain", "err", err)
+		}
+		<-serveErr
+		return nil
+	}
 }
 
 // supervisor owns the current generation of watch goroutines and the long-lived

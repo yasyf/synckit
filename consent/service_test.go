@@ -41,7 +41,7 @@ func TestRequestDerivesRequestorFromPeerSID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "s.sock")
-	ln, err := rpc.Listen(sock)
+	ln, err := rpc.Listen(context.Background(), sock)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
