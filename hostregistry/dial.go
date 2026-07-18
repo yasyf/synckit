@@ -25,6 +25,12 @@ var sshBin = "ssh"
 // descendant that inherited them cannot wedge Wait forever; a var so tests shrink it.
 var sshWaitDelay = 5 * time.Second
 
+// sshDialBudget caps total failover time across dial addresses: once spent, the next
+// 255 skips straight to the final canonical target, so many dead recorded addresses
+// cost ~budget + one ConnectTimeout, not N x ConnectTimeout. It bounds only failover —
+// a connected remote command rides ctx, never this budget. A var so tests shrink it.
+var sshDialBudget = 10 * time.Second
+
 // dialOpts are the per-attempt ssh options: BatchMode, a short ConnectTimeout so a
 // dead address fails over fast, and keepalives so a wedged peer drops rather than
 // hangs.
@@ -70,10 +76,16 @@ func brewWrap(remoteCmd string) string {
 // outlives the deadline. Failover is exit-255-only: ssh returns 255 for its own
 // connection failures and passes the remote command's exit code (0-254) through, so
 // only an ssh-level failure advances to the next address; a remote command's own
-// non-zero exit fails immediately and is never re-run on another address. Because a 255
-// failure re-runs remoteCmd on the next address (at-least-once delivery), remoteCmd must
-// be idempotent or convergent. Every failing attempt surfaces as a [*SSHError] naming the
-// dial address, its captured stderr, and the unwrappable ssh exit cause.
+// non-zero exit fails immediately and is never re-run on another address — an address
+// that connects and runs the command is the right host (a stale address reaching the
+// wrong machine fails host-key verification, a 255), so its exit code is authoritative
+// and re-running elsewhere would mask it. Because a 255 failure re-runs remoteCmd on the
+// next address (at-least-once delivery), remoteCmd must be idempotent or convergent.
+// ExecSSH bounds only the dial phase (per-address ConnectTimeout, sshDialBudget across
+// addresses, keepalives that drop a dead peer); a connected command's runtime belongs
+// to the caller's ctx deadline — only the caller knows how long its command should take.
+// Every failing attempt surfaces as a [*SSHError] naming the dial address, its captured
+// stderr, and the unwrappable ssh exit cause.
 func ExecSSH(ctx context.Context, target, remoteCmd string, stdin []byte) (string, error) {
 	addrs, err := DialAddrs(target)
 	if err != nil {
@@ -83,19 +95,24 @@ func ExecSSH(ctx context.Context, target, remoteCmd string, stdin []byte) (strin
 }
 
 // execSSHAddrs dials each address in order, returning the first success and advancing
-// only on an ssh-level (exit 255) connection failure. On the terminal (non-failover)
-// path it propagates the attempt's [*SSHError] unchanged alongside its captured stdout,
-// so a caller like remoteBrewInstall can read brew's "no available formula" message off
-// stdout.
+// only on an ssh-level (exit 255) connection failure. Failover is bounded by
+// sshDialBudget: once spent, the remaining recorded alternates are skipped and only the
+// final canonical target is dialed. On the terminal (non-failover) path it propagates
+// the attempt's [*SSHError] unchanged alongside its captured stdout, so a caller like
+// remoteBrewInstall can read brew's "no available formula" message off stdout.
 func execSSHAddrs(ctx context.Context, addrs []string, remoteCmd string, stdin []byte) (string, error) {
+	start := time.Now()
 	var lastErr error
-	for i, addr := range addrs {
-		out, err := execSSHOnce(ctx, addr, remoteCmd, stdin)
+	for i := 0; i < len(addrs); i++ {
+		out, err := execSSHOnce(ctx, addrs[i], remoteCmd, stdin)
 		if err == nil {
 			return out, nil
 		}
 		lastErr = err
 		if i < len(addrs)-1 && isConnFailure(err) {
+			if time.Since(start) >= sshDialBudget {
+				i = len(addrs) - 2 // budget spent: next iteration dials the final canonical target
+			}
 			continue
 		}
 		return out, err

@@ -79,6 +79,85 @@ func TestExecSSHTriesAddrsInOrderOn255(t *testing.T) {
 	}
 }
 
+// slowConnfailSSH writes a fake ssh whose connfail addresses sleep 300ms before exiting
+// 255, so the dial-budget tests accumulate real elapsed time per dead address.
+func slowConnfailSSH(t *testing.T, logPath string) string {
+	t.Helper()
+	script := "#!/bin/sh\n" +
+		"a2=\"\"; a1=\"\"\n" +
+		"for a in \"$@\"; do a2=\"$a1\"; a1=\"$a\"; done\n" +
+		"printf '%s\\n' \"$a2\" >> \"" + logPath + "\"\n" +
+		"case \"$a2\" in\n" +
+		"  *connfail*) sleep 0.3; echo \"ssh: connect: Operation timed out\" >&2; exit 255 ;;\n" +
+		"  *) printf 'ran-on:%s\\n' \"$a2\" ;;\n" +
+		"esac\n"
+	path := filepath.Join(t.TempDir(), "fake-ssh")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil { //nolint:gosec // G306: an executable test stub must be +x.
+		t.Fatalf("write fake ssh: %v", err)
+	}
+	return path
+}
+
+// shrinkDialBudget points sshDialBudget at d so the budget tests run fast, restoring it
+// on cleanup.
+func shrinkDialBudget(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := sshDialBudget
+	sshDialBudget = d
+	t.Cleanup(func() { sshDialBudget = prev })
+}
+
+// TestExecSSHDialBudgetBoundsDeadAddressFailover proves the overall dial bound: with the
+// budget spent after the first dead address (300ms attempt vs 250ms budget), the four
+// remaining alternates are skipped and only the final canonical address is dialed, so the
+// call costs ~2 attempts instead of the ~1.8s serial walk over all six.
+func TestExecSSHDialBudgetBoundsDeadAddressFailover(t *testing.T) {
+	shrinkDialBudget(t, 250*time.Millisecond)
+	logPath := filepath.Join(t.TempDir(), "attempts.log")
+	swapSSHBin(t, slowConnfailSSH(t, logPath))
+
+	addrs := []string{"me@connfail-1", "me@connfail-2", "me@connfail-3", "me@connfail-4", "me@connfail-5", "me@connfail-final"}
+	start := time.Now()
+	_, err := execSSHAddrs(context.Background(), addrs, "echo hi", nil)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("execSSHAddrs succeeded, want the dial failure surfaced")
+	}
+	if !isConnFailure(err) {
+		t.Fatalf("error = %v, want the final attempt's 255 surfaced", err)
+	}
+	if elapsed > 1400*time.Millisecond {
+		t.Fatalf("execSSHAddrs took %s, want well under the ~1.8s serial walk (budget must bound failover)", elapsed)
+	}
+	tried := attempts(t, logPath)
+	want := []string{"me@connfail-1", "me@connfail-final"}
+	if strings.Join(tried, ",") != strings.Join(want, ",") {
+		t.Fatalf("addresses tried = %v, want %v (spent budget skips to the final canonical address)", tried, want)
+	}
+}
+
+// TestExecSSHDialBudgetStillDialsCanonicalTarget proves a spent budget skips only the
+// recorded alternates, never the final canonical address: a host reachable at its tailnet
+// FQDN still succeeds after dead LAN addresses exhaust the budget.
+func TestExecSSHDialBudgetStillDialsCanonicalTarget(t *testing.T) {
+	shrinkDialBudget(t, 250*time.Millisecond)
+	logPath := filepath.Join(t.TempDir(), "attempts.log")
+	swapSSHBin(t, slowConnfailSSH(t, logPath))
+
+	out, err := execSSHAddrs(context.Background(), []string{"me@connfail-1", "me@connfail-2", "me@connfail-3", "me@good-tailnet"}, "echo hi", nil)
+	if err != nil {
+		t.Fatalf("execSSHAddrs: %v (a spent budget must still dial the canonical target)", err)
+	}
+	if !strings.Contains(out, "good-tailnet") {
+		t.Fatalf("stdout = %q, want the canonical address to have answered", out)
+	}
+	tried := attempts(t, logPath)
+	want := []string{"me@connfail-1", "me@good-tailnet"}
+	if strings.Join(tried, ",") != strings.Join(want, ",") {
+		t.Fatalf("addresses tried = %v, want %v (spent budget jumps to the canonical address)", tried, want)
+	}
+}
+
 // TestExecSSHRemoteFailureNeverFailsOver proves a remote command's own non-255 exit
 // fails immediately and is never re-run against the next address.
 func TestExecSSHRemoteFailureNeverFailsOver(t *testing.T) {
