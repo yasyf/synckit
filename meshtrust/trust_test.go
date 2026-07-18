@@ -211,6 +211,26 @@ func TestTrustedOrigin(t *testing.T) {
 	}
 }
 
+func TestTrustedOriginSelfCollision(t *testing.T) {
+	src := meshSources()
+	src.set(func(s *testSources) { s.status = []byte(selfCollidingStatusFixture) })
+	clock := &testClock{now: time.Unix(1000, 0)}
+	p := newTestProvider(src, clock)
+
+	if p.TrustedPeer(addr(t, "100.100.100.3")) {
+		t.Error("peer colliding with self's DNS name must not be trusted")
+	}
+	if p.TrustedOrigin("yasyf-home.tail71af5d.ts.net") {
+		t.Error("self DNS-name origin must be quarantined on collision")
+	}
+	if !p.TrustedOrigin("100.88.252.58") || !p.TrustedOrigin("fd7a:115c:a1e0::6d33:fc3c") {
+		t.Error("self IP origins must survive a DNS-name collision")
+	}
+	if !p.TrustedPeer(addr(t, "100.88.252.58")) {
+		t.Error("self addrs must remain trusted peers")
+	}
+}
+
 func TestProviderConcurrent(t *testing.T) {
 	src := meshSources()
 	clock := &testClock{now: time.Unix(1000, 0)}

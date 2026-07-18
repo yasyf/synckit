@@ -3,6 +3,7 @@ package meshtrust
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"strings"
 )
@@ -57,10 +58,8 @@ func hostPart(target string) string {
 	return target
 }
 
-// build joins registry targets to tailnet nodes by MagicDNS name: trusted peers
-// are self's addresses plus matched nodes' addresses; origins are self's name.
-// Any unparseable address fails the whole build, and nameless nodes or
-// empty-host targets never join — the set stays fail-closed.
+// build joins registry targets to tailnet nodes by MagicDNS name; the set
+// stays fail-closed throughout (see meshtrust-dns-collision note).
 func build(reg registry, st tsStatus) (snapshot, error) {
 	snap := snapshot{
 		self:    reg.Self,
@@ -75,18 +74,35 @@ func build(reg registry, st tsStatus) (snapshot, error) {
 	for _, a := range selfAddrs {
 		snap.peers[a] = struct{}{}
 	}
-	if name := normalizeHost(st.Self.DNSName); name != "" {
-		snap.origins[name] = struct{}{}
+	selfName := normalizeHost(st.Self.DNSName)
+	if selfName != "" {
+		snap.origins[selfName] = struct{}{}
 	}
 	nodes := make(map[string][]netip.Addr, len(st.Peer))
+	ambiguous := make(map[string]struct{})
 	for _, n := range st.Peer {
 		addrs, err := parseAddrs(n.TailscaleIPs)
 		if err != nil {
 			return snapshot{}, err
 		}
-		if name := normalizeHost(n.DNSName); name != "" {
-			nodes[name] = addrs
+		name := normalizeHost(n.DNSName)
+		if name == "" {
+			continue
 		}
+		if _, seen := nodes[name]; seen || name == selfName {
+			// Name collision, peer-vs-peer or peer-vs-self: trust neither
+			// (meshtrust-dns-collision note).
+			ambiguous[name] = struct{}{}
+			continue
+		}
+		nodes[name] = addrs
+	}
+	for name := range ambiguous {
+		delete(nodes, name)
+		delete(snap.origins, name)
+		// Fail-closed availability tradeoff: a rogue node claiming a
+		// legitimate name denies that name trust until the collision clears.
+		slog.Warn("meshtrust: failing closed, DNS name collision quarantines name from trust", "name", name)
 	}
 	for _, target := range reg.Hosts {
 		var addrs []netip.Addr

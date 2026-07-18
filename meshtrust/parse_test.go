@@ -53,6 +53,44 @@ const mixedAddrStatusFixture = `{
   }
 }`
 
+// collidingStatusFixture has two distinct tailnet nodes that normalize to the
+// same DNS name — the case build() must resolve deterministically rather than
+// via Go's randomized map iteration order.
+const collidingStatusFixture = `{
+  "BackendState": "Running",
+  "Self": {
+    "DNSName": "yasyf-home.tail71af5d.ts.net.",
+    "TailscaleIPs": ["100.88.252.58"]
+  },
+  "Peer": {
+    "nodekey:aaaaaaaaaaaa": {
+      "DNSName": "dup.tail71af5d.ts.net.",
+      "TailscaleIPs": ["100.100.100.1"]
+    },
+    "nodekey:bbbbbbbbbbbb": {
+      "DNSName": "dup.tail71af5d.ts.net.",
+      "TailscaleIPs": ["100.100.100.2"]
+    }
+  }
+}`
+
+// selfCollidingStatusFixture has a peer whose DNS name normalizes to Self's —
+// the self-vs-peer collision variant build() must quarantine from peer trust
+// and from the DNS-name origins set alike.
+const selfCollidingStatusFixture = `{
+  "BackendState": "Running",
+  "Self": {
+    "DNSName": "yasyf-home.tail71af5d.ts.net.",
+    "TailscaleIPs": ["100.88.252.58", "fd7a:115c:a1e0::6d33:fc3c"]
+  },
+  "Peer": {
+    "nodekey:cccccccccccc": {
+      "DNSName": "Yasyf-Home.tail71af5d.ts.net.",
+      "TailscaleIPs": ["100.100.100.3"]
+    }
+  }
+}`
+
 const emptyNameStatusFixture = `{
   "BackendState": "Running",
   "Self": {
@@ -215,5 +253,70 @@ func TestBuildEmptyNameGuard(t *testing.T) {
 	}
 	if got, want := len(snap.hosts), 1; got != want || len(snap.hosts[0].Addrs) != 0 {
 		t.Errorf("hosts = %+v, want the empty-host target with no addrs", snap.hosts)
+	}
+}
+
+func TestBuildSelfCollisionQuarantine(t *testing.T) {
+	st, err := parseStatus([]byte(selfCollidingStatusFixture))
+	if err != nil {
+		t.Fatalf("parseStatus() error: %v", err)
+	}
+	reg := registry{
+		Self:  "yasyf@yasyf-home.tail71af5d.ts.net",
+		Hosts: []string{"yasyf@yasyf-home.tail71af5d.ts.net"},
+	}
+	snap, err := build(reg, st)
+	if err != nil {
+		t.Fatalf("build() error: %v", err)
+	}
+	if _, ok := snap.peers[addr(t, "100.100.100.3")]; ok {
+		t.Error("peer colliding with self's DNS name must not be trusted")
+	}
+	if got, want := len(snap.peers), 2; got != want {
+		t.Errorf("len(peers) = %d, want %d (self addrs only)", got, want)
+	}
+	if got := snap.hosts[0]; len(got.Addrs) != 0 {
+		t.Errorf("colliding host = %+v, want no addrs (trust neither)", got)
+	}
+	if _, ok := snap.origins["yasyf-home.tail71af5d.ts.net"]; ok {
+		t.Error("self DNS-name origin must be quarantined on collision")
+	}
+	if got, want := len(snap.origins), 0; got != want {
+		t.Errorf("len(origins) = %d, want %d", got, want)
+	}
+	if got, want := len(snap.selfAddrs), 2; got != want {
+		t.Errorf("len(selfAddrs) = %d, want %d (self IP origins survive)", got, want)
+	}
+}
+
+func TestBuildCollisionDeterministic(t *testing.T) {
+	st, err := parseStatus([]byte(collidingStatusFixture))
+	if err != nil {
+		t.Fatalf("parseStatus() error: %v", err)
+	}
+	reg := registry{
+		Self:  "yasyf@yasyf-home.tail71af5d.ts.net",
+		Hosts: []string{"user@dup.tail71af5d.ts.net"},
+	}
+	for i := 0; i < 4096; i++ {
+		snap, err := build(reg, st)
+		if err != nil {
+			t.Fatalf("build() iteration %d error: %v", i, err)
+		}
+		if got, want := len(snap.hosts), 1; got != want {
+			t.Fatalf("iteration %d: len(hosts) = %d, want %d", i, got, want)
+		}
+		if got := snap.hosts[0]; got.Target != "user@dup.tail71af5d.ts.net" || len(got.Addrs) != 0 {
+			t.Fatalf("iteration %d: colliding host = %+v, want no addrs (trust neither)", i, got)
+		}
+		if _, ok := snap.peers[addr(t, "100.100.100.1")]; ok {
+			t.Fatalf("iteration %d: colliding peer address 100.100.100.1 must not be trusted", i)
+		}
+		if _, ok := snap.peers[addr(t, "100.100.100.2")]; ok {
+			t.Fatalf("iteration %d: colliding peer address 100.100.100.2 must not be trusted", i)
+		}
+		if got, want := len(snap.peers), 1; got != want {
+			t.Fatalf("iteration %d: len(peers) = %d, want %d (self only)", i, got, want)
+		}
 	}
 }
