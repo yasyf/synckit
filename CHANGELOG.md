@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-07-20
+
+### Added
+- `meshtrust`: `Provider.SelfHostLabel` exposes this machine's bare MagicDNS label
+  (the name's first label), for composing plaintext-http tailnet URLs — a bare
+  label escapes the `ts.net` HSTS preload, so browsers don't force it to https.
+  The label joins the `TrustedOrigin` set: skipped when empty (a degenerate
+  leading-dot name must not admit the empty origin), and quarantined on name
+  collision like the full name.
+
 ## [0.22.0] - 2026-07-20
 
 ### Added

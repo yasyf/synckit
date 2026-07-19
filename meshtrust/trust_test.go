@@ -223,6 +223,47 @@ func TestSelfDNSName(t *testing.T) {
 	}
 }
 
+func TestSelfHostLabel(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		want   string
+	}{
+		{
+			name:   "normal DNS name",
+			status: statusFixture,
+			want:   "yasyf-home",
+		},
+		{
+			name:   "dotless DNS name",
+			status: strings.Replace(statusFixture, "yasyf-home.tail71af5d.ts.net.", "yasyf-home", 1),
+			want:   "yasyf-home",
+		},
+		{
+			name:   "backend stopped",
+			status: stoppedStatusFixture,
+			want:   "",
+		},
+		{
+			name:   "self collision",
+			status: selfCollidingStatusFixture,
+			want:   "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := meshSources()
+			src.status = []byte(tt.status)
+			clock := &testClock{now: time.Unix(1000, 0)}
+			p := newTestProvider(src, clock)
+
+			if got := p.SelfHostLabel(context.Background()); got != tt.want {
+				t.Errorf("SelfHostLabel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSelfCertDomain(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -259,6 +300,7 @@ func TestTrustedOrigin(t *testing.T) {
 		host string
 		want bool
 	}{
+		{"yasyf-home", true},
 		{"yasyf-home.tail71af5d.ts.net", true},
 		{"YASYF-HOME.tail71af5d.ts.net.", true},
 		{"100.88.252.58", true},
@@ -286,6 +328,9 @@ func TestTrustedOriginSelfCollision(t *testing.T) {
 	}
 	if p.TrustedOrigin("yasyf-home.tail71af5d.ts.net") {
 		t.Error("self DNS-name origin must be quarantined on collision")
+	}
+	if p.TrustedOrigin("yasyf-home") {
+		t.Error("bare self-label origin must be quarantined on collision")
 	}
 	if !p.TrustedOrigin("100.88.252.58") || !p.TrustedOrigin("fd7a:115c:a1e0::6d33:fc3c") {
 		t.Error("self IP origins must survive a DNS-name collision")

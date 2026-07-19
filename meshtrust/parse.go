@@ -51,6 +51,11 @@ func normalizeHost(s string) string {
 	return strings.TrimSuffix(strings.ToLower(s), ".")
 }
 
+func firstLabel(host string) string {
+	label, _, _ := strings.Cut(host, ".")
+	return label
+}
+
 // hostPart returns the host portion of an ssh-style "user@host" target — the
 // whole string when it carries no "@".
 func hostPart(target string) string {
@@ -80,6 +85,9 @@ func build(reg registry, st tsStatus) (snapshot, error) {
 	snap.selfDNS = selfName
 	if selfName != "" {
 		snap.origins[selfName] = struct{}{}
+		if label := firstLabel(selfName); label != "" {
+			snap.origins[label] = struct{}{}
+		}
 	}
 	if len(st.CertDomains) > 0 {
 		snap.certDomain = normalizeHost(st.CertDomains[0])
@@ -112,6 +120,7 @@ func build(reg registry, st tsStatus) (snapshot, error) {
 		if name == snap.selfDNS {
 			// A quarantined self name must not surface anywhere: a URL
 			// printed with it would be rejected by TrustedOrigin.
+			delete(snap.origins, firstLabel(name))
 			snap.selfDNS = ""
 		}
 		if name == snap.certDomain {

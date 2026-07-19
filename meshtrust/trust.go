@@ -122,6 +122,14 @@ func (p *Provider) SelfDNSName(ctx context.Context) string {
 	return p.current(ctx).selfDNS
 }
 
+// SelfHostLabel returns the bare MagicDNS machine label, suitable as the host
+// of a plaintext-http URL (a bare label escapes the ts.net HSTS preload); empty
+// when tailscale is unavailable or the self name is quarantined by a DNS
+// collision.
+func (p *Provider) SelfHostLabel(ctx context.Context) string {
+	return firstLabel(p.current(ctx).selfDNS)
+}
+
 // SelfCertDomain returns the tailnet cert domain naming this machine, empty
 // when tailscale is unavailable or the tailnet's HTTPS-certificates feature
 // is off.

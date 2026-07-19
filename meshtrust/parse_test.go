@@ -223,7 +223,10 @@ func TestBuild(t *testing.T) {
 	if _, ok := snap.origins["yasyf-home.tail71af5d.ts.net"]; !ok {
 		t.Error("origins missing self MagicDNS name")
 	}
-	if got, want := len(snap.origins), 1; got != want {
+	if _, ok := snap.origins["yasyf-home"]; !ok {
+		t.Error("origins missing bare self label")
+	}
+	if got, want := len(snap.origins), 2; got != want {
 		t.Errorf("len(origins) = %d, want %d", got, want)
 	}
 	if got, want := len(snap.selfAddrs), 2; got != want {
@@ -286,6 +289,21 @@ func TestBuildEmptyNameGuard(t *testing.T) {
 	}
 }
 
+func TestBuildLeadingDotSelfLabel(t *testing.T) {
+	status := strings.Replace(statusFixture, "yasyf-home.tail71af5d.ts.net.", ".tail71af5d.ts.net.", 1)
+	st, err := parseStatus([]byte(status))
+	if err != nil {
+		t.Fatalf("parseStatus() error: %v", err)
+	}
+	snap, err := build(registry{Self: "yasyf@yasyf-home.tail71af5d.ts.net"}, st)
+	if err != nil {
+		t.Fatalf("build() error: %v", err)
+	}
+	if _, ok := snap.origins[""]; ok {
+		t.Error("a leading-dot self name must not admit the empty origin")
+	}
+}
+
 func TestBuildSelfCollisionQuarantine(t *testing.T) {
 	st, err := parseStatus([]byte(selfCollidingStatusFixture))
 	if err != nil {
@@ -311,6 +329,9 @@ func TestBuildSelfCollisionQuarantine(t *testing.T) {
 	if _, ok := snap.origins["yasyf-home.tail71af5d.ts.net"]; ok {
 		t.Error("self DNS-name origin must be quarantined on collision")
 	}
+	if _, ok := snap.origins["yasyf-home"]; ok {
+		t.Error("bare self-label origin must be quarantined on collision")
+	}
 	if got := snap.selfDNS; got != "" {
 		t.Errorf("selfDNS = %q, want empty (quarantined name must not surface in URLs)", got)
 	}
@@ -325,6 +346,7 @@ func TestBuildSelfCollisionQuarantine(t *testing.T) {
 func TestBuildCertDomains(t *testing.T) {
 	certDomains := `["Yasyf-Home.Beta.Tailscale.Net."]`
 	selfOrigin := "yasyf-home.tail71af5d.ts.net"
+	selfLabel := "yasyf-home"
 	tests := []struct {
 		name        string
 		status      string
@@ -335,22 +357,22 @@ func TestBuildCertDomains(t *testing.T) {
 			name:        "present",
 			status:      certDomainsStatusFixture,
 			wantDomain:  "yasyf-home.beta.tailscale.net",
-			wantOrigins: []string{selfOrigin, "yasyf-home.beta.tailscale.net"},
+			wantOrigins: []string{selfOrigin, selfLabel, "yasyf-home.beta.tailscale.net"},
 		},
 		{
 			name:        "absent",
 			status:      statusFixture,
-			wantOrigins: []string{selfOrigin},
+			wantOrigins: []string{selfOrigin, selfLabel},
 		},
 		{
 			name:        "null",
 			status:      strings.Replace(certDomainsStatusFixture, certDomains, "null", 1),
-			wantOrigins: []string{selfOrigin},
+			wantOrigins: []string{selfOrigin, selfLabel},
 		},
 		{
 			name:        "empty array",
 			status:      strings.Replace(certDomainsStatusFixture, certDomains, "[]", 1),
-			wantOrigins: []string{selfOrigin},
+			wantOrigins: []string{selfOrigin, selfLabel},
 		},
 		{
 			name: "self collision quarantines cert domain",
