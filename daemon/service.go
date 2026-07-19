@@ -31,9 +31,8 @@ func toolConfig(manifests []manifest.Manifest) service.ToolConfig {
 			Label:   "serve",
 			Command: "serve",
 			ExtraKeys: map[string]any{
-				"KeepAlive":   true,
-				"RunAtLoad":   true,
-				"ProcessType": "Background",
+				"KeepAlive": true,
+				"RunAtLoad": true,
 			},
 		},
 	}
@@ -48,7 +47,6 @@ func toolConfig(manifests []manifest.Manifest) service.ToolConfig {
 			ExtraKeys: map[string]any{
 				"KeepAlive":              true,
 				"RunAtLoad":              true,
-				"ProcessType":            "Background",
 				"LimitLoadToSessionType": m.Helper.SessionType,
 			},
 		})

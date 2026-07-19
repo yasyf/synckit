@@ -74,10 +74,16 @@ func TestToolConfigAgents(t *testing.T) {
 	if reconcile.ExtraKeys["StartInterval"] != 900 {
 		t.Errorf("reconcile StartInterval = %v, want 900", reconcile.ExtraKeys["StartInterval"])
 	}
+	if reconcile.ExtraKeys["ProcessType"] != "Background" {
+		t.Errorf("reconcile ProcessType = %v, want Background (the periodic tick is the one agent that keeps the darwinbg clamp)", reconcile.ExtraKeys["ProcessType"])
+	}
 
 	serve := findAgent(t, cfg.Agents, "serve")
 	if serve.ExtraKeys["KeepAlive"] != true {
 		t.Errorf("serve KeepAlive = %v, want true", serve.ExtraKeys["KeepAlive"])
+	}
+	if v, ok := serve.ExtraKeys["ProcessType"]; ok {
+		t.Errorf("serve ProcessType = %v, want the key absent: darwinbg starves serve's probe subprocesses under load", v)
 	}
 
 	helper := findAgent(t, cfg.Agents, "helper.cookiesync")
@@ -89,6 +95,9 @@ func TestToolConfigAgents(t *testing.T) {
 	}
 	if helper.ExtraKeys["LimitLoadToSessionType"] != "Aqua" {
 		t.Errorf("helper session type = %v, want Aqua", helper.ExtraKeys["LimitLoadToSessionType"])
+	}
+	if v, ok := helper.ExtraKeys["ProcessType"]; ok {
+		t.Errorf("helper ProcessType = %v, want the key absent: darwinbg starves the helper's probe subprocesses under load", v)
 	}
 }
 

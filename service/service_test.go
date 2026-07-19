@@ -20,8 +20,8 @@ const fakeExe = "/opt/homebrew/Cellar/synckit/1.2.3/bin/synckit"
 
 // testConfig is a two-agent tool config exercising every ExtraKeys value type: int
 // (StartInterval), bool (LowPriorityIO/RunAtLoad/KeepAlive), and string
-// (ProcessType, and an Aqua session type on the watch agent the way a
-// keychain-touching tool would set it).
+// (ProcessType on the periodic tick and an Aqua session type on the Standard
+// watch agent).
 func testConfig() ToolConfig {
 	return ToolConfig{
 		BinaryName:  "synckit",
@@ -43,7 +43,6 @@ func testConfig() ToolConfig {
 				"KeepAlive":              true,
 				"RunAtLoad":              true,
 				"ThrottleInterval":       10,
-				"ProcessType":            "Background",
 				"LimitLoadToSessionType": "Aqua",
 			}},
 		},
@@ -297,14 +296,13 @@ func TestRenderPlistExtraKeysByType(t *testing.T) {
 		"KeepAlive":              true,
 		"ThrottleInterval":       10,
 		"LimitLoadToSessionType": "Aqua",
-		"ProcessType":            "Background",
 	} {
 		if watch[key] != want {
 			t.Errorf("watch[%q] = %v (%T), want %v (%T)", key, watch[key], watch[key], want, want)
 		}
 	}
 	// Cross-agent tick keys must be absent from the watch plist.
-	for _, absent := range []string{"StartInterval", "Nice", "LowPriorityIO"} {
+	for _, absent := range []string{"StartInterval", "Nice", "LowPriorityIO", "ProcessType"} {
 		if _, ok := watch[absent]; ok {
 			t.Errorf("watch plist unexpectedly has %q", absent)
 		}
