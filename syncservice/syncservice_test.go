@@ -1,11 +1,9 @@
 package syncservice
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,46 +55,37 @@ func (f *fakeConsumer) GetState(_ context.Context) (RawRegistry, error) {
 	return RawRegistry(stateJSON), nil
 }
 
-// pipeTransport frames typed rpc over one end of a net.Pipe, reading responses with a
-// persistent bufio.Reader so buffered bytes are not dropped between calls.
-type pipeTransport struct {
-	conn net.Conn
-	r    *bufio.Reader
-}
-
-func (t *pipeTransport) Do(_ context.Context, req *rpc.Request) (*Response, error) {
-	line, err := json.Marshal(req)
+func serveSocket(t *testing.T, consumer SyncConsumer) Transport {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "syncsvc")
 	if err != nil {
-		return nil, err
+		t.Fatalf("mkdir temp: %v", err)
 	}
-	if _, err := t.conn.Write(append(line, '\n')); err != nil {
-		return nil, err
-	}
-	respLine, err := rpc.ReadLine(t.r, rpc.MaxLine)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "rpc.sock")
+	listener, err := rpc.Listen(context.Background(), sock)
 	if err != nil {
-		return nil, err
+		t.Fatalf("listen: %v", err)
 	}
-	return decodeEnvelope(respLine)
-}
-
-func (t *pipeTransport) Close() error { return t.conn.Close() }
-
-func TestClientServeConnRoundTrip(t *testing.T) {
-	fake := &fakeConsumer{}
-	d := rpc.NewDispatcher()
-	RegisterConsumer(d, fake)
-
-	server, clientConn := net.Pipe()
-	srvCtx, srvCancel := context.WithCancel(context.Background())
-	srvDone := make(chan error, 1)
-	go func() { srvDone <- rpc.ServeConn(srvCtx, server, d) }()
+	dispatcher := rpc.NewDispatcher()
+	RegisterConsumer(dispatcher, consumer)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- rpc.NewServer(dispatcher).Serve(ctx, listener) }()
+	transport := Socket(sock)
 	t.Cleanup(func() {
-		srvCancel()
-		_ = server.Close()
-		<-srvDone
+		_ = transport.Close()
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("serve: %v", err)
+		}
 	})
+	return transport
+}
 
-	c := NewClient(&pipeTransport{conn: clientConn, r: bufio.NewReader(clientConn)})
+func TestClientPersistentSessionRoundTrip(t *testing.T) {
+	fake := &fakeConsumer{}
+	c := NewClient(serveSocket(t, fake))
 	t.Cleanup(func() { _ = c.Close() })
 	ctx := context.Background()
 
@@ -184,20 +173,7 @@ type boomError string
 func (e boomError) Error() string { return string(e) }
 
 func TestHandlerErrorSurfaces(t *testing.T) {
-	d := rpc.NewDispatcher()
-	RegisterConsumer(d, &erroringConsumer{})
-
-	server, clientConn := net.Pipe()
-	srvCtx, srvCancel := context.WithCancel(context.Background())
-	srvDone := make(chan error, 1)
-	go func() { srvDone <- rpc.ServeConn(srvCtx, server, d) }()
-	t.Cleanup(func() {
-		srvCancel()
-		_ = server.Close()
-		<-srvDone
-	})
-
-	c := NewClient(&pipeTransport{conn: clientConn, r: bufio.NewReader(clientConn)})
+	c := NewClient(serveSocket(t, &erroringConsumer{}))
 	t.Cleanup(func() { _ = c.Close() })
 
 	_, err := c.Reconcile(context.Background(), "h1")
@@ -375,10 +351,9 @@ func TestCmdTransportBackoffAfterConsecutiveResets(t *testing.T) {
 	}
 }
 
-// TestCmdTransportFailsOverToWorkingCandidate proves a multi-address tunnel fails over
-// within one Do: a dead first candidate advances to the working one, which answers and
-// pins (bound) the transport to it.
-func TestCmdTransportFailsOverToWorkingCandidate(t *testing.T) {
+// TestCmdTransportReconnectsNextOperationToWorkingCandidate proves a failed operation is
+// never replayed, while the next operation may reconnect through the next address.
+func TestCmdTransportReconnectsNextOperationToWorkingCandidate(t *testing.T) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
 		t.Skip("go not on PATH")
@@ -392,9 +367,17 @@ func TestCmdTransportFailsOverToWorkingCandidate(t *testing.T) {
 	tr := &cmdTransport{candidates: [][]string{{"false"}, {bin}}}
 	t.Cleanup(func() { _ = tr.Close() })
 
-	caps, err := NewClient(tr).Capabilities(context.Background())
+	c := NewClient(tr)
+	if _, err := c.Capabilities(context.Background()); err == nil {
+		t.Fatal("Capabilities on dead candidate succeeded, want the first operation returned exactly once")
+	}
+	if tr.idx != 1 || tr.cmd != nil {
+		t.Fatalf("after first operation idx=%d cmd==nil:%v, want candidate 1 selected but not spawned", tr.idx, tr.cmd == nil)
+	}
+
+	caps, err := c.Capabilities(context.Background())
 	if err != nil {
-		t.Fatalf("Capabilities after failover: %v", err)
+		t.Fatalf("Capabilities on next operation: %v", err)
 	}
 	if caps.Name != "stub" {
 		t.Fatalf("name = %q, want stub (the second candidate answered)", caps.Name)
@@ -420,23 +403,25 @@ func buildStub(t *testing.T, pkg string) string {
 	return bin
 }
 
-// TestCmdTransportPinsOnFirstResponseByteNoFailover proves the upper bound of the
-// at-least-once failover contract: a candidate that emits a partial response and then
-// dies has begun answering, so the transport pins to it and Do returns the read error —
-// the next candidate is NEVER started, even though it would answer successfully.
-func TestCmdTransportPinsOnFirstResponseByteNoFailover(t *testing.T) {
+// TestCmdTransportPreSendFailureAdvancesOnlyNextOperation proves a broken handshake does
+// not start another candidate during the failed operation. It only selects that candidate
+// for a later operation.
+func TestCmdTransportPreSendFailureAdvancesOnlyNextOperation(t *testing.T) {
 	partial := buildStub(t, "partialstub")
-	working := buildStub(t, "rpcstub")
+	canary, spawns := failingSpawnCandidate(t)
 
-	tr := &cmdTransport{candidates: [][]string{{partial}, {working}}}
+	tr := &cmdTransport{candidates: [][]string{{partial}, canary}}
 	t.Cleanup(func() { _ = tr.Close() })
 
 	_, err := tr.Do(context.Background(), &rpc.Request{Method: MethodCapabilities})
 	if err == nil {
-		t.Fatal("Do succeeded, want the partial-response read error — failover must not reach candidate 1")
+		t.Fatal("Do succeeded, want the partial-handshake read error")
 	}
-	if tr.idx != 0 {
-		t.Fatalf("idx = %d, want 0 (never advanced past the pinned candidate)", tr.idx)
+	if got := spawns(); got != 0 {
+		t.Fatalf("second candidate spawned %d times during the failed operation, want 0", got)
+	}
+	if tr.idx != 1 {
+		t.Fatalf("idx = %d, want 1 selected for the next operation", tr.idx)
 	}
 }
 
@@ -610,39 +595,6 @@ func TestCmdTransportBackoffGrowsAndCaps(t *testing.T) {
 	fail(5)
 }
 
-// TestCmdTransportReusedCandidateDeathFailsOverNextDo is the across-Do liveness guard for
-// the request-scoped pin: candidate 0 answers one Do and then dies permanently, so the
-// next Do — reusing what it thinks is a live child — must fail over to candidate 1 rather
-// than stay pinned to the dead address. A transport-lifetime pin would wedge Do #2.
-func TestCmdTransportReusedCandidateDeathFailsOverNextDo(t *testing.T) {
-	once := buildStub(t, "oncestub")
-	working := buildStub(t, "rpcstub")
-
-	tr := &cmdTransport{candidates: [][]string{{once}, {working}}}
-	t.Cleanup(func() { _ = tr.Close() })
-	c := NewClient(tr)
-	ctx := context.Background()
-
-	caps, err := c.Capabilities(ctx)
-	if err != nil {
-		t.Fatalf("Do #1: %v", err)
-	}
-	if caps.Name != "once" {
-		t.Fatalf("Do #1 name = %q, want once (candidate 0 answered)", caps.Name)
-	}
-
-	caps, err = c.Capabilities(ctx)
-	if err != nil {
-		t.Fatalf("Do #2 after candidate 0 died permanently: %v", err)
-	}
-	if caps.Name != "stub" {
-		t.Fatalf("Do #2 name = %q, want stub (must fail over to candidate 1)", caps.Name)
-	}
-	if tr.idx != 1 {
-		t.Fatalf("idx = %d, want 1 (Do #2 failed over to candidate 1)", tr.idx)
-	}
-}
-
 // TestCmdTransportCtxTimeoutAfterFirstByteNoFailover proves a ctx timeout mid-response is
 // terminal for the Do even after the first response byte: the candidate emits one byte
 // then hangs, the short ctx expires, and Do returns the ctx error without ever spawning
@@ -724,20 +676,7 @@ func TestCmdTransportSpawnFailureArmsBackoff(t *testing.T) {
 }
 
 func TestUnknownMethodReturnsErrorResponse(t *testing.T) {
-	d := rpc.NewDispatcher()
-	RegisterConsumer(d, &fakeConsumer{})
-
-	server, clientConn := net.Pipe()
-	srvCtx, srvCancel := context.WithCancel(context.Background())
-	srvDone := make(chan error, 1)
-	go func() { srvDone <- rpc.ServeConn(srvCtx, server, d) }()
-	t.Cleanup(func() {
-		srvCancel()
-		_ = server.Close()
-		<-srvDone
-	})
-
-	tx := &pipeTransport{conn: clientConn, r: bufio.NewReader(clientConn)}
+	tx := serveSocket(t, &fakeConsumer{})
 	t.Cleanup(func() { _ = tx.Close() })
 
 	resp, err := tx.Do(context.Background(), &rpc.Request{Method: "svc.bogus"})

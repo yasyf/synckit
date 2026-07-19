@@ -142,7 +142,7 @@ func serve(ctx context.Context) error {
 	execCtx, cancelExec := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelExec()
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- rpc.Serve(execCtx, ln, d) }()
+	go func() { serveErr <- rpc.NewServer(d).Serve(execCtx, ln) }()
 
 	select {
 	case err := <-serveErr:

@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -15,7 +16,7 @@ var slowDispatchThreshold = 5 * time.Second
 
 // Handler runs one method against the params of a Request and returns the result to
 // serialize into the Response, or an error to surface to the caller. The ctx carries
-// a DispatchTimeout deadline, is canceled when the requesting connection closes, and
+// a DispatchTimeout deadline, is canceled when the accepted session closes, and
 // dies the moment Dispatch returns, so state that must outlive the response — a
 // background goroutine, a rebuilt watch generation — must parent to a longer-lived
 // context, never this ctx.
@@ -63,19 +64,18 @@ func (d *Dispatcher) SetAdmission(admit func() (func(), error)) {
 	d.admit = admit
 }
 
+func (d *Dispatcher) admission() func() (func(), error) {
+	if d.admit != nil {
+		return d.admit
+	}
+	return func() (func(), error) { return func() {}, nil }
+}
+
 // Dispatch runs the handler for req with a hard DispatchTimeout — exclusive methods
 // behind the exclusive mutex, everything else concurrently — and turns an unknown
 // method, a handler error, or a handler panic into an error Response so a bad
 // request never crashes the server.
 func (d *Dispatcher) Dispatch(ctx context.Context, req *Request) *Response {
-	if d.admit != nil {
-		done, err := d.admit()
-		if err != nil {
-			return &Response{OK: false, Error: err.Error()}
-		}
-		defer done()
-	}
-
 	handler, ok := d.handlers[req.Method]
 	if !ok {
 		return &Response{OK: false, Error: fmt.Sprintf("unknown method %q", req.Method)}
@@ -118,7 +118,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req *Request) *Response {
 	if err != nil {
 		return &Response{OK: false, Error: err.Error()}
 	}
-	return &Response{OK: true, Result: result}
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return &Response{OK: false, Error: fmt.Sprintf("encode result: %v", err)}
+	}
+	return &Response{OK: true, Result: payload}
 }
 
 func invoke(ctx context.Context, handler Handler, params map[string]any) (result any, err error) {

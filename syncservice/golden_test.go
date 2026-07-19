@@ -8,9 +8,9 @@ import (
 	"github.com/yasyf/synckit/rpc"
 )
 
-// recordingTransport captures the *rpc.Request each Client method issues without any
-// I/O, so a golden can pin the exact bytes that go on the wire. It answers every call
-// with a null result so the client's decode is a no-op.
+// recordingTransport captures the *rpc.Request each Client method issues without I/O,
+// so a golden can pin the exact daemonkit operation payload. It answers every call with
+// a null result so the client's decode is a no-op.
 type recordingTransport struct{ last *rpc.Request }
 
 func (rt *recordingTransport) Do(_ context.Context, req *rpc.Request) (*Response, error) {
@@ -20,13 +20,13 @@ func (rt *recordingTransport) Do(_ context.Context, req *rpc.Request) (*Response
 
 func (*recordingTransport) Close() error { return nil }
 
-// TestClientRequestFrameGolden pins the exact request wire each typed Client method puts
-// on the socket, framed as rpc.EncodeRequest frames it. The load-bearing pin is that an
+// TestClientRequestPayloadGolden pins the exact request payload each typed Client method
+// puts in the daemonkit operation. The load-bearing pin is that an
 // empty origin marshals as "params":null, not an omitted key: originParams returns a nil
 // map and Request.Params has no omitempty, so the comment at client.go claiming an empty
 // origin "omits the key entirely" is false at the byte level. cookiesync and reposync
-// speak these exact bytes, so the daemonkit rewire must reproduce them.
-func TestClientRequestFrameGolden(t *testing.T) {
+// speak these exact bytes.
+func TestClientRequestPayloadGolden(t *testing.T) {
 	rt := &recordingTransport{}
 	c := NewClient(rt)
 	ctx := context.Background()
@@ -51,12 +51,12 @@ func TestClientRequestFrameGolden(t *testing.T) {
 			if rt.last == nil {
 				t.Fatal("client issued no request")
 			}
-			line, err := rpc.EncodeRequest(rt.last)
+			payload, err := rpc.EncodeRequest(rt.last)
 			if err != nil {
 				t.Fatalf("encode: %v", err)
 			}
-			if got := string(line); got != tt.want+"\n" {
-				t.Fatalf("client request frame = %q, want %q", got, tt.want+"\n")
+			if got := string(payload); got != tt.want {
+				t.Fatalf("client request payload = %q, want %q", got, tt.want)
 			}
 		})
 	}

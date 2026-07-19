@@ -20,15 +20,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/yasyf/daemonkit/daemon"
 	"github.com/yasyf/daemonkit/proc"
 )
 
 const (
-	stateFile = "state.json"
-	lockFile  = "reconcile.lock"
-	sockFile  = "rpc.sock"
+	stateFile    = "state.json"
+	lockFile     = "reconcile.lock"
+	sockFile     = "rpc.sock"
+	lockDeadline = 30 * time.Second
 )
 
 // ErrLockBusy is returned when the reconcile lock is held past the caller's deadline.
@@ -106,12 +108,15 @@ func (c Config) WithLock(ctx context.Context, fn func() error) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create state dir %s: %w", dir, err)
 	}
-	lock, err := proc.Flock(ctx, filepath.Join(dir, lockFile))
+	lock, err := (proc.FileLockSpec{
+		Path:     filepath.Join(dir, lockFile),
+		Mode:     proc.FileLockExclusive,
+		Deadline: lockDeadline,
+	}).Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrLockBusy, err)
 	}
-	defer func() { _ = lock.Release() }()
-	return fn()
+	return errors.Join(fn(), lock.Close())
 }
 
 // readRaw reads state.json as a key-ordered-agnostic map of raw JSON values,

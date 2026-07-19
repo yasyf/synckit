@@ -16,6 +16,8 @@ import (
 	"github.com/yasyf/synckit/rpc"
 )
 
+const relayMaxRequest = 16 << 20
+
 // consentPromptTimeout is the client read deadline for a consent.request or
 // consent.relay round trip. The daemon handler may block a full
 // rpc.DispatchTimeout on a Touch ID sheet, so the client must outwait it —
@@ -207,7 +209,7 @@ func runRelay(ctx context.Context, in io.Reader, out io.Writer) error {
 // consent.relay result. A read/parse failure, a transport failure, or a fatal
 // handler response is an error the caller folds into unavailable.
 func relayReply(ctx context.Context, in io.Reader) (any, error) {
-	raw, err := io.ReadAll(io.LimitReader(in, rpc.MaxLine))
+	raw, err := io.ReadAll(io.LimitReader(in, relayMaxRequest))
 	if err != nil {
 		return nil, fmt.Errorf("read relay request: %w", err)
 	}
@@ -252,7 +254,9 @@ func callDaemon(ctx context.Context, method string, params map[string]any, timeo
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return rpc.Call(ctx, sock, &rpc.Request{Method: method, Params: params})
+	client := daemonClient(sock)
+	defer func() { _ = client.Close() }()
+	return client.Call(ctx, &rpc.Request{Method: method, Params: params})
 }
 
 // printJSON writes v as one compact JSON line to w.

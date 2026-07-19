@@ -1,18 +1,17 @@
-// Command hangstub reproduces a peer that receives a request, emits its first response
-// byte, then wedges: it reads one request line, writes one newline-less byte, and sleeps.
-// The syncservice transport test uses it to prove that a ctx timeout after the first
-// response byte is terminal for the Do — no failover to the next candidate.
+// Command hangstub reproduces a peer that receives the start of a daemonkit handshake,
+// emits one invalid response byte, then wedges. The transport test proves a context
+// timeout is terminal for the operation and cannot trigger replay on another candidate.
 package main
 
 import (
-	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"time"
 )
 
 func main() {
-	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	_, _ = io.ReadFull(os.Stdin, make([]byte, 1))
 	fmt.Fprint(os.Stdout, "{")
 	time.Sleep(time.Hour)
 }

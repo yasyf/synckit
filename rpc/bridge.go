@@ -1,42 +1,57 @@
 package rpc
 
 import (
-	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
+	"net"
 )
 
-// Proxy bridges newline-delimited rpc frames from in (stdin) to the resident unix
-// socket at sockPath and writes each response frame back to out (stdout). It reads
-// one request line, forwards the raw bytes to the socket via CallRaw, and writes the
-// raw response line plus a single '\n', looping until in hits io.EOF (returns nil).
-// The payload is never JSON-decoded, so a get_state response's int64 stamps survive
-// byte-exact. A CallRaw failure (a transient socket error) is reported as an error
-// response line and the loop continues, so one bad round trip does not kill the
-// bridge.
+// Proxy carries one exact persistent daemonkit session between stdio and the
+// resident Unix socket. It never parses, retries, or replays frames.
 func Proxy(ctx context.Context, in io.Reader, out io.Writer, sockPath string) error {
-	r := bufio.NewReader(in)
-	for {
-		line, err := ReadLine(r, MaxLine)
-		if errors.Is(err, io.EOF) {
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
+	if err != nil {
+		return fmt.Errorf("dial daemon at %s: %w", sockPath, err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	type copyResult struct {
+		input bool
+		err   error
+	}
+	done := make(chan copyResult, 2)
+	go func() {
+		_, err := io.Copy(conn, in)
+		if unix, ok := conn.(*net.UnixConn); ok {
+			_ = unix.CloseWrite()
+		}
+		done <- copyResult{input: true, err: err}
+	}()
+	go func() {
+		_, err := io.Copy(out, conn)
+		done <- copyResult{err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case first := <-done:
+		if first.err != nil {
+			return fmt.Errorf("proxy session: %w", first.err)
+		}
+		if !first.input {
 			return nil
 		}
-		if err != nil {
-			return fmt.Errorf("read request: %w", err)
-		}
+	}
 
-		resp, err := CallRaw(ctx, sockPath, line)
-		if err != nil {
-			writeResponse(out, &Response{OK: false, Error: err.Error()})
-			continue
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case second := <-done:
+		if second.err != nil {
+			return fmt.Errorf("proxy session: %w", second.err)
 		}
-		if _, err := out.Write(resp); err != nil {
-			return fmt.Errorf("write response: %w", err)
-		}
-		if _, err := out.Write([]byte{'\n'}); err != nil {
-			return fmt.Errorf("write response: %w", err)
-		}
+		return nil
 	}
 }

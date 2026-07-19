@@ -55,7 +55,9 @@ func newStatusCmd() *cobra.Command {
 func daemonLive(ctx context.Context, sock string) bool {
 	ctx, cancel := context.WithTimeout(ctx, statusDialTimeout)
 	defer cancel()
-	resp, err := rpc.Call(ctx, sock, &rpc.Request{Method: "status"})
+	client := daemonClient(sock)
+	defer func() { _ = client.Close() }()
+	resp, err := client.Call(ctx, &rpc.Request{Method: "status"})
 	return err == nil && resp.OK
 }
 

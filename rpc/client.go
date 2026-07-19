@@ -1,69 +1,123 @@
 package rpc
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"net"
+	"sync"
+
+	"github.com/yasyf/daemonkit/wire"
 )
 
-// TransportError marks a transport failure: the daemon socket could not be reached
-// or sent no response line. It wraps the underlying cause so callers can both match
-// on the type and unwrap to the dial or read error.
+// TransportError reports daemonkit's proven delivery outcome for a failed call.
 type TransportError struct {
-	Err error
+	Outcome wire.Outcome
+	Err     error
 }
 
-func (e *TransportError) Error() string { return e.Err.Error() }
+func (e *TransportError) Error() string {
+	return fmt.Sprintf("rpc transport %s: %v", e.Outcome, e.Err)
+}
 
 func (e *TransportError) Unwrap() error { return e.Err }
 
-// CallRaw sends one raw request line to the daemon at sockPath and returns its raw
-// response line. It dials the unix socket, writes reqLine followed by a single '\n',
-// reads one response line bounded by MaxLine, and closes, returning the line without
-// the trailing '\n'. A missing or unreachable socket, and a socket that sends no
-// response line, are both reported as a *TransportError. The payload is never
-// decoded, so int64 stamps in the request or response survive byte-exact.
-func CallRaw(ctx context.Context, sockPath string, reqLine []byte) ([]byte, error) {
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
-	if err != nil {
-		return nil, &TransportError{Err: fmt.Errorf("dial daemon at %s: %w", sockPath, err)}
-	}
-	defer func() { _ = conn.Close() }()
-
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := conn.SetDeadline(deadline); err != nil {
-			return nil, fmt.Errorf("set deadline: %w", err)
-		}
-	}
-
-	if _, err := conn.Write(reqLine); err != nil {
-		return nil, fmt.Errorf("write request: %w", err)
-	}
-	if _, err := conn.Write([]byte{'\n'}); err != nil {
-		return nil, fmt.Errorf("write request: %w", err)
-	}
-
-	line, err := ReadLine(bufio.NewReader(conn), MaxLine)
-	if err != nil {
-		return nil, &TransportError{Err: fmt.Errorf("read response from %s: %w", sockPath, err)}
-	}
-	return line, nil
+// ClientConfig configures one reconnectable persistent synckit RPC client.
+type ClientConfig struct {
+	Dial  wire.Dialer
+	Build string
 }
 
-// Call sends one Request to the daemon at sockPath and returns its Response. It dials
-// the unix socket, writes one request line, reads one response line bounded by
-// MaxLine, and closes. A missing or unreachable socket is reported as a
-// *TransportError.
-func Call(ctx context.Context, sockPath string, req *Request) (*Response, error) {
-	data, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("encode request: %w", err)
+// Client owns at most one persistent daemonkit session. A failed call retires its
+// session; only a later operation may establish another one.
+type Client struct {
+	config ClientConfig
+
+	mu      sync.Mutex
+	session *wire.Client
+	closed  bool
+}
+
+// NewClient returns a lazy persistent client with an exact build identity.
+func NewClient(config ClientConfig) *Client {
+	if config.Dial == nil || config.Build == "" {
+		panic("rpc: Dial and Build are required")
 	}
-	line, err := CallRaw(ctx, sockPath, data)
+	return &Client{config: config}
+}
+
+// Call sends req once. It never replays a request whose delivery is uncertain.
+func (c *Client) Call(ctx context.Context, req *Request) (*Response, error) {
+	payload, err := EncodeRequest(req)
 	if err != nil {
 		return nil, err
 	}
-	return DecodeResponse(line)
+	session, err := c.current(ctx)
+	if err != nil {
+		return nil, &TransportError{Outcome: wire.PreSendFailure, Err: err}
+	}
+	result, err := session.Call(ctx, callOp, "", payload)
+	if err != nil {
+		c.retire(session)
+		return nil, &TransportError{Outcome: result.Outcome, Err: err}
+	}
+	if result.Outcome != wire.Delivered {
+		c.retire(session)
+		reason := result.Response.Reason
+		if reason == "" {
+			reason = result.Response.Err
+		}
+		return nil, &TransportError{Outcome: result.Outcome, Err: errors.New(reason)}
+	}
+	if result.Response.Err != "" {
+		return nil, errors.New(result.Response.Err)
+	}
+	resp, err := DecodeResponse(result.Response.Payload)
+	if err != nil {
+		c.retire(session)
+		return nil, &TransportError{Outcome: wire.Delivered, Err: err}
+	}
+	return resp, nil
+}
+
+func (c *Client) current(ctx context.Context) (*wire.Client, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, errors.New("rpc: client closed")
+	}
+	if c.session != nil {
+		return c.session, nil
+	}
+	session, err := wire.NewClient(ctx, wire.ClientConfig{
+		Dial:     c.config.Dial,
+		Build:    c.config.Build,
+		MaxFrame: MaxFrame,
+	})
+	if err != nil {
+		return nil, err
+	}
+	c.session = session
+	return session, nil
+}
+
+func (c *Client) retire(session *wire.Client) {
+	c.mu.Lock()
+	if c.session == session {
+		c.session = nil
+	}
+	c.mu.Unlock()
+	_ = session.Close()
+}
+
+// Close closes the persistent session and permanently rejects later calls.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	session := c.session
+	c.session = nil
+	c.mu.Unlock()
+	if session == nil {
+		return nil
+	}
+	return session.Close()
 }

@@ -22,7 +22,7 @@ import (
 )
 
 // countingReader records how many bytes were read through it, so a test can prove the
-// consent relay caps its read at MaxLine (LimitReader truncation) and never touches the
+// consent relay caps its read at relayMaxRequest and never touches the
 // bytes past the cap.
 type countingReader struct {
 	data []byte
@@ -40,23 +40,20 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// TestConsentRelayReadCapsAtMaxLine pins that the consent relay reads at most MaxLine
-// bytes (S1): it wraps its input in an io.LimitReader(rpc.MaxLine), so an oversize
-// request is truncated at the cap — the bytes past it are never read — rather than
-// rejected with the "exceeds" error the inbound server path (ReadLine) raises. The
-// valid JSON in the first MaxLine bytes still forwards, so a truncation is silent, not a
-// rejection.
-func TestConsentRelayReadCapsAtMaxLine(t *testing.T) {
+// TestConsentRelayReadCapsAtRequestLimit pins that the consent relay reads at most
+// relayMaxRequest bytes, so an oversize stdin request is truncated without touching the
+// bytes past the cap. Valid JSON in those first bytes still forwards.
+func TestConsentRelayReadCapsAtRequestLimit(t *testing.T) {
 	shortConfigHome(t) // socket resolves, no daemon bound: callDaemon fails, not the read
 
 	obj := []byte(`{"origin":"host"}`)
-	pad := bytes.Repeat([]byte(" "), rpc.MaxLine-len(obj)) // whitespace keeps the JSON valid
-	overflow := bytes.Repeat([]byte("X"), 4096)            // past the cap; must never be read
+	pad := bytes.Repeat([]byte(" "), relayMaxRequest-len(obj)) // whitespace keeps the JSON valid
+	overflow := bytes.Repeat([]byte("X"), 4096)                // past the cap; must never be read
 	cr := &countingReader{data: slices.Concat(obj, pad, overflow)}
 
 	_, err := relayReply(context.Background(), cr)
-	if cr.read != rpc.MaxLine {
-		t.Errorf("relay read %d bytes, want exactly MaxLine=%d — LimitReader must truncate the overflow", cr.read, rpc.MaxLine)
+	if cr.read != relayMaxRequest {
+		t.Errorf("relay read %d bytes, want exactly relayMaxRequest=%d", cr.read, relayMaxRequest)
 	}
 	if err == nil {
 		t.Fatal("relayReply returned nil error, want the daemon-unreachable failure (proving it forwarded the truncated-but-valid request)")
@@ -74,7 +71,7 @@ func TestConsentRelayReadCapsAtMaxLine(t *testing.T) {
 func TestConsentRelayOversizeDegradesNotRejects(t *testing.T) {
 	shortConfigHome(t)
 
-	oversize := slices.Concat([]byte(`{"origin":"`), bytes.Repeat([]byte("a"), rpc.MaxLine))
+	oversize := slices.Concat([]byte(`{"origin":"`), bytes.Repeat([]byte("a"), relayMaxRequest))
 	var out bytes.Buffer
 	if err := runRelay(context.Background(), bytes.NewReader(oversize), &out); err != nil {
 		t.Fatalf("runRelay surfaced an error on oversize input (would exit non-zero, risking 255): %v", err)
@@ -194,7 +191,7 @@ func serveConsentEngine(t *testing.T, engine *consent.Engine) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = rpc.Serve(ctx, ln, d)
+		_ = rpc.NewServer(d).Serve(ctx, ln)
 	}()
 	t.Cleanup(func() {
 		cancel()

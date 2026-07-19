@@ -1,78 +1,72 @@
-// Package rpc is the generic unix-socket RPC transport shared across synckit tools:
-// a {method, params} request line in, a {ok, result, error} response line out, then
-// the connection closes. The wire is newline-delimited JSON (one object + '\n' per
-// message); a Dispatcher routes method names to registered handlers — concurrent by
-// default, serialized only for methods bound via RegisterExclusive; the server
-// enforces a same-UID peer check and a 16 MiB per-line bound before doing any work. Method names, param shapes, and result
-// types are the consuming tool's domain — this package knows none of them.
+// Package rpc maps synckit's method registry onto daemonkit's exact persistent wire.
 package rpc
 
 import (
 	"encoding/json"
 	"fmt"
 	"time"
-)
 
-// ReadTimeout bounds how long a connection may take to deliver its request line, so
-// a peer that connects and never writes cannot park a handler goroutine.
-const ReadTimeout = 30 * time.Second
+	"github.com/yasyf/daemonkit/wire"
+)
 
 // DispatchTimeout caps how long a single dispatched handler may run. The handler ctx
 // inherits the daemon's lifetime, which has no deadline, so without this a handler
 // that blocks (e.g. on a cross-process flock) could wait forever.
 const DispatchTimeout = 10 * time.Minute
 
-// MaxLine bounds a single request or response line. A peer that streams bytes
-// without a newline is rejected once it crosses this, never buffered unbounded.
-const MaxLine = 16 << 20
+const (
+	// Build is the exact synckit RPC schema identity used by both session peers.
+	Build = "synckit.rpc.v4"
+	// MaxFrame bounds one daemonkit frame carrying a synckit request or response.
+	MaxFrame = 16 << 20
+	callOp   = wire.Op("synckit.rpc.call")
+)
 
-// Request is one RPC command: a method name and an arbitrary params object, encoded
-// as one JSON line.
+// Request is one RPC command: a method name and an arbitrary params object.
 type Request struct {
 	Method string         `json:"method"`
 	Params map[string]any `json:"params"`
 }
 
-// Response is the daemon's reply to one Request, encoded as one JSON line. Result is
-// always present (null when the handler returned nil); Error is set only when the
-// request failed.
+// Response is the daemon's reply to one Request. Result stays raw so integer CRDT
+// stamps never pass through float64.
 type Response struct {
-	OK     bool   `json:"ok"`
-	Result any    `json:"result"`
-	Error  string `json:"error,omitempty"`
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result"`
+	Error  string          `json:"error,omitempty"`
 }
 
-// EncodeRequest renders req as one newline-terminated JSON line.
+// EncodeRequest renders req as a daemonkit payload.
 func EncodeRequest(req *Request) ([]byte, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("encode request: %w", err)
 	}
-	return append(data, '\n'), nil
+	return data, nil
 }
 
-// DecodeRequest parses one JSON line into a Request.
-func DecodeRequest(line []byte) (*Request, error) {
+// DecodeRequest parses one daemonkit payload into a Request.
+func DecodeRequest(payload []byte) (*Request, error) {
 	var req Request
-	if err := json.Unmarshal(line, &req); err != nil {
+	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, fmt.Errorf("decode request: %w", err)
 	}
 	return &req, nil
 }
 
-// EncodeResponse renders resp as one newline-terminated JSON line.
+// EncodeResponse renders resp as a daemonkit payload.
 func EncodeResponse(resp *Response) ([]byte, error) {
 	data, err := json.Marshal(resp)
 	if err != nil {
 		return nil, fmt.Errorf("encode response: %w", err)
 	}
-	return append(data, '\n'), nil
+	return data, nil
 }
 
-// DecodeResponse parses one JSON line into a Response.
-func DecodeResponse(line []byte) (*Response, error) {
+// DecodeResponse parses one daemonkit payload into a Response.
+func DecodeResponse(payload []byte) (*Response, error) {
 	var resp Response
-	if err := json.Unmarshal(line, &resp); err != nil {
+	if err := json.Unmarshal(payload, &resp); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return &resp, nil

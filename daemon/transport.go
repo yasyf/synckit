@@ -5,10 +5,17 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/yasyf/daemonkit/wire"
+
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
+	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 )
+
+func daemonClient(sock string) *rpc.Client {
+	return rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), Build: rpc.Build})
+}
 
 // dialTransport is the seam serve and reconcile use to reach a consumer's typed
 // sync service. Tests override it to inject an in-process transport.

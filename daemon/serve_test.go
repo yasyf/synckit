@@ -1,10 +1,9 @@
 package daemon
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"net"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,69 +110,47 @@ func (e errString) Error() string { return string(e) }
 
 const errFakeDown = errString("fake consumer down")
 
-// pipeTransport frames typed rpc over one end of a net.Pipe to a fakeConsumer
-// served by rpc.ServeConn on the other end. It mirrors the real cmdTransport wire
-// (one json request line in, one response line out) without spawning a process. Do
-// is serialized behind mu like cmdTransport.Do: the engine drives one shared local
-// client from the gate and the self-notifier concurrently, which over a single pipe
-// would otherwise interleave exchanges and race the shared bufio.Reader.
-type pipeTransport struct {
-	mu   sync.Mutex
-	conn net.Conn
-	r    *bufio.Reader
-	done <-chan struct{}
+type servedTransport struct {
+	syncservice.Transport
+	cancel context.CancelFunc
+	done   <-chan error
+	once   sync.Once
 }
 
-func (t *pipeTransport) Do(_ context.Context, req *rpc.Request) (*syncservice.Response, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	line, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := t.conn.Write(append(line, '\n')); err != nil {
-		return nil, err
-	}
-	respLine, err := rpc.ReadLine(t.r, rpc.MaxLine)
-	if err != nil {
-		return nil, err
-	}
-	var resp syncservice.Response
-	if err := json.Unmarshal(respLine, &resp); err != nil {
-		return nil, err
-	}
-	return &resp, nil
-}
-
-func (t *pipeTransport) Close() error {
-	err := t.conn.Close()
-	if t.done != nil {
-		<-t.done
-	}
+func (t *servedTransport) Close() error {
+	var err error
+	t.once.Do(func() {
+		err = t.Transport.Close()
+		t.cancel()
+		if serveErr := <-t.done; serveErr != nil {
+			err = errors.Join(err, serveErr)
+		}
+	})
 	return err
 }
 
-// serveFake wires fake behind an in-process transport: an rpc.ServeConn loop over
-// one end of a net.Pipe, the pipeTransport over the other. The server goroutine is
-// reaped when the transport is closed or the test cleans up.
+// serveFake wires fake behind an exact persistent Unix session.
 func serveFake(t *testing.T, fake *fakeConsumer) syncservice.Transport {
 	t.Helper()
-	server, client := net.Pipe()
+	dir, err := os.MkdirTemp("", "syncfake")
+	if err != nil {
+		t.Fatalf("mkdir temp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "rpc.sock")
+	listener, err := rpc.Listen(context.Background(), sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
 	d := rpc.NewDispatcher()
 	syncservice.RegisterConsumer(d, fake)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = rpc.ServeConn(ctx, server, d)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		_ = server.Close()
-		<-done
-	})
-	return &pipeTransport{conn: client, r: bufio.NewReader(client), done: done}
+	done := make(chan error, 1)
+	go func() { done <- rpc.NewServer(d).Serve(ctx, listener) }()
+	transport := &servedTransport{Transport: syncservice.Socket(sock), cancel: cancel, done: done}
+	t.Cleanup(func() { _ = transport.Close() })
+	return transport
 }
 
 // fakeMesh routes a manifest+peer to a fakeConsumer's transport, so a test can give
@@ -559,7 +536,9 @@ func callReload(t *testing.T, sock string) *rpc.Response {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		resp, err := rpc.Call(ctx, sock, &rpc.Request{Method: "reload"})
+		client := daemonClient(sock)
+		resp, err := client.Call(ctx, &rpc.Request{Method: "reload"})
+		_ = client.Close()
 		cancel()
 		if err == nil {
 			return resp

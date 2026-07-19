@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasyf/daemonkit/wire"
+
 	"github.com/yasyf/synckit/presence"
 	"github.com/yasyf/synckit/rpc"
 	"golang.org/x/sys/unix"
@@ -49,7 +51,7 @@ func TestRequestDerivesRequestorFromPeerSID(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = rpc.Serve(ctx, ln, d)
+		_ = rpc.NewServer(d).Serve(ctx, ln)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -57,7 +59,9 @@ func TestRequestDerivesRequestorFromPeerSID(t *testing.T) {
 		<-done
 	})
 
-	resp, err := rpc.Call(context.Background(), sock, &rpc.Request{
+	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), Build: rpc.Build})
+	defer func() { _ = client.Close() }()
+	resp, err := client.Call(context.Background(), &rpc.Request{
 		Method: MethodRequest,
 		Params: map[string]any{
 			"client":  "cc-sudo",
@@ -90,9 +94,9 @@ func TestRequestDerivesRequestorFromPeerSID(t *testing.T) {
 		t.Fatalf("ttl = %v, want 1m from ttl_ms", reqs[0].TTL)
 	}
 
-	result, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("result is %T, want an object", resp.Result)
+	var result map[string]any
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
 	}
 	if result["verdict"] != "approved" || result["routed"] != false || result["cached"] != false {
 		t.Fatalf("result = %v, want an un-routed uncached approval", result)

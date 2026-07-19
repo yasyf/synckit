@@ -87,5 +87,7 @@ func nudgeReload(ctx context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, reloadTimeout)
 	defer cancel()
-	_, _ = rpc.Call(ctx, sock, &rpc.Request{Method: "reload"})
+	client := daemonClient(sock)
+	defer func() { _ = client.Close() }()
+	_, _ = client.Call(ctx, &rpc.Request{Method: "reload"})
 }
