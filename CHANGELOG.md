@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-07-19
+
+### Changed
+- The RPC transport now runs on daemonkit sub-primitives (sessions, dispatch), replacing
+  synckit's bespoke unix-socket plumbing.
+
+### Fixed
+- The resident `synckitd serve` daemon and consumer helper agents no longer set launchd
+  `ProcessType` to `Background`. Under sustained host load, the `darwinbg` clamp starved their
+  `ioreg` and `git` probe subprocesses past bounded deadlines, killing interactive auth primes
+  with `run ioreg: signal: killed`; the periodic reconcile tick remains `Background`.
+- `authkit` helper discovery honors an explicit `HOMEBREW_PREFIX` exclusively instead of
+  falling through to the `/opt/homebrew` and `/usr/local` defaults behind it — the fallback
+  scan resolved bundles the caller's Homebrew does not own and broke temp-prefix test
+  isolation on hosts with authkit installed.
+
 ## [0.17.0] - 2026-07-17
 
 ### Added
@@ -161,7 +177,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.19.1...HEAD
+[0.19.1]: https://github.com/yasyf/synckit/releases/tag/v0.19.1
 [0.4.2]: https://github.com/yasyf/synckit/releases/tag/v0.4.2
 [0.4.1]: https://github.com/yasyf/synckit/releases/tag/v0.4.1
 [0.4.0]: https://github.com/yasyf/synckit/releases/tag/v0.4.0
