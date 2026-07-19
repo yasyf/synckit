@@ -23,6 +23,7 @@ const (
 // snapshot is one immutable resolution of the trust set.
 type snapshot struct {
 	self      string
+	selfDNS   string
 	hosts     []HostTrust
 	peers     map[netip.Addr]struct{}
 	origins   map[string]struct{}
@@ -112,6 +113,12 @@ func (p *Provider) TrustedOrigin(host string) bool {
 // is unavailable.
 func (p *Provider) SelfAddrs(ctx context.Context) []netip.Addr {
 	return slices.Clone(p.current(ctx).selfAddrs)
+}
+
+// SelfDNSName returns this machine's MagicDNS name without a trailing dot,
+// empty when tailscale is unavailable.
+func (p *Provider) SelfDNSName(ctx context.Context) string {
+	return p.current(ctx).selfDNS
 }
 
 // Mesh returns the inspector's view of the current trust set.

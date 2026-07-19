@@ -211,6 +211,9 @@ func TestBuild(t *testing.T) {
 	if got, want := snap.self, reg.Self; got != want {
 		t.Errorf("self = %q, want %q", got, want)
 	}
+	if got, want := snap.selfDNS, "yasyf-home.tail71af5d.ts.net"; got != want {
+		t.Errorf("selfDNS = %q, want %q", got, want)
+	}
 }
 
 func TestBuildAllOrNothing(t *testing.T) {
@@ -280,6 +283,9 @@ func TestBuildSelfCollisionQuarantine(t *testing.T) {
 	}
 	if _, ok := snap.origins["yasyf-home.tail71af5d.ts.net"]; ok {
 		t.Error("self DNS-name origin must be quarantined on collision")
+	}
+	if got := snap.selfDNS; got != "" {
+		t.Errorf("selfDNS = %q, want empty (quarantined name must not surface in URLs)", got)
 	}
 	if got, want := len(snap.origins), 0; got != want {
 		t.Errorf("len(origins) = %d, want %d", got, want)

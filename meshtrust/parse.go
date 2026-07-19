@@ -75,6 +75,7 @@ func build(reg registry, st tsStatus) (snapshot, error) {
 		snap.peers[a] = struct{}{}
 	}
 	selfName := normalizeHost(st.Self.DNSName)
+	snap.selfDNS = selfName
 	if selfName != "" {
 		snap.origins[selfName] = struct{}{}
 	}
@@ -100,6 +101,11 @@ func build(reg registry, st tsStatus) (snapshot, error) {
 	for name := range ambiguous {
 		delete(nodes, name)
 		delete(snap.origins, name)
+		if name == snap.selfDNS {
+			// A quarantined self name must not surface anywhere: a URL
+			// printed with it would be rejected by TrustedOrigin.
+			snap.selfDNS = ""
+		}
 		// Fail-closed availability tradeoff: a rogue node claiming a
 		// legitimate name denies that name trust until the collision clears.
 		slog.Warn("meshtrust: failing closed, DNS name collision quarantines name from trust", "name", name)

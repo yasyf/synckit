@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -183,6 +184,42 @@ func TestProviderCanceledContextNotCached(t *testing.T) {
 	}
 	if got, want := src.calls(), 2; got != want {
 		t.Errorf("loader calls = %d, want %d (canceled refresh uncached, live one cached)", got, want)
+	}
+}
+
+func TestSelfDNSName(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		want   string
+	}{
+		{
+			name:   "normal DNS name",
+			status: strings.Replace(statusFixture, "yasyf-home.tail71af5d.ts.net.", "yasyf-home.tail71af5d.ts.net", 1),
+			want:   "yasyf-home.tail71af5d.ts.net",
+		},
+		{
+			name:   "trailing dot stripped",
+			status: statusFixture,
+			want:   "yasyf-home.tail71af5d.ts.net",
+		},
+		{
+			name:   "backend stopped",
+			status: stoppedStatusFixture,
+			want:   "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := meshSources()
+			src.status = []byte(tt.status)
+			clock := &testClock{now: time.Unix(1000, 0)}
+			p := newTestProvider(src, clock)
+
+			if got := p.SelfDNSName(context.Background()); got != tt.want {
+				t.Errorf("SelfDNSName() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
