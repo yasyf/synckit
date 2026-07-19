@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-07-20
+
+### Added
+- `meshtrust`: `MintCert` mints a TLS certificate for a MagicDNS name into a caller
+  directory by shelling out to `tailscale cert` (same CLI channel and macOS app-bundle
+  fallback as the status source). The host is validated post-normalization (DNS shape
+  only — no flags, no path separators) and the minted files are stat-checked before
+  success, so a flag-swallowed positional can never return silently empty-handed.
+- `meshtrust`: the status snapshot now parses top-level `CertDomains`;
+  `Provider.SelfCertDomain` exposes the normalized first entry (empty when the
+  tailnet's HTTPS-certificates feature is off), and a non-empty cert domain joins the
+  `TrustedOrigin` set — quarantined on name collision like `SelfDNSName`.
+
 ## [0.21.0] - 2026-07-19
 
 ### Added
