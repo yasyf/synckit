@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-07-19
+
+### Added
+- `meshtrust`: `Provider.SelfDNSName` exposes this machine's normalized MagicDNS
+  name (lowercase, no trailing dot; empty while tailscale is down), for composing
+  user-facing tailnet URLs. A DNS-name collision quarantines the name here too,
+  matching the fail-closed `TrustedOrigin` set.
+
 ## [0.20.0] - 2026-07-19
 
 ### Changed
