@@ -2,6 +2,7 @@ package meshtrust
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -91,6 +92,19 @@ const selfCollidingStatusFixture = `{
   }
 }`
 
+// certDomainsStatusFixture carries the top-level CertDomains array the
+// tailnet's HTTPS-certificates feature adds — a sibling of Self, null or
+// absent when the feature is off.
+const certDomainsStatusFixture = `{
+  "BackendState": "Running",
+  "CertDomains": ["Yasyf-Home.Beta.Tailscale.Net."],
+  "Self": {
+    "DNSName": "yasyf-home.tail71af5d.ts.net.",
+    "TailscaleIPs": ["100.88.252.58", "fd7a:115c:a1e0::6d33:fc3c"]
+  },
+  "Peer": {}
+}`
+
 const emptyNameStatusFixture = `{
   "BackendState": "Running",
   "Self": {
@@ -127,6 +141,19 @@ func TestParseStatus(t *testing.T) {
 	}
 	if got, want := len(st.Peer), 2; got != want {
 		t.Errorf("len(Peer) = %d, want %d", got, want)
+	}
+	if st.CertDomains != nil {
+		t.Errorf("CertDomains = %v, want nil when absent", st.CertDomains)
+	}
+	stCD, err := parseStatus([]byte(certDomainsStatusFixture))
+	if err != nil {
+		t.Fatalf("parseStatus() error: %v", err)
+	}
+	if got, want := len(stCD.CertDomains), 1; got != want {
+		t.Fatalf("len(CertDomains) = %d, want %d", got, want)
+	}
+	if got, want := stCD.CertDomains[0], "Yasyf-Home.Beta.Tailscale.Net."; got != want {
+		t.Errorf("CertDomains[0] = %q, want %q", got, want)
 	}
 	if _, err := parseStatus([]byte(`{"Self": [`)); err == nil {
 		t.Error("parseStatus(corrupt) = nil error, want error")
@@ -292,6 +319,67 @@ func TestBuildSelfCollisionQuarantine(t *testing.T) {
 	}
 	if got, want := len(snap.selfAddrs), 2; got != want {
 		t.Errorf("len(selfAddrs) = %d, want %d (self IP origins survive)", got, want)
+	}
+}
+
+func TestBuildCertDomains(t *testing.T) {
+	certDomains := `["Yasyf-Home.Beta.Tailscale.Net."]`
+	selfOrigin := "yasyf-home.tail71af5d.ts.net"
+	tests := []struct {
+		name        string
+		status      string
+		wantDomain  string
+		wantOrigins []string
+	}{
+		{
+			name:        "present",
+			status:      certDomainsStatusFixture,
+			wantDomain:  "yasyf-home.beta.tailscale.net",
+			wantOrigins: []string{selfOrigin, "yasyf-home.beta.tailscale.net"},
+		},
+		{
+			name:        "absent",
+			status:      statusFixture,
+			wantOrigins: []string{selfOrigin},
+		},
+		{
+			name:        "null",
+			status:      strings.Replace(certDomainsStatusFixture, certDomains, "null", 1),
+			wantOrigins: []string{selfOrigin},
+		},
+		{
+			name:        "empty array",
+			status:      strings.Replace(certDomainsStatusFixture, certDomains, "[]", 1),
+			wantOrigins: []string{selfOrigin},
+		},
+		{
+			name: "self collision quarantines cert domain",
+			status: strings.Replace(selfCollidingStatusFixture, `"BackendState": "Running",`,
+				`"BackendState": "Running", "CertDomains": ["Yasyf-Home.tail71af5d.ts.net."],`, 1),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, err := parseStatus([]byte(tt.status))
+			if err != nil {
+				t.Fatalf("parseStatus() error: %v", err)
+			}
+			snap, err := build(registry{Self: "yasyf@yasyf-home.tail71af5d.ts.net"}, st)
+			if err != nil {
+				t.Fatalf("build() error: %v", err)
+			}
+			if got := snap.certDomain; got != tt.wantDomain {
+				t.Errorf("certDomain = %q, want %q", got, tt.wantDomain)
+			}
+			for _, o := range tt.wantOrigins {
+				if _, ok := snap.origins[o]; !ok {
+					t.Errorf("origins missing %q", o)
+				}
+			}
+			if got, want := len(snap.origins), len(tt.wantOrigins); got != want {
+				t.Errorf("len(origins) = %d, want %d", got, want)
+			}
+		})
 	}
 }
 

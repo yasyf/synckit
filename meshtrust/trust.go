@@ -22,13 +22,14 @@ const (
 
 // snapshot is one immutable resolution of the trust set.
 type snapshot struct {
-	self      string
-	selfDNS   string
-	hosts     []HostTrust
-	peers     map[netip.Addr]struct{}
-	origins   map[string]struct{}
-	selfAddrs []netip.Addr
-	fetched   time.Time
+	self       string
+	selfDNS    string
+	certDomain string
+	hosts      []HostTrust
+	peers      map[netip.Addr]struct{}
+	origins    map[string]struct{}
+	selfAddrs  []netip.Addr
+	fetched    time.Time
 }
 
 // HostTrust is one registered mesh target and the tailnet addresses it resolved
@@ -119,6 +120,13 @@ func (p *Provider) SelfAddrs(ctx context.Context) []netip.Addr {
 // empty when tailscale is unavailable.
 func (p *Provider) SelfDNSName(ctx context.Context) string {
 	return p.current(ctx).selfDNS
+}
+
+// SelfCertDomain returns the tailnet cert domain naming this machine, empty
+// when tailscale is unavailable or the tailnet's HTTPS-certificates feature
+// is off.
+func (p *Provider) SelfCertDomain(ctx context.Context) string {
+	return p.current(ctx).certDomain
 }
 
 // Mesh returns the inspector's view of the current trust set.

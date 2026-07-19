@@ -223,6 +223,33 @@ func TestSelfDNSName(t *testing.T) {
 	}
 }
 
+func TestSelfCertDomain(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		want   string
+	}{
+		{"cert domain present", certDomainsStatusFixture, "yasyf-home.beta.tailscale.net"},
+		{"cert domains absent", statusFixture, ""},
+		{"backend stopped", stoppedStatusFixture, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := meshSources()
+			src.status = []byte(tt.status)
+			clock := &testClock{now: time.Unix(1000, 0)}
+			p := newTestProvider(src, clock)
+
+			if got := p.SelfCertDomain(context.Background()); got != tt.want {
+				t.Errorf("SelfCertDomain() = %q, want %q", got, tt.want)
+			}
+			if tt.want != "" && !p.TrustedOrigin(tt.want) {
+				t.Errorf("TrustedOrigin(%q) = false, want true (cert domain is a self origin)", tt.want)
+			}
+		})
+	}
+}
+
 func TestTrustedOrigin(t *testing.T) {
 	src := meshSources()
 	clock := &testClock{now: time.Unix(1000, 0)}

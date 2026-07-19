@@ -21,11 +21,13 @@ type registry struct {
 }
 
 // tsStatus is the subset of `tailscale status --json` the trust set is built
-// from. Peer is keyed by node public key; only the values matter.
+// from. Peer is keyed by node public key; only the values matter. CertDomains
+// is null when the tailnet's HTTPS-certificates feature is off.
 type tsStatus struct {
 	BackendState string
 	Self         tsNode
 	Peer         map[string]tsNode
+	CertDomains  []string
 }
 
 // tsNode is one tailnet node: its MagicDNS name (with a trailing dot) and its
@@ -79,6 +81,12 @@ func build(reg registry, st tsStatus) (snapshot, error) {
 	if selfName != "" {
 		snap.origins[selfName] = struct{}{}
 	}
+	if len(st.CertDomains) > 0 {
+		snap.certDomain = normalizeHost(st.CertDomains[0])
+		if snap.certDomain != "" {
+			snap.origins[snap.certDomain] = struct{}{}
+		}
+	}
 	nodes := make(map[string][]netip.Addr, len(st.Peer))
 	ambiguous := make(map[string]struct{})
 	for _, n := range st.Peer {
@@ -105,6 +113,9 @@ func build(reg registry, st tsStatus) (snapshot, error) {
 			// A quarantined self name must not surface anywhere: a URL
 			// printed with it would be rejected by TrustedOrigin.
 			snap.selfDNS = ""
+		}
+		if name == snap.certDomain {
+			snap.certDomain = ""
 		}
 		// Fail-closed availability tradeoff: a rogue node claiming a
 		// legitimate name denies that name trust until the collision clears.
