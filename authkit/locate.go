@@ -26,15 +26,14 @@ func (e *HelperError) Error() string {
 	return fmt.Sprintf("authkit helper not found at %s; run 'brew install --cask authkit' to fetch the signed helper", e.Path)
 }
 
-// brewPrefixes returns the Homebrew prefixes whose Caskroom may hold the
-// staged helper bundle: $HOMEBREW_PREFIX first, then the Apple-silicon and
-// Intel defaults.
+// brewPrefixes returns the Homebrew prefixes whose Caskroom may hold the staged helper
+// bundle. An explicit HOMEBREW_PREFIX is authoritative; otherwise both platform defaults
+// are searched.
 func brewPrefixes() []string {
-	prefixes := make([]string, 0, 3)
 	if p := os.Getenv("HOMEBREW_PREFIX"); p != "" {
-		prefixes = append(prefixes, p)
+		return []string{p}
 	}
-	return append(prefixes, "/opt/homebrew", "/usr/local")
+	return []string{"/opt/homebrew", "/usr/local"}
 }
 
 // HelperAppPath returns the authkit.app bundle. The cask stages it
