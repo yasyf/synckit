@@ -32,7 +32,6 @@ type Dispatcher struct {
 	mu        sync.Mutex
 	handlers  map[string]Handler
 	exclusive map[string]bool
-	admit     func() (func(), error)
 }
 
 // NewDispatcher returns an empty Dispatcher ready for Register.
@@ -54,21 +53,6 @@ func (d *Dispatcher) Register(method string, handler Handler) {
 func (d *Dispatcher) RegisterExclusive(method string, handler Handler) {
 	d.handlers[method] = handler
 	d.exclusive[method] = true
-}
-
-// SetAdmission installs an admission gate consulted at the top of every Dispatch: it
-// returns a done func called at the terminal response, or an error (drain.ErrDraining)
-// that becomes the request's error Response without running the handler. A nil gate,
-// the default, admits every request. Call it before serving, like Register.
-func (d *Dispatcher) SetAdmission(admit func() (func(), error)) {
-	d.admit = admit
-}
-
-func (d *Dispatcher) admission() func() (func(), error) {
-	if d.admit != nil {
-		return d.admit
-	}
-	return func() (func(), error) { return func() {}, nil }
 }
 
 // Dispatch runs the handler for req with a hard DispatchTimeout — exclusive methods

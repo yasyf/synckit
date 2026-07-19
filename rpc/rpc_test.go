@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yasyf/daemonkit/proc"
 	"github.com/yasyf/daemonkit/wire"
 )
 
@@ -98,7 +97,7 @@ func TestPersistentSessionDispatchesMultipleCalls(t *testing.T) {
 		return map[string]any{"value": params["value"]}, nil
 	})
 	sock := serve(t, dispatcher, func(server *Server) {
-		server.Trust = func(wire.Peer) error {
+		server.Wire.Trust = func(context.Context, wire.Peer) error {
 			trusted.Add(1)
 			return nil
 		}
@@ -182,7 +181,7 @@ func TestTypedTrustRejectsBeforeHandshakeAndDispatch(t *testing.T) {
 		return nil, nil
 	})
 	sock := serve(t, dispatcher, func(server *Server) {
-		server.Trust = func(wire.Peer) error { return errors.New("denied by policy") }
+		server.Wire.Trust = func(context.Context, wire.Peer) error { return errors.New("denied by policy") }
 	})
 	c := client(sock)
 	defer func() { _ = c.Close() }()
@@ -319,18 +318,22 @@ func TestCallOnMissingSocketIsPreSendTransportError(t *testing.T) {
 	}
 }
 
-func TestListenRefusesSecondListener(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "rpc.sock")
+func TestListenLeavesSocketOwnershipToCaller(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rpclisten")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "rpc.sock")
 	first, err := Listen(context.Background(), sock)
 	if err != nil {
 		t.Fatalf("first listen: %v", err)
 	}
 	defer func() { _ = first.Close() }()
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	_, err = Listen(ctx, sock)
-	if !errors.Is(err, proc.ErrPeerStarting) {
-		t.Fatalf("second listen error = %v, want ErrPeerStarting", err)
+	second, err := Listen(context.Background(), sock)
+	if err == nil {
+		_ = second.Close()
+		t.Fatal("second listener acquired caller-owned socket")
 	}
 }
 

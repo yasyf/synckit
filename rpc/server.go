@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"os"
 
-	"github.com/yasyf/daemonkit/proc"
 	"github.com/yasyf/daemonkit/wire"
 )
 
@@ -27,35 +25,17 @@ func PeerSID(ctx context.Context) (int, bool) {
 	return sid, ok
 }
 
-// Listen binds sockPath under daemonkit's single-entrant listener ownership.
+// Listen binds a raw Unix listener. Long-lived daemons delegate listener
+// ownership and takeover to daemonkit Runtime.
 func Listen(ctx context.Context, sockPath string) (net.Listener, error) {
-	se := proc.SingleEntrant{
-		Socket: sockPath,
-		Evict:  func() (bool, error) { return false, nil },
-	}
-	ln, lock, err := se.Listen(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &lockedListener{Listener: ln, lock: lock}, nil
-}
-
-type lockedListener struct {
-	net.Listener
-	lock *os.File
-}
-
-func (l *lockedListener) Close() error {
-	err := l.Listener.Close()
-	_ = l.lock.Close()
-	return err
+	var config net.ListenConfig
+	return config.Listen(ctx, "unix", sockPath)
 }
 
 // Server maps one Dispatcher onto exact persistent daemonkit sessions.
 type Server struct {
 	Dispatcher *Dispatcher
-	Build      string
-	Trust      func(wire.Peer) error
+	Wire       *wire.Server
 }
 
 // NewServer returns a server with synckit's exact RPC schema identity.
@@ -63,18 +43,16 @@ func NewServer(dispatcher *Dispatcher) *Server {
 	if dispatcher == nil {
 		panic("rpc: dispatcher is required")
 	}
-	return &Server{Dispatcher: dispatcher, Build: Build}
+	server := &Server{Dispatcher: dispatcher}
+	server.Wire = &wire.Server{Build: Build, MaxFrame: MaxFrame}
+	server.Wire.RegisterConcurrent(callOp, server.dispatch)
+	return server
 }
 
-// Serve accepts authenticated v4 sessions until ctx is canceled.
+// Serve accepts authenticated v4 sessions until ctx is canceled and publishes
+// readiness only after the listener and worker pool are live.
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
-	server := &wire.Server{
-		Build:    s.Build,
-		Trust:    s.Trust,
-		MaxFrame: MaxFrame,
-	}
-	server.RegisterConcurrent(callOp, s.dispatch)
-	return server.Serve(ctx, listener, s.Dispatcher.admission(), allow)
+	return s.Wire.Serve(ctx, listener, func() error { return nil }, allow, allow)
 }
 
 func (s *Server) dispatch(ctx context.Context, request wire.Request) (any, error) {

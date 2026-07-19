@@ -11,12 +11,97 @@ import (
 	"testing"
 	"time"
 
+	dkdaemon "github.com/yasyf/daemonkit/daemon"
+	"github.com/yasyf/daemonkit/daemonrole"
+	"github.com/yasyf/daemonkit/wire"
+
 	"github.com/yasyf/synckit/codec"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 )
+
+func TestRuntimeRPCServerProtectsLifecycleCapacity(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	const build = "v9.8.7-test"
+	server, err := runtimeRPCServer(rpc.NewDispatcher(), executable, build)
+	if err != nil {
+		t.Fatalf("runtimeRPCServer: %v", err)
+	}
+	if server.Wire.Build != rpc.Build {
+		t.Fatalf("business build = %q, want %q", server.Wire.Build, rpc.Build)
+	}
+	if server.Wire.LifecycleBuild != build {
+		t.Fatalf("lifecycle build = %q, want %q", server.Wire.LifecycleBuild, build)
+	}
+	if server.Wire.ReservedProtectedSessions != 1 {
+		t.Fatalf("reserved protected sessions = %d, want 1", server.Wire.ReservedProtectedSessions)
+	}
+	role, ok := server.Wire.ProtectedSessionClassifier.(daemonrole.Classifier)
+	if !ok {
+		t.Fatalf("protected classifier = %T, want daemonrole.Classifier", server.Wire.ProtectedSessionClassifier)
+	}
+	if role.RoleID != labelPrefix+".serve" || role.RolePath != executable {
+		t.Fatalf("role = %+v", role)
+	}
+}
+
+func TestServePublishesReleaseBuildAfterActivation(t *testing.T) {
+	shortConfigHome(t)
+	sock, err := hostregistry.Mesh.SockPath()
+	if err != nil {
+		t.Fatalf("socket path: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	const build = "v9.8.7-test"
+	go func() { served <- serve(ctx, build) }()
+
+	peer := &wire.LifecyclePeer{Config: wire.ClientConfig{
+		Dial: wire.UnixDialer(sock), Build: rpc.Build, LifecycleBuild: build, MaxFrame: rpc.MaxFrame,
+	}}
+	t.Cleanup(func() { _ = peer.Close() })
+	deadline := time.Now().Add(5 * time.Second)
+	var health dkdaemon.Health
+	for {
+		probeCtx, probeCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		health, err = peer.Health(probeCtx)
+		probeCancel()
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("daemon did not publish lifecycle readiness: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if health.Build != build || health.Protocol != int(wire.ProtocolVersion) || health.State != dkdaemon.StateHealthy {
+		t.Fatalf("health = %+v", health)
+	}
+	dir, err := manifestsDir()
+	if err != nil {
+		t.Fatalf("manifests dir: %v", err)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("activation did not create manifests dir: info=%v err=%v", info, err)
+	}
+
+	_ = peer.Close()
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not settle after cancellation")
+	}
+}
 
 // fakeConsumer is an in-process SyncConsumer that records what it is asked so a
 // test can assert origin propagation, version handling, and the typed list path.
@@ -384,7 +469,7 @@ func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
-	go func() { served <- serve(ctx) }()
+	go func() { served <- serve(ctx, "v1.0.0-test") }()
 	t.Cleanup(func() {
 		cancel()
 		select {

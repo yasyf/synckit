@@ -11,7 +11,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gofrs/flock v0.13.0
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/daemonkit v0.1.1-0.20260719045607-173abb1e83d4
+	github.com/yasyf/daemonkit v0.1.1-0.20260720034623-6c95e6224dee
 	golang.org/x/sys v0.46.0
 )
 

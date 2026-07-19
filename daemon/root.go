@@ -15,15 +15,16 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"github.com/yasyf/daemonkit/version"
 )
 
 // Execute builds and runs the synckitd root command under a context canceled on
 // SIGINT/SIGTERM, exiting non-zero on error.
-func Execute(version string) {
+func Execute(stampedVersion string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	root := newRoot(version)
+	root := newRoot(version.Running(stampedVersion))
 	if err := root.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "synckitd: %v\n", err)
 		os.Exit(1)
@@ -31,11 +32,11 @@ func Execute(version string) {
 }
 
 // newRoot builds the synckitd command tree; callers Execute it.
-func newRoot(version string) *cobra.Command {
+func newRoot(build string) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "synckitd",
 		Short:         "Generic per-machine sync daemon for synckit consumers.",
-		Version:       version,
+		Version:       build,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.NoArgs,
@@ -44,7 +45,7 @@ func newRoot(version string) *cobra.Command {
 		},
 	}
 	root.AddCommand(
-		newServeCmd(),
+		newServeCmd(build),
 		newReconcileCmd(),
 		newHostCmd(),
 		newRegisterCmd(),

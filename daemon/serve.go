@@ -2,16 +2,21 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	dkdaemon "github.com/yasyf/daemonkit/daemon"
+	"github.com/yasyf/daemonkit/daemonrole"
 	"github.com/yasyf/daemonkit/drain"
+	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/debug"
 	"github.com/yasyf/synckit/hostregistry"
@@ -43,17 +48,13 @@ var (
 	watchHealthyRun  = 30 * time.Second
 )
 
-// drainGrace bounds how long shutdown waits for in-flight RPC handlers to settle
-// before it cancels them and returns. A package var so tests can shrink it.
-var drainGrace = 30 * time.Second
-
-func newServeCmd() *cobra.Command {
+func newServeCmd(build string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
 		Short: "Run the resident daemon: own the host mesh, serve the RPC socket, and supervise the watch engines.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return serve(cmd.Context())
+			return serve(cmd.Context(), build)
 		},
 	}
 }
@@ -62,42 +63,13 @@ func newServeCmd() *cobra.Command {
 // status/reconcile/reload handlers, and supervises one watch engine per
 // discovered manifest. It blocks until ctx is canceled (SIGINT/SIGTERM),
 // rebuilding the supervisor on SIGHUP.
-func serve(ctx context.Context) error {
-	if _, err := ensureManifestsDir(); err != nil {
-		return err
-	}
-
-	dir, err := hostregistry.Mesh.Dir()
-	if err != nil {
-		return err
-	}
-	// Scope the dump listener to a ctx serve cancels on return, so an early error below
-	// (a bound socket, a reload failure) never leaks its goroutine or SIGUSR1 registration.
-	dumpCtx, stopDump := context.WithCancel(ctx)
-	defer stopDump()
-	if err := debug.DumpOnSIGUSR1(dumpCtx, dir); err != nil {
-		return err
-	}
-
+func serve(ctx context.Context, build string) error {
 	sock, err := hostregistry.Mesh.SockPath()
 	if err != nil {
 		return err
 	}
-	ln, err := rpc.Listen(ctx, sock)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = ln.Close() }()
-
 	sup := newSupervisor()
-	defer sup.stop()
-	if err := sup.reload(ctx); err != nil {
-		return err
-	}
-
-	gate := &drain.Simple{}
 	d := rpc.NewDispatcher()
-	d.SetAdmission(gate.Admit)
 	d.Register("status", handleStatus)
 	// reconcile and reload mutate the engine generation, so they serialize behind
 	// the exclusive mutex — a reload never tears down the clients a reconcile pass
@@ -119,48 +91,102 @@ func serve(ctx context.Context) error {
 	// would wedge the daemon.
 	registerConsent(d)
 
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve synckitd role path: %w", err)
+	}
+	rpcServer, err := runtimeRPCServer(d, executable, build)
+	if err != nil {
+		return err
+	}
+	peer := &wire.LifecyclePeer{Config: wire.ClientConfig{
+		Dial: wire.UnixDialer(sock), Build: rpc.Build, LifecycleBuild: build, MaxFrame: rpc.MaxFrame,
+	}}
+	runtime, err := dkdaemon.NewRuntime(dkdaemon.RuntimeConfig{
+		Socket: sock, Build: build, Protocol: int(wire.ProtocolVersion),
+		Peer: peer, Contract: dkdaemon.RequestDaemon, WaitMode: dkdaemon.PIDExit,
+		Admission: &drain.Intake{}, Server: rpcServer.Wire,
+		Workers: &supervisorWorkers{supervisor: sup}, State: runtimeState{},
+		Resources: lifecycleResources{peer: peer},
+		Activate: func(activation dkdaemon.Activation) error {
+			return activateServe(activation, sup, sock)
+		},
+	})
+	if err != nil {
+		_ = peer.Close()
+		return err
+	}
+	rpcServer.Wire.RegisterLifecycle(runtime)
+	err = runtime.Run(ctx)
+	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return nil
+	}
+	return err
+}
+
+func runtimeRPCServer(dispatcher *rpc.Dispatcher, executable, build string) (*rpc.Server, error) {
+	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
+		return nil, fmt.Errorf("synckitd role path %q is not exact and absolute", executable)
+	}
+	role := daemonrole.Classifier{RoleID: labelPrefix + ".serve", RolePath: executable}
+	if err := role.Validate(); err != nil {
+		return nil, fmt.Errorf("validate synckitd role: %w", err)
+	}
+	rpcServer := rpc.NewServer(dispatcher)
+	rpcServer.Wire.LifecycleBuild = build
+	rpcServer.Wire.ReservedProtectedSessions = 1
+	rpcServer.Wire.ProtectedSessionClassifier = role
+	return rpcServer, nil
+}
+
+func activateServe(activation dkdaemon.Activation, sup *supervisor, sock string) error {
+	if _, err := ensureManifestsDir(); err != nil {
+		return err
+	}
+	dir, err := hostregistry.Mesh.Dir()
+	if err != nil {
+		return err
+	}
+	if err := debug.DumpOnSIGUSR1(activation.Lifetime, dir); err != nil {
+		return err
+	}
+	if err := sup.reload(activation.Lifetime); err != nil {
+		return err
+	}
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
-	defer signal.Stop(hup)
 	go func() {
+		defer signal.Stop(hup)
 		for {
 			select {
-			case <-ctx.Done():
+			case <-activation.Lifetime.Done():
 				return
 			case <-hup:
-				if err := sup.reload(ctx); err != nil {
-					slog.ErrorContext(ctx, "serve: reload on SIGHUP", "err", err)
+				if err := sup.reload(activation.Lifetime); err != nil {
+					slog.ErrorContext(activation.Lifetime, "serve: reload on SIGHUP", "err", err)
 				}
 			}
 		}
 	}()
-
-	slog.InfoContext(ctx, "synckitd serving", "socket", sock)
-
-	// Handlers run under execCtx, not the shutdown-signal ctx, so a drain can settle
-	// in-flight requests before canceling them. ln.Close (Deactivate) unblocks Accept.
-	execCtx, cancelExec := context.WithCancel(context.WithoutCancel(ctx))
-	defer cancelExec()
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- rpc.NewServer(d).Serve(execCtx, ln) }()
-
-	select {
-	case err := <-serveErr:
-		return err
-	case <-ctx.Done():
-		drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainGrace)
-		defer cancel()
-		if err := gate.Drain(drainCtx, drain.SimpleConfig{
-			Deactivate:      func(context.Context) error { return ln.Close() },
-			MarkClosing:     func() { slog.InfoContext(ctx, "synckitd draining", "socket", sock) },
-			CancelExecutors: cancelExec,
-		}); err != nil {
-			slog.ErrorContext(ctx, "serve: drain", "err", err)
-		}
-		<-serveErr
-		return nil
-	}
+	slog.InfoContext(activation.Lifetime, "synckitd activated", "socket", sock)
+	return nil
 }
+
+type runtimeState struct{}
+
+func (runtimeState) Close() error { return nil }
+
+type lifecycleResources struct{ peer *wire.LifecyclePeer }
+
+func (r lifecycleResources) Close() error { return r.peer.Close() }
+
+type supervisorWorkers struct{ supervisor *supervisor }
+
+func (w *supervisorWorkers) Close() { w.supervisor.close() }
+
+func (*supervisorWorkers) Cancel() {}
+
+func (w *supervisorWorkers) Wait(ctx context.Context) error { return w.supervisor.wait(ctx) }
 
 // supervisor owns the current generation of watch goroutines and the long-lived
 // local clients those goroutines drive. reload tears the current generation down
@@ -173,6 +199,8 @@ type supervisor struct {
 	cancel  context.CancelFunc
 	wg      *sync.WaitGroup
 	clients []*syncservice.Client
+	closed  bool
+	settled bool
 }
 
 func newSupervisor() *supervisor {
@@ -193,6 +221,9 @@ func (s *supervisor) reload(parent context.Context) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("watch supervisor is closed")
+	}
 
 	if s.cancel != nil {
 		s.cancel()
@@ -368,20 +399,41 @@ func buildEngine(ctx context.Context, local *syncservice.Client, m manifest.Mani
 	)
 }
 
-// stop cancels the running generation, waits for it to drain, and closes its local
-// clients.
-func (s *supervisor) stop() {
+func (s *supervisor) close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closed = true
 	if s.cancel != nil {
 		s.cancel()
-		s.wg.Wait()
-		for _, c := range s.clients {
-			_ = c.Close()
-		}
-		s.clients = nil
-		s.cancel = nil
 	}
+}
+
+func (s *supervisor) wait(ctx context.Context) error {
+	s.mu.Lock()
+	if s.settled {
+		s.mu.Unlock()
+		return ctx.Err()
+	}
+	wg := s.wg
+	s.mu.Unlock()
+	if wg != nil {
+		wg.Wait()
+	}
+	s.mu.Lock()
+	for _, client := range s.clients {
+		_ = client.Close()
+	}
+	s.clients = nil
+	s.cancel = nil
+	s.settled = true
+	s.mu.Unlock()
+	return ctx.Err()
+}
+
+// stop closes and joins the supervisor for non-runtime owners such as tests.
+func (s *supervisor) stop() {
+	s.close()
+	_ = s.wait(context.Background())
 }
 
 // manifestResolver resolves a watch id's apply-stable fingerprint by listing the
