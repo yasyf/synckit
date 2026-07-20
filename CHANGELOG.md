@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `rpc.Server.ServeSession` now serves one spawned-parent stdio session through
+  daemonkit's exact framed engine without a synthetic listener or local adapter.
 - `synckitd serve` now uses daemonkit's composed runtime, exact business/release
   build identities, protected lifecycle admission, takeover, readiness, and drain.
 - LaunchAgent installation now converges an exact durable desired set through

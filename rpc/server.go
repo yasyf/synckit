@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 
 	"github.com/yasyf/daemonkit/wire"
@@ -53,6 +54,21 @@ func NewServer(dispatcher *Dispatcher) *Server {
 // readiness only after the listener and worker pool are live.
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	return s.Wire.Serve(ctx, listener, func() error { return nil }, allow, allow)
+}
+
+// ServeSession serves one spawned-parent session over independent streams.
+// Daemonkit owns framing, identity proof, deadlines, cancellation, and closure.
+func (s *Server) ServeSession(ctx context.Context, reader io.ReadCloser, writer io.WriteCloser) error {
+	conn, err := wire.NewDuplexConn(reader, writer)
+	if err != nil {
+		return err
+	}
+	identity, err := wire.SpawnedParentSessionIdentity()
+	if err != nil {
+		_ = conn.Close()
+		return err
+	}
+	return s.Wire.ServeSession(ctx, conn, identity, func() error { return nil }, allow, allow)
 }
 
 func (s *Server) dispatch(ctx context.Context, request wire.Request) (any, error) {
