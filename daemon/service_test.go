@@ -2,180 +2,246 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
+	"slices"
 	"sort"
 	"testing"
 
+	dkservice "github.com/yasyf/daemonkit/service"
+
 	"github.com/yasyf/synckit/codec"
 	"github.com/yasyf/synckit/manifest"
-	"github.com/yasyf/synckit/service"
 )
 
-// fakeLauncher records every bootstrap and bootout it is asked to perform without
-// touching launchd, so a test can assert the agent set and the reinstall bootouts.
-type fakeLauncher struct {
-	bootstrapped []string // plist paths
-	bootedOut    []string // labels
+type fakeServiceController struct {
+	desired     [][]dkservice.Agent
+	closed      int
+	closeCtxErr error
+	runErr      error
+	closeErr    error
 }
 
-func (f *fakeLauncher) Bootstrap(_ context.Context, plistPath string) error {
-	f.bootstrapped = append(f.bootstrapped, plistPath)
-	return nil
+func (f *fakeServiceController) Converge(_ context.Context, agents []dkservice.Agent) error {
+	f.desired = append(f.desired, append([]dkservice.Agent(nil), agents...))
+	return f.runErr
 }
 
-func (f *fakeLauncher) Bootout(_ context.Context, label string) error {
-	f.bootedOut = append(f.bootedOut, label)
-	return nil
+func (f *fakeServiceController) Close(ctx context.Context) error {
+	f.closed++
+	f.closeCtxErr = ctx.Err()
+	return f.closeErr
 }
 
-func TestToolConfigAgents(t *testing.T) {
+func useServiceController(t *testing.T, controller serviceController) {
+	t.Helper()
+	previous := openServiceController
+	openServiceController = func(context.Context) (serviceController, error) { return controller, nil }
+	t.Cleanup(func() { openServiceController = previous })
+}
+
+func TestServiceAgents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	binDir := t.TempDir()
+	helperPath := filepath.Join(binDir, "cookiesync")
+	if err := os.WriteFile(helperPath, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable fixture
+		t.Fatalf("write helper: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	executable := filepath.Join(t.TempDir(), "synckitd")
 	manifests := []manifest.Manifest{
 		{
 			Name: "cookiesync", Binary: "cookiesync",
 			Watch:   manifest.WatchSpec{Debounce: codec.Duration(0)},
 			Service: manifest.ServiceSpec{Transport: "socket", ServeArgs: []string{"rpc-serve"}, Sock: "~/.config/cookiesync/rpc.sock"},
-			Helper:  &manifest.HelperSpec{Command: "helper-serve", SessionType: "Aqua", Label: "helper"},
+			Helper:  &manifest.HelperSpec{Command: "helper-serve", SessionType: manifest.SessionTypeAqua},
 		},
 		{
 			Name: "reposync", Binary: "reposync",
 			Watch:   manifest.WatchSpec{Debounce: codec.Duration(0)},
 			Service: manifest.ServiceSpec{Transport: "stdio", ServeArgs: []string{"rpc-serve"}},
-			// no Helper block -> no helper agent
 		},
 	}
 
-	cfg := toolConfig(manifests)
-	if cfg.BinaryName != "synckitd" {
-		t.Errorf("BinaryName = %q, want synckitd", cfg.BinaryName)
+	agents, err := serviceAgents(manifests, executable)
+	if err != nil {
+		t.Fatalf("serviceAgents: %v", err)
 	}
-	if cfg.LabelPrefix != "com.github.yasyf.synckit" {
-		t.Errorf("LabelPrefix = %q, want com.github.yasyf.synckit", cfg.LabelPrefix)
+	if got, want := agentLabels(agents), []string{
+		"com.github.yasyf.synckit.helper.cookiesync",
+		"com.github.yasyf.synckit.reconcile",
+		"com.github.yasyf.synckit.serve",
+	}; !equalStrings(got, want) {
+		t.Fatalf("labels = %v, want %v", got, want)
 	}
 
-	byLabel := map[string]struct{}{}
-	for _, a := range cfg.Agents {
-		byLabel[a.Label] = struct{}{}
+	reconcile := findAgent(t, agents, labelPrefix+".reconcile")
+	if reconcile.Program != executable || !equalStrings(reconcile.Args, []string{"reconcile"}) {
+		t.Errorf("reconcile command = %q %v", reconcile.Program, reconcile.Args)
 	}
-	for _, want := range []string{"reconcile", "serve", "helper.cookiesync"} {
-		if _, ok := byLabel[want]; !ok {
-			t.Errorf("missing agent %q (have %v)", want, agentLabels(cfg.Agents))
+	if reconcile.RestartPolicy != dkservice.NoRestart || reconcile.StartInterval != reconcileInterval {
+		t.Errorf("reconcile restart/interval = %v/%v", reconcile.RestartPolicy, reconcile.StartInterval)
+	}
+	if reconcile.ProcessType != dkservice.ProcessTypeBackground {
+		t.Errorf("reconcile ProcessType = %v, want Background", reconcile.ProcessType)
+	}
+
+	serve := findAgent(t, agents, labelPrefix+".serve")
+	if serve.RestartPolicy != dkservice.RestartAlways || serve.ProcessType != 0 {
+		t.Errorf("serve restart/process type = %v/%v", serve.RestartPolicy, serve.ProcessType)
+	}
+
+	helper := findAgent(t, agents, labelPrefix+".helper.cookiesync")
+	if helper.Program != helperPath || !equalStrings(helper.Args, []string{"helper-serve"}) {
+		t.Errorf("helper command = %q %v", helper.Program, helper.Args)
+	}
+	if helper.RestartPolicy != dkservice.RestartAlways || helper.LimitLoadToSessionType != dkservice.SessionTypeAqua {
+		t.Errorf("helper restart/session = %v/%v", helper.RestartPolicy, helper.LimitLoadToSessionType)
+	}
+	for _, agent := range agents {
+		wantLog := filepath.Join(home, "Library", "Logs", "synckit", agent.Label+".log")
+		if agent.LogPath != wantLog {
+			t.Errorf("%s log = %q, want %q", agent.Label, agent.LogPath, wantLog)
 		}
-	}
-	if _, ok := byLabel["helper.reposync"]; ok {
-		t.Errorf("reposync has no Helper block but a helper.reposync agent was built")
-	}
-
-	reconcile := findAgent(t, cfg.Agents, "reconcile")
-	if reconcile.Command != "reconcile" {
-		t.Errorf("reconcile command = %q, want reconcile", reconcile.Command)
-	}
-	if reconcile.ExtraKeys["StartInterval"] != 900 {
-		t.Errorf("reconcile StartInterval = %v, want 900", reconcile.ExtraKeys["StartInterval"])
-	}
-	if reconcile.ExtraKeys["ProcessType"] != "Background" {
-		t.Errorf("reconcile ProcessType = %v, want Background (the periodic tick is the one agent that keeps the darwinbg clamp)", reconcile.ExtraKeys["ProcessType"])
-	}
-
-	serve := findAgent(t, cfg.Agents, "serve")
-	if serve.ExtraKeys["KeepAlive"] != true {
-		t.Errorf("serve KeepAlive = %v, want true", serve.ExtraKeys["KeepAlive"])
-	}
-	if v, ok := serve.ExtraKeys["ProcessType"]; ok {
-		t.Errorf("serve ProcessType = %v, want the key absent: darwinbg starves serve's probe subprocesses under load", v)
-	}
-
-	helper := findAgent(t, cfg.Agents, "helper.cookiesync")
-	if helper.Command != "helper-serve" {
-		t.Errorf("helper command = %q, want helper-serve", helper.Command)
-	}
-	if helper.Binary != "cookiesync" {
-		t.Errorf("helper Binary = %q, want cookiesync (the consumer binary)", helper.Binary)
-	}
-	if helper.ExtraKeys["LimitLoadToSessionType"] != "Aqua" {
-		t.Errorf("helper session type = %v, want Aqua", helper.ExtraKeys["LimitLoadToSessionType"])
-	}
-	if v, ok := helper.ExtraKeys["ProcessType"]; ok {
-		t.Errorf("helper ProcessType = %v, want the key absent: darwinbg starves the helper's probe subprocesses under load", v)
+		if agent.Env["PATH"] != daemonPATH {
+			t.Errorf("%s PATH = %q", agent.Label, agent.Env["PATH"])
+		}
 	}
 }
 
-func TestInstallBuildsAndReinstallsAgents(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("install requires macOS launchd")
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	cfgDir := filepath.Join(home, ".config")
-	t.Setenv("XDG_CONFIG_HOME", cfgDir)
-
-	// Put a stub cookiesync binary on PATH so the helper agent's plist resolves it.
+func TestServiceAgentsRejectUnknownSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "cookiesync"), []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // test stub must be executable
-		t.Fatalf("write stub cookiesync: %v", err)
+	path := filepath.Join(binDir, "consumer")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable fixture
+		t.Fatalf("write helper: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", binDir)
+	_, err := serviceAgents([]manifest.Manifest{{
+		Name: "consumer", Binary: "consumer", Helper: &manifest.HelperSpec{Command: "helper", SessionType: manifest.SessionType("Console")},
+	}}, filepath.Join(t.TempDir(), "synckitd"))
+	if err == nil {
+		t.Fatal("serviceAgents accepted unknown session type")
+	}
+}
 
-	// Register a manifest with a Helper block under the manifests dir.
+func TestServiceAgentsRejectNonExactExecutable(t *testing.T) {
+	if _, err := serviceAgents(nil, "synckitd"); err == nil {
+		t.Fatal("serviceAgents accepted relative executable")
+	}
+}
+
+func TestInstallConvergesExactDesiredSet(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	binDir := t.TempDir()
+	helperPath := filepath.Join(binDir, "cookiesync")
+	if err := os.WriteFile(helperPath, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable fixture
+		t.Fatalf("write helper: %v", err)
+	}
+	t.Setenv("PATH", binDir)
 	dir, err := ensureManifestsDir()
 	if err != nil {
 		t.Fatalf("ensure manifests dir: %v", err)
 	}
-	mf := `{"name":"cookiesync","binary":"cookiesync","watch":{"debounce":"1s"},` +
-		`"service":{"transport":"socket","serve_args":["rpc-serve"],"sock":"~/.config/cookiesync/rpc.sock"},` +
-		`"helper":{"command":"helper-serve","session_type":"Aqua","label":"helper"}}`
-	if err := os.WriteFile(filepath.Join(dir, "cookiesync.json"), []byte(mf), 0o600); err != nil {
+	payload := `{"name":"cookiesync","binary":"cookiesync","watch":{"debounce":"1s"},` +
+		`"service":{"transport":"socket","serve_args":["rpc-serve"],"sock":"/tmp/cookiesync.sock"},` +
+		`"helper":{"command":"helper-serve","session_type":"Aqua"}}`
+	if err := os.WriteFile(filepath.Join(dir, "cookiesync.json"), []byte(payload), 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-
-	fake := &fakeLauncher{}
-	if err := install(context.Background(), fake); err != nil {
+	controller := &fakeServiceController{}
+	useServiceController(t, controller)
+	if err := install(context.Background()); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-
-	// Three agents installed: reconcile, serve, helper.cookiesync. Each is booted
-	// out before bootstrap (idempotent reinstall), so it appears in bootedOut too.
-	if len(fake.bootstrapped) != 3 {
-		t.Errorf("bootstrapped %d plists, want 3: %v", len(fake.bootstrapped), fake.bootstrapped)
+	if controller.closed != 1 {
+		t.Fatalf("close calls = %d, want 1", controller.closed)
 	}
-	wantBootout := map[string]bool{
-		"com.github.yasyf.synckit.reconcile":         true,
-		"com.github.yasyf.synckit.serve":             true,
-		"com.github.yasyf.synckit.helper.cookiesync": true,
+	if len(controller.desired) != 1 {
+		t.Fatalf("convergence calls = %d, want 1", len(controller.desired))
 	}
-	for want := range wantBootout {
-		if !contains(fake.bootedOut, want) {
-			t.Errorf("agent bootout missing %q (have %v)", want, fake.bootedOut)
-		}
+	if got, want := agentLabels(controller.desired[0]), []string{
+		labelPrefix + ".helper.cookiesync", labelPrefix + ".reconcile", labelPrefix + ".serve",
+	}; !equalStrings(got, want) {
+		t.Fatalf("desired labels = %v, want %v", got, want)
 	}
 }
 
-func agentLabels(agents []service.AgentSpec) []string {
+func TestUninstallConvergesStoredSetToEmpty(t *testing.T) {
+	controller := &fakeServiceController{}
+	useServiceController(t, controller)
+	if err := uninstall(context.Background()); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if controller.closed != 1 || len(controller.desired) != 1 || controller.desired[0] != nil {
+		t.Fatalf("controller state: closed=%d desired=%v", controller.closed, controller.desired)
+	}
+}
+
+func TestServiceControllerCloseErrorJoinsOperationError(t *testing.T) {
+	runErr := errors.New("converge failed")
+	closeErr := errors.New("close failed")
+	controller := &fakeServiceController{closeErr: closeErr}
+	useServiceController(t, controller)
+	err := withServiceController(context.Background(), func(serviceController) error { return runErr })
+	if !errors.Is(err, runErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("error = %v, want both operation and close errors", err)
+	}
+}
+
+func TestServiceControllerCloseOutlivesCallerCancellation(t *testing.T) {
+	controller := &fakeServiceController{}
+	useServiceController(t, controller)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := withServiceController(ctx, func(serviceController) error { return context.Canceled })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation", err)
+	}
+	if controller.closed != 1 || controller.closeCtxErr != nil {
+		t.Fatalf("close state: calls=%d context error=%v", controller.closed, controller.closeCtxErr)
+	}
+}
+
+func TestServiceControllerPathsAreStableAndDistinct(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	config, err := serviceControllerConfig()
+	if err != nil {
+		t.Fatalf("serviceControllerConfig: %v", err)
+	}
+	if !filepath.IsAbs(config.StatePath) || !filepath.IsAbs(config.ProcessPath) || config.StatePath == config.ProcessPath {
+		t.Fatalf("controller paths = %q / %q", config.StatePath, config.ProcessPath)
+	}
+	if config.WorkerLimit != serviceWorkerLimit {
+		t.Fatalf("worker limit = %d, want %d", config.WorkerLimit, serviceWorkerLimit)
+	}
+}
+
+func agentLabels(agents []dkservice.Agent) []string {
 	out := make([]string, 0, len(agents))
-	for _, a := range agents {
-		out = append(out, a.Label)
+	for _, agent := range agents {
+		out = append(out, agent.Label)
 	}
 	sort.Strings(out)
 	return out
 }
 
-func findAgent(t *testing.T, agents []service.AgentSpec, label string) service.AgentSpec {
+func findAgent(t *testing.T, agents []dkservice.Agent, label string) dkservice.Agent {
 	t.Helper()
-	for _, a := range agents {
-		if a.Label == label {
-			return a
+	for _, agent := range agents {
+		if agent.Label == label {
+			return agent
 		}
 	}
 	t.Fatalf("agent %q not found in %v", label, agentLabels(agents))
-	return service.AgentSpec{}
+	return dkservice.Agent{}
 }
 
-func contains(xs []string, x string) bool {
-	for _, e := range xs {
-		if e == x {
-			return true
-		}
-	}
-	return false
+func equalStrings(a, b []string) bool {
+	return slices.Equal(a, b)
 }

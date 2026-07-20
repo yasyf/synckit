@@ -24,11 +24,9 @@ func cookiesyncManifest() Manifest {
 			ServeArgs: []string{"rpc-serve"},
 			Sock:      "~/.config/cookiesync/rpc.sock",
 		},
-		Launchd: &LaunchdSpec{SessionType: "Aqua"},
 		Helper: &HelperSpec{
 			Command:     "cookiesync-helper",
-			SessionType: "Aqua",
-			Label:       "com.yasyf.cookiesync.helper",
+			SessionType: SessionTypeAqua,
 		},
 	}
 }
@@ -87,11 +85,15 @@ func TestValidate(t *testing.T) {
 			m.Service.Sock = ""
 		}, false},
 		{"missing name", func(m *Manifest) { m.Name = "" }, true},
+		{"unsafe name", func(m *Manifest) { m.Name = "../cookiesync" }, true},
+		{"uppercase name", func(m *Manifest) { m.Name = "CookieSync" }, true},
 		{"missing binary", func(m *Manifest) { m.Binary = "" }, true},
 		{"missing transport", func(m *Manifest) { m.Service.Transport = "" }, true},
 		{"invalid transport", func(m *Manifest) { m.Service.Transport = "http" }, true},
 		{"empty serve_args", func(m *Manifest) { m.Service.ServeArgs = nil }, true},
 		{"missing sock with socket transport", func(m *Manifest) { m.Service.Sock = "" }, true},
+		{"missing helper command", func(m *Manifest) { m.Helper.Command = "" }, true},
+		{"invalid helper session", func(m *Manifest) { m.Helper.SessionType = SessionType("Console") }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -102,6 +104,36 @@ func TestValidate(t *testing.T) {
 				t.Errorf("Validate() = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsRemovedAndUnknownFields(t *testing.T) {
+	tests := map[string]string{
+		"removed launchd":      `{"name":"svc","binary":"svc","watch":{"debounce":"1s"},"service":{"transport":"stdio","serve_args":["serve"]},"launchd":{"session_type":"Aqua"}}`,
+		"removed helper label": `{"name":"svc","binary":"svc","watch":{"debounce":"1s"},"service":{"transport":"stdio","serve_args":["serve"]},"helper":{"command":"helper","label":"helper"}}`,
+		"unknown root field":   `{"name":"svc","binary":"svc","watch":{"debounce":"1s"},"service":{"transport":"stdio","serve_args":["serve"]},"unexpected":true}`,
+	}
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "manifest.json")
+			if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+				t.Fatalf("write manifest: %v", err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load accepted a removed or unknown field")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsTrailingJSONValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	payload := `{"name":"svc","binary":"svc","watch":{"debounce":"1s"},"service":{"transport":"stdio","serve_args":["serve"]}} {}`
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load accepted multiple JSON values")
 	}
 }
 
@@ -174,5 +206,21 @@ func TestDiscoverMissingDir(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("Discover() of missing dir len = %d, want 0", len(got))
+	}
+}
+
+func TestDiscoverRejectsDuplicateServiceName(t *testing.T) {
+	dir := t.TempDir()
+	data, err := json.Marshal(cookiesyncManifest())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, filename := range []string{"one.json", "two.json"} {
+		if err := os.WriteFile(filepath.Join(dir, filename), data, 0o600); err != nil {
+			t.Fatalf("write %s: %v", filename, err)
+		}
+	}
+	if _, err := Discover(dir); err == nil {
+		t.Fatal("Discover accepted duplicate service names")
 	}
 }

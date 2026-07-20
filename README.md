@@ -12,34 +12,47 @@
 go get github.com/yasyf/synckit
 ```
 
-A unix-socket RPC server — peer-UID check, 16 MiB line bound, and read/dispatch timeouts already wired:
+A persistent unix-socket RPC server with exact build admission, same-UID trust,
+multiplexing, and bounded 16 MiB frames already wired:
 
 ```go
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 
+	"github.com/yasyf/daemonkit/wire"
 	"github.com/yasyf/synckit/rpc"
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	d := rpc.NewDispatcher()
 	d.Register("ping", func(ctx context.Context, p map[string]any) (any, error) {
 		return map[string]any{"pong": p["msg"]}, nil
 	})
 
-	ln, _ := rpc.Listen(ctx, "/tmp/app.sock")
-	go rpc.Serve(ctx, ln, d)
+	sock := filepath.Join(os.TempDir(), "synckit-rpc-demo.sock")
+	_ = os.Remove(sock)
+	defer os.Remove(sock)
+	ln, _ := rpc.Listen(ctx, sock)
+	go rpc.NewServer(d).Serve(ctx, ln)
 
-	resp, _ := rpc.Call(ctx, "/tmp/app.sock", &rpc.Request{
+	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), Build: rpc.Build})
+	defer client.Close()
+	resp, _ := client.Call(ctx, &rpc.Request{
 		Method: "ping",
 		Params: map[string]any{"msg": "hi"},
 	})
-	fmt.Printf("resp.Result = %v\n", resp.Result)
+	var result map[string]string
+	_ = json.Unmarshal(resp.Result, &result)
+	fmt.Printf("resp.Result = %v\n", result)
 }
 ```
 
@@ -54,9 +67,10 @@ Driving with an agent? Paste this:
 
 ```text
 Run `go get github.com/yasyf/synckit`, then use its rpc package to stand up a
-unix-socket server: register a ping handler on rpc.NewDispatcher, rpc.Listen on
-a socket, rpc.Serve it, and rpc.Call it back. Keep the built-in peer-UID check,
-16 MiB line bound, and read/dispatch timeouts as shipped.
+unix-socket server: register a ping handler on rpc.NewDispatcher, bind with
+rpc.Listen, serve with rpc.NewServer, and call it through a persistent
+rpc.NewClient using rpc.Build. Keep the exact-build handshake, same-UID trust,
+and bounded framing as shipped.
 ```
 
 ---
@@ -99,7 +113,7 @@ A pass fetches every peer's registry read-only, folds them in with the CRDT merg
 
 | Package | What it holds |
 |---|---|
-| `rpc` | Newline-JSON `{method,params}` over a unix socket: peer-UID check, 16 MiB line bound, read/dispatch timeouts |
+| `rpc` | Exact persistent daemonkit sessions carrying typed `{method,params}` calls with same-UID trust and bounded frames |
 | `syncservice` | The typed sync contract over `rpc` (capabilities, list, reconcile, sync, get_state) plus the client and its three transports |
 | `watch` | The generic anti-echo watch engine: debounce, fingerprint dedupe, record-before-notify, concurrent peer fan-out, busy gating |
 | `watchbackend` | Filesystem events mapped to watch ids over recursive fsnotify (inotify/kqueue) |
@@ -107,8 +121,7 @@ A pass fetches every peer's registry read-only, folds them in with the CRDT merg
 | `cregistry` | LWW-element-set CRDT registry with per-item payloads; pure and clock-free |
 | `converge` | The pull-only convergent-reconcile pass over a `cregistry` registry |
 | `manifest` | The JSON manifest a consumer registers, plus discovery and validation |
-| `daemon` | The `synckitd` command tree: serve, reconcile, register, status |
-| `service` | macOS LaunchAgent manager: deterministic plists, an injected launchctl boundary |
+| `daemon` | The `synckitd` command tree, daemonkit lifecycle runtime, and product-specific typed LaunchAgent policy |
 | `codec` | Config-free JSON codecs, e.g. the canonical Go-duration string |
 | `tui` | Shared bubbletea terminal UI: a tab router plus the built-in Hosts tab |
 

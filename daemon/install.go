@@ -2,16 +2,50 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
+	dkservice "github.com/yasyf/daemonkit/service"
 
-	"github.com/yasyf/synckit/service"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
-// newLauncher builds the launchctl boundary install/uninstall drive. It is a
-// package var so a test can swap in a fake launcher and assert the rendered agents
-// without loading a real LaunchAgent; production uses launchctl.
-var newLauncher = service.NewLauncher
+const (
+	serviceWorkerLimit  = 1
+	serviceCloseTimeout = 30 * time.Second
+)
+
+type serviceController interface {
+	Converge(context.Context, []dkservice.Agent) error
+	Close(context.Context) error
+}
+
+var openServiceController = func(ctx context.Context) (serviceController, error) {
+	config, err := serviceControllerConfig()
+	if err != nil {
+		return nil, err
+	}
+	return dkservice.NewController(ctx, config)
+}
+
+func serviceControllerConfig() (dkservice.ControllerConfig, error) {
+	dir, err := hostregistry.Mesh.Dir()
+	if err != nil {
+		return dkservice.ControllerConfig{}, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return dkservice.ControllerConfig{}, fmt.Errorf("create synckit config dir: %w", err)
+	}
+	return dkservice.ControllerConfig{
+		StatePath:   filepath.Join(dir, "services.db"),
+		ProcessPath: filepath.Join(dir, "service-processes.db"),
+		WorkerLimit: serviceWorkerLimit,
+	}, nil
+}
 
 func newInstallCmd() *cobra.Command {
 	return &cobra.Command{
@@ -19,7 +53,7 @@ func newInstallCmd() *cobra.Command {
 		Short: "Install the synckitd LaunchAgents (reconcile tick, serve daemon, consumer helpers).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := install(cmd.Context(), newLauncher()); err != nil {
+			if err := install(cmd.Context()); err != nil {
 				return err
 			}
 			cmd.Println("Installed synckitd agents.")
@@ -34,7 +68,7 @@ func newUninstallCmd() *cobra.Command {
 		Short: "Remove the synckitd LaunchAgents.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := uninstall(cmd.Context(), newLauncher()); err != nil {
+			if err := uninstall(cmd.Context()); err != nil {
 				return err
 			}
 			cmd.Println("Uninstalled synckitd agents.")
@@ -43,21 +77,39 @@ func newUninstallCmd() *cobra.Command {
 	}
 }
 
-// install installs the synckitd agents for every discovered manifest.
-func install(ctx context.Context, launcher service.Launcher) error {
-	manifests, err := discoverManifests()
-	if err != nil {
-		return err
-	}
-	cfg := toolConfig(manifests)
-	return service.NewLaunchdManager(launcher).Install(ctx, cfg, false)
+func install(ctx context.Context) error {
+	return withServiceController(ctx, func(controller serviceController) error {
+		manifests, err := discoverManifests()
+		if err != nil {
+			return err
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolve synckitd executable: %w", err)
+		}
+		agents, err := serviceAgents(manifests, executable)
+		if err != nil {
+			return err
+		}
+		return controller.Converge(ctx, agents)
+	})
 }
 
-// uninstall removes the synckitd agents for every discovered manifest.
-func uninstall(ctx context.Context, launcher service.Launcher) error {
-	manifests, err := discoverManifests()
+func uninstall(ctx context.Context) error {
+	return withServiceController(ctx, func(controller serviceController) error {
+		return controller.Converge(ctx, nil)
+	})
+}
+
+func withServiceController(ctx context.Context, run func(serviceController) error) (err error) {
+	controller, err := openServiceController(ctx)
 	if err != nil {
 		return err
 	}
-	return service.NewLaunchdManager(launcher).Uninstall(ctx, toolConfig(manifests))
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), serviceCloseTimeout)
+		defer cancel()
+		err = errors.Join(err, controller.Close(closeCtx))
+	}()
+	return run(controller)
 }

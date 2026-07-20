@@ -11,9 +11,9 @@ synckit/
 ├── codec/         # canonical Go-duration JSON codec (shared serialization)
 ├── hostregistry/  # host mesh: self/hosts registry, Tailscale/Bonjour discovery,
 │                  #   SSH transport, and the flock-guarded FK-preserving state store (Config{Name})
-├── rpc/           # generic {method,params} unix-socket RPC — peer-UID check, 16 MiB
-│                  #   max-line, read/dispatch timeouts (peercred is darwin build-tagged)
-├── service/       # parameterized launchd/launchctl manager (AgentSpec / ToolConfig)
+├── rpc/           # exact persistent daemonkit sessions carrying typed {method,params}
+│                  #   calls with same-UID trust and bounded frames
+├── daemon/        # daemonkit lifecycle runtime plus synckit-specific service policy
 ├── watch/         # generic anti-echo watch engine[T] (debounce / dedupe / record-before-notify)
 ├── .github/       # GitHub Actions workflows
 ├── AGENTS.md      # This file — shared conventions

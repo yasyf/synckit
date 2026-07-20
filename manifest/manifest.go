@@ -8,8 +8,11 @@
 package manifest
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,13 +24,12 @@ import (
 // Manifest is a consumer's registration: its binary, watch spec, and the typed
 // service block synckitd drives to converge the consumer's registry.
 type Manifest struct {
-	Name    string       `json:"name"`
-	Binary  string       `json:"binary"`
-	Brew    string       `json:"brew,omitempty"`
-	Watch   WatchSpec    `json:"watch"`
-	Service ServiceSpec  `json:"service"`
-	Launchd *LaunchdSpec `json:"launchd,omitempty"`
-	Helper  *HelperSpec  `json:"helper,omitempty"`
+	Name    string      `json:"name"`
+	Binary  string      `json:"binary"`
+	Brew    string      `json:"brew,omitempty"`
+	Watch   WatchSpec   `json:"watch"`
+	Service ServiceSpec `json:"service"`
+	Helper  *HelperSpec `json:"helper,omitempty"`
 }
 
 // WatchSpec configures the watch debounce window.
@@ -45,27 +47,59 @@ type ServiceSpec struct {
 	Sock      string   `json:"sock,omitempty"`
 }
 
-// LaunchdSpec overrides launchd defaults for the consumer's agent.
-type LaunchdSpec struct {
-	SessionType string `json:"session_type,omitempty"`
-}
+// SessionType is a launchd session name accepted by a resident helper.
+type SessionType string
+
+const (
+	// SessionTypeAqua is the graphical login session.
+	SessionTypeAqua SessionType = "Aqua"
+	// SessionTypeBackground is the background user session.
+	SessionTypeBackground SessionType = "Background"
+	// SessionTypeLoginWindow is the login-window session.
+	SessionTypeLoginWindow SessionType = "LoginWindow"
+	// SessionTypeStandardIO is a standard-I/O login session.
+	SessionTypeStandardIO SessionType = "StandardIO"
+	// SessionTypeSystem is the system session.
+	SessionTypeSystem SessionType = "System"
+)
 
 // HelperSpec describes a privileged helper the consumer ships alongside its agent.
 type HelperSpec struct {
-	Command     string `json:"command"`
-	SessionType string `json:"session_type,omitempty"`
-	Label       string `json:"label"`
+	Command     string      `json:"command"`
+	SessionType SessionType `json:"session_type,omitempty"`
 }
 
 func validTransport(t string) bool {
 	return t == "socket" || t == "stdio"
 }
 
+func validName(name string) bool {
+	if len(name) == 0 || len(name) > 63 || name[0] == '-' || name[len(name)-1] == '-' {
+		return false
+	}
+	for _, char := range []byte(name) {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validSessionType(value SessionType) bool {
+	switch value {
+	case "", SessionTypeAqua, SessionTypeBackground, SessionTypeLoginWindow, SessionTypeStandardIO, SessionTypeSystem:
+		return true
+	default:
+		return false
+	}
+}
+
 // Validate reports the first missing or invalid required field, naming the field.
 func (m Manifest) Validate() error {
 	switch {
-	case m.Name == "":
-		return fmt.Errorf("manifest: field %q is required", "name")
+	case !validName(m.Name):
+		return fmt.Errorf("manifest: field %q must be a canonical lowercase service name, got %q", "name", m.Name)
 	case m.Binary == "":
 		return fmt.Errorf("manifest %q: field %q is required", m.Name, "binary")
 	case !validTransport(m.Service.Transport):
@@ -74,6 +108,10 @@ func (m Manifest) Validate() error {
 		return fmt.Errorf("manifest %q: field %q is required", m.Name, "service.serve_args")
 	case m.Service.Transport == "socket" && m.Service.Sock == "":
 		return fmt.Errorf("manifest %q: field %q is required when transport is socket", m.Name, "service.sock")
+	case m.Helper != nil && m.Helper.Command == "":
+		return fmt.Errorf("manifest %q: field %q is required", m.Name, "helper.command")
+	case m.Helper != nil && !validSessionType(m.Helper.SessionType):
+		return fmt.Errorf("manifest %q: field %q has unsupported value %q", m.Name, "helper.session_type", m.Helper.SessionType)
 	}
 	return nil
 }
@@ -85,7 +123,15 @@ func Load(path string) (*Manifest, error) {
 		return nil, fmt.Errorf("read manifest %q: %w", path, err)
 	}
 	var m Manifest
-	if err := json.Unmarshal(raw, &m); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&m); err != nil {
+		return nil, fmt.Errorf("decode manifest %q: %w", path, err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values")
+		}
 		return nil, fmt.Errorf("decode manifest %q: %w", path, err)
 	}
 	if err := m.Validate(); err != nil {
@@ -119,5 +165,10 @@ func Discover(dir string) ([]Manifest, error) {
 	slices.SortFunc(manifests, func(a, b Manifest) int {
 		return strings.Compare(a.Name, b.Name)
 	})
+	for i := 1; i < len(manifests); i++ {
+		if manifests[i-1].Name == manifests[i].Name {
+			return nil, fmt.Errorf("duplicate manifest name %q", manifests[i].Name)
+		}
+	}
 	return manifests, nil
 }
