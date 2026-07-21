@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -104,17 +103,15 @@ func TestServePublishesReleaseBuildAfterActivation(t *testing.T) {
 }
 
 // fakeConsumer is an in-process SyncConsumer that records what it is asked so a
-// test can assert origin propagation, version handling, and the typed list path.
+// test can assert origin propagation and the typed list path.
 // It is safe for concurrent use: the engine's resolver and notifier run on
 // separate goroutines.
 type fakeConsumer struct {
 	mu sync.Mutex
 
-	capsVersion int                     // protocol version Capabilities reports
-	capsFails   int                     // fail the first N Capabilities calls
-	capsCalls   int                     // total Capabilities calls seen
-	items       []syncservice.WatchItem // List result
-	listCalls   int                     // total List calls seen
+	items     []syncservice.WatchItem // List result
+	listFails int                     // fail the first N List calls
+	listCalls int                     // total List calls seen
 
 	lastReconcileOrigin string
 	reconcileCalls      int
@@ -123,25 +120,20 @@ type fakeConsumer struct {
 }
 
 func newFakeConsumer(items ...syncservice.WatchItem) *fakeConsumer {
-	return &fakeConsumer{capsVersion: syncservice.ProtocolVersion, items: items}
+	return &fakeConsumer{items: items}
 }
 
 func (f *fakeConsumer) Capabilities(context.Context) (syncservice.Capabilities, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.capsCalls++
-	if f.capsCalls <= f.capsFails {
-		return syncservice.Capabilities{}, errFakeDown
-	}
-	caps := syncservice.DefaultCapabilities("fake")
-	caps.ProtocolVersion = f.capsVersion
-	return caps, nil
+	return syncservice.DefaultCapabilities("fake"), nil
 }
 
 func (f *fakeConsumer) List(context.Context) ([]syncservice.WatchItem, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.listCalls++
+	if f.listCalls <= f.listFails {
+		return nil, errFakeDown
+	}
 	return append([]syncservice.WatchItem(nil), f.items...), nil
 }
 
@@ -175,12 +167,6 @@ func (f *fakeConsumer) reconcileOrigin() (string, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastReconcileOrigin, f.reconcileCalls
-}
-
-func (f *fakeConsumer) capabilityCalls() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.capsCalls
 }
 
 func (f *fakeConsumer) listCount() int {
@@ -638,7 +624,7 @@ func callReload(t *testing.T, sock string) *rpc.Response {
 func TestListForEngineRetriesThenSucceeds(t *testing.T) {
 	shrinkBackoff(t)
 	fake := newFakeConsumer(syncservice.WatchItem{ID: "only", WatchDirs: []string{"/d"}, Fingerprint: "fp"})
-	fake.capsFails = 2 // fail the first two Capabilities calls, then succeed
+	fake.listFails = 2
 	tx := serveFake(t, fake)
 	t.Cleanup(func() { _ = tx.Close() })
 
@@ -649,44 +635,15 @@ func TestListForEngineRetriesThenSucceeds(t *testing.T) {
 	if len(items) != 1 || items[0].ID != "only" {
 		t.Fatalf("items = %+v, want one item id=only", items)
 	}
-	if calls := fake.capabilityCalls(); calls != 3 {
-		t.Errorf("capability calls = %d, want 3 (two failures then success)", calls)
-	}
-}
-
-func TestListForEngineVersionSkewFailsLoud(t *testing.T) {
-	shrinkBackoff(t)
-	fake := newFakeConsumer()
-	fake.capsVersion = 999
-	tx := serveFake(t, fake)
-	t.Cleanup(func() { _ = tx.Close() })
-
-	done := make(chan error, 1)
-	go func() {
-		_, err := listForEngine(context.Background(), syncservice.NewClient(tx), "stub")
-		done <- err
-	}()
-
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("listForEngine on a version skew returned nil, want a loud error")
-		}
-		if !strings.Contains(err.Error(), "protocol skew") || !strings.Contains(err.Error(), "999") {
-			t.Errorf("error = %v, want it to name the skew and version 999", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("listForEngine on a version skew hung instead of failing fast")
-	}
-	if calls := fake.capabilityCalls(); calls != 1 {
-		t.Errorf("capability calls = %d, want 1 (a skew must not retry)", calls)
+	if calls := fake.listCount(); calls != 3 {
+		t.Errorf("list calls = %d, want 3 (two failures then success)", calls)
 	}
 }
 
 func TestListForEngineCtxCancel(t *testing.T) {
 	shrinkBackoff(t)
 	fake := newFakeConsumer()
-	fake.capsFails = 1 << 30 // never succeeds
+	fake.listFails = 1 << 30
 	tx := serveFake(t, fake)
 	t.Cleanup(func() { _ = tx.Close() })
 

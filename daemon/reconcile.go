@@ -60,21 +60,13 @@ func reconcileAll(ctx context.Context) ([]reconcileResult, error) {
 	return results, nil
 }
 
-// reconcileOne does the Capabilities handshake against the consumer's local typed
-// service, rejects a protocol skew, then runs a full reconcile (origin empty). Any
-// failure is captured in the result's Err rather than returned, so a per-consumer
-// fault never aborts the others.
+// reconcileOne runs a full reconcile against the consumer's exact-build typed
+// service. Any failure is captured in the result's Err rather than returned, so a
+// per-consumer fault never aborts the others.
 func reconcileOne(ctx context.Context, m manifest.Manifest, self string) reconcileResult {
 	c := syncservice.NewClient(dialTransport(m, self, self))
 	defer func() { _ = c.Close() }()
 
-	caps, err := c.Capabilities(ctx)
-	if err != nil {
-		return reconcileResult{Name: m.Name, Err: "capabilities: " + err.Error()}
-	}
-	if caps.ProtocolVersion != syncservice.ProtocolVersion {
-		return reconcileResult{Name: m.Name, Err: fmt.Sprintf("protocol skew: peer %d, want %d", caps.ProtocolVersion, syncservice.ProtocolVersion)}
-	}
 	if _, err := c.Reconcile(ctx, ""); err != nil {
 		return reconcileResult{Name: m.Name, Err: err.Error()}
 	}

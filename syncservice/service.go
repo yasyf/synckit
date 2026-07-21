@@ -5,14 +5,9 @@ import (
 	"encoding/json"
 )
 
-// ProtocolVersion is the wire version of the typed sync contract. A client compares
-// it against a peer's reported [Capabilities] to detect a version skew before
-// driving the rest of the protocol.
-const ProtocolVersion = 1
-
 // The svc.-namespaced rpc method names that make up the typed sync contract.
 const (
-	// MethodCapabilities reports the peer's name, protocol version, and methods.
+	// MethodCapabilities reports the peer's name and methods.
 	MethodCapabilities = "svc.capabilities"
 	// MethodList enumerates the items this peer tracks for sync.
 	MethodList = "svc.list"
@@ -36,12 +31,10 @@ type WatchItem struct {
 	BusyReason  string   `json:"busy_reason,omitempty"`
 }
 
-// Capabilities is a peer's self-description: its name, the protocol version it
-// speaks, and the method names it serves.
+// Capabilities is a peer's self-description: its name and the method names it serves.
 type Capabilities struct {
-	Name            string   `json:"name"`
-	ProtocolVersion int      `json:"protocol_version"`
-	Methods         []string `json:"methods"`
+	Name    string   `json:"name"`
+	Methods []string `json:"methods"`
 }
 
 // ReconcileResult reports the outcome of a reconcile: how many items converged and
@@ -65,7 +58,7 @@ type RawRegistry = json.RawMessage
 // SyncConsumer is the typed sync surface a consumer implements and the daemon serves
 // over rpc. [RegisterConsumer] binds each method to the matching rpc handler.
 type SyncConsumer interface {
-	// Capabilities reports this consumer's name, protocol version, and methods.
+	// Capabilities reports this consumer's name and methods.
 	Capabilities(ctx context.Context) (Capabilities, error)
 	// List enumerates the items this consumer tracks for sync.
 	List(ctx context.Context) ([]WatchItem, error)

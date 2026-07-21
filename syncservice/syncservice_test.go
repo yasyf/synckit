@@ -93,9 +93,6 @@ func TestClientPersistentSessionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("capabilities: %v", err)
 	}
-	if caps.ProtocolVersion != ProtocolVersion {
-		t.Errorf("protocol version = %d, want %d", caps.ProtocolVersion, ProtocolVersion)
-	}
 	if caps.Name != "fake" {
 		t.Errorf("name = %q, want fake", caps.Name)
 	}
@@ -224,10 +221,6 @@ func TestStdioTransportRealSubprocess(t *testing.T) {
 	if caps.Name != "stub" {
 		t.Errorf("name = %q, want stub", caps.Name)
 	}
-	if caps.ProtocolVersion != ProtocolVersion {
-		t.Errorf("protocol version = %d, want %d", caps.ProtocolVersion, ProtocolVersion)
-	}
-
 	items, err := c.List(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)

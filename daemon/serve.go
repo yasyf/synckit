@@ -320,32 +320,11 @@ func backoffAfter(prev time.Duration, healthy bool) time.Duration {
 	return min(2*prev, watchBackoffMax)
 }
 
-// listForEngine does the Capabilities handshake then List against the consumer's
-// typed service, retrying a transient connection failure (the resident helper may
-// not have bound its socket yet at login) on a bounded backoff until success, the
-// retry budget is exhausted, or ctx is done. A protocol-version skew is not
-// transient: it fails loud with no retry, naming both versions.
+// listForEngine lists the consumer's items, retrying a transient connection failure
+// on a bounded backoff until success, the retry budget is exhausted, or ctx is done.
 func listForEngine(ctx context.Context, c *syncservice.Client, name string) ([]syncservice.WatchItem, error) {
 	deadline := time.Now().Add(listRetryBudget)
 	for {
-		caps, err := c.Capabilities(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			if time.Now().After(deadline) {
-				return nil, fmt.Errorf("capabilities for %q: %w", name, err)
-			}
-			slog.WarnContext(ctx, "serve: capabilities not yet reachable, retrying", "manifest", name, "err", err)
-			if err := sleepCtx(ctx, listBackoff); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		if caps.ProtocolVersion != syncservice.ProtocolVersion {
-			return nil, fmt.Errorf("manifest %q: protocol skew: peer %d, want %d", name, caps.ProtocolVersion, syncservice.ProtocolVersion)
-		}
-
 		items, err := c.List(ctx)
 		if err != nil {
 			if ctx.Err() != nil {

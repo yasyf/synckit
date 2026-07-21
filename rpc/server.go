@@ -50,7 +50,7 @@ func NewServer(dispatcher *Dispatcher) *Server {
 	return server
 }
 
-// Serve accepts authenticated v4 sessions until ctx is canceled and publishes
+// Serve accepts authenticated v1 sessions until ctx is canceled and publishes
 // readiness only after the listener and worker pool are live.
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	return s.Wire.Serve(ctx, listener, func() error { return nil }, allow, allow)

@@ -153,7 +153,10 @@ func TestHandlerPanicDoesNotEndSession(t *testing.T) {
 	}
 }
 
-func TestExactBuildMismatchRejectsBeforeDispatch(t *testing.T) {
+func TestOldBusinessBuildRejectsBeforeDispatch(t *testing.T) {
+	if Build != "synckit.rpc.v1" {
+		t.Fatalf("business build = %q, want exact v1", Build)
+	}
 	var calls atomic.Int32
 	dispatcher := NewDispatcher()
 	dispatcher.Register("mutate", func(context.Context, map[string]any) (any, error) {
@@ -161,7 +164,7 @@ func TestExactBuildMismatchRejectsBeforeDispatch(t *testing.T) {
 		return nil, nil
 	})
 	sock := serve(t, dispatcher, nil)
-	c := NewClient(ClientConfig{Dial: wire.UnixDialer(sock), Build: "wrong-build"})
+	c := NewClient(ClientConfig{Dial: wire.UnixDialer(sock), Build: "synckit.rpc.v4"})
 	defer func() { _ = c.Close() }()
 	_, err := c.Call(context.Background(), &Request{Method: "mutate"})
 	var transportErr *TransportError

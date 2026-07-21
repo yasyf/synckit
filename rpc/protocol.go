@@ -16,7 +16,7 @@ const DispatchTimeout = 10 * time.Minute
 
 const (
 	// Build is the exact synckit RPC schema identity used by both session peers.
-	Build = "synckit.rpc.v4"
+	Build = "synckit.rpc.v1"
 	// MaxFrame bounds one daemonkit frame carrying a synckit request or response.
 	MaxFrame = 16 << 20
 	callOp   = wire.Op("synckit.rpc.call")

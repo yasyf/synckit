@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- The Synckit-owned business RPC is hard-reset to the single exact
+  `synckit.rpc.v1` build identity. Daemonkit rejects every other schema before
+  dispatch; the redundant typed-service protocol field and negotiation pass are
+  removed.
 - `rpc.Server.ServeSession` now serves one spawned-parent stdio session through
   daemonkit's exact framed engine without a synthetic listener or local adapter.
 - `synckitd serve` now uses daemonkit's composed runtime, exact business/release
@@ -131,8 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   max-defer window fires through — so a pending change lands right after the item goes idle
   instead of parking until an external tick. An ungated engine behaves exactly as before.
 - Busy on the wire: `syncservice.WatchItem` gains `busy`/`busy_reason`, and `SyncResult`/
-  `ReconcileResult` gain `skipped_busy`. All three are additive `omitempty` fields that decode
-  compatibly in both directions, so `ProtocolVersion` stays 1 and `SyncConsumer` is unchanged.
+  `ReconcileResult` gain `skipped_busy`. `SyncConsumer` is unchanged.
 - The daemon gates each manifest's watch engine on the busy state its consumer reports via
   `List`, retrying at the manifest's debounce cadence and firing through after ten windows. The
   gate shares its `List` round trip with the fingerprint resolver, so a gated evaluation costs
@@ -193,8 +196,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typed RPC service. The new `syncservice` package defines a `SyncConsumer` interface
   (capabilities/list/reconcile/sync/get_state) served over the existing newline-JSON `rpc`
   as `svc.`-namespaced methods, a typed `Client` over socket/stdio/ssh-stdio transports, and
-  a `ProtocolVersion` handshake that fails loud on skew. The registry payload stays an opaque
-  `json.RawMessage` so its int64 CRDT stamps round-trip byte-exact. The manifest's `actions{}`
+  an explicit capabilities surface. The registry payload stays an opaque `json.RawMessage`
+  so its int64 CRDT stamps round-trip byte-exact. The manifest's `actions{}`
   + `watch.list_cmd` are replaced by a `service{transport,serve_args,sock}` block; the daemon
   drives consumers over the typed client (with async, retrying engine startup) instead of
   rendering and shelling argv templates.

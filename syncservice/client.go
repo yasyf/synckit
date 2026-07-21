@@ -50,7 +50,7 @@ func (c *Client) Call(ctx context.Context, method string, params map[string]any,
 	return c.call(ctx, &rpc.Request{Method: method, Params: params}, out)
 }
 
-// Capabilities asks the peer for its name, protocol version, and methods.
+// Capabilities asks the peer for its name and methods.
 func (c *Client) Capabilities(ctx context.Context) (Capabilities, error) {
 	var out Capabilities
 	err := c.call(ctx, &rpc.Request{Method: MethodCapabilities}, &out)

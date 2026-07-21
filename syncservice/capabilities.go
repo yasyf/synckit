@@ -10,15 +10,10 @@ var AllMethods = []string{
 	MethodGetState,
 }
 
-// DefaultCapabilities returns the standard [Capabilities] for a consumer named name:
-// the current [ProtocolVersion] and a fresh copy of [AllMethods], so a mutation of
-// the returned slice never aliases the package-level list.
+// DefaultCapabilities returns the standard [Capabilities] for a consumer named name
+// with a fresh copy of [AllMethods].
 func DefaultCapabilities(name string) Capabilities {
 	methods := make([]string, len(AllMethods))
 	copy(methods, AllMethods)
-	return Capabilities{
-		Name:            name,
-		ProtocolVersion: ProtocolVersion,
-		Methods:         methods,
-	}
+	return Capabilities{Name: name, Methods: methods}
 }

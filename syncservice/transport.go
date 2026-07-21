@@ -47,12 +47,12 @@ func (t *socketTransport) Do(ctx context.Context, req *rpc.Request) (*Response, 
 
 func (t *socketTransport) Close() error { return t.client.Close() }
 
-// Stdio returns a persistent v4 transport over a spawned bridge's stdin/stdout.
+// Stdio returns a persistent v1 transport over a spawned bridge's stdin/stdout.
 func Stdio(name string, args ...string) Transport {
 	return &cmdTransport{candidates: [][]string{append([]string{name}, args...)}}
 }
 
-// SSHStdio returns a persistent v4 transport through a peer's raw rpc bridge.
+// SSHStdio returns a persistent v1 transport through a peer's raw rpc bridge.
 func SSHStdio(peer, remoteCmd string) Transport {
 	return &cmdTransport{resolve: func() ([][]string, error) {
 		addrs, err := hostregistry.DialAddrs(peer)
