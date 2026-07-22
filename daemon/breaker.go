@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yasyf/daemonkit/supervise"
+
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/watch"
 )
@@ -52,7 +54,12 @@ type openPeer struct {
 // newBreakerNotifier wraps inner with a per-peer breaker for manifest name, taking
 // self so the local host is never snapshotted and ctx as the generation context its
 // retry timers run under.
-func newBreakerNotifier(ctx context.Context, inner watch.Notifier[string], name, self string) *breakerNotifier {
+func newBreakerNotifier(
+	ctx context.Context,
+	inner watch.Notifier[string],
+	name, self string,
+	runner supervise.TaskRunner,
+) *breakerNotifier {
 	return &breakerNotifier{
 		inner:     inner,
 		name:      name,
@@ -61,7 +68,9 @@ func newBreakerNotifier(ctx context.Context, inner watch.Notifier[string], name,
 		open:      make(map[string]*openPeer),
 		now:       time.Now,
 		afterFunc: func(d time.Duration, fn func()) { time.AfterFunc(d, fn) },
-		snapshot:  tailscaleSnapshot,
+		snapshot: func(ctx context.Context, peer string) {
+			tailscaleSnapshot(ctx, runner, peer)
+		},
 	}
 }
 
@@ -148,10 +157,10 @@ func (b *breakerNotifier) closed(peer string) {
 // tailscaleSnapshot logs a one-line tailnet view of peer the first time its breaker
 // opens, to make the next unreachable-peer storm diagnosable. It never affects sync
 // behavior: an unreachable or unparseable tailscale degrades to a single info line.
-func tailscaleSnapshot(ctx context.Context, peer string) {
+func tailscaleSnapshot(ctx context.Context, runner supervise.TaskRunner, peer string) {
 	ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 	defer cancel()
-	line, err := hostregistry.TailscalePeerStatus(ctx, hostregistry.NewExecRunner(), peer)
+	line, err := hostregistry.TailscalePeerStatus(ctx, hostregistry.NewExecRunner(runner), peer)
 	if err != nil {
 		slog.InfoContext(ctx, "watch: tailscale snapshot unavailable", "peer", peer, "err", err)
 		return

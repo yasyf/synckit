@@ -16,6 +16,7 @@ import (
 	dkdaemon "github.com/yasyf/daemonkit/daemon"
 	"github.com/yasyf/daemonkit/daemonrole"
 	"github.com/yasyf/daemonkit/drain"
+	"github.com/yasyf/daemonkit/supervise"
 	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/debug"
@@ -68,14 +69,22 @@ func serve(ctx context.Context, build string) error {
 	if err != nil {
 		return err
 	}
-	sup := newSupervisor()
+	dir, err := hostregistryDir()
+	if err != nil {
+		return err
+	}
+	processes, err := newProcessOwner(filepath.Join(dir, "processes.db"))
+	if err != nil {
+		return err
+	}
+	sup := newSupervisor(processes.pool)
 	d := rpc.NewDispatcher()
 	d.Register("status", handleStatus)
 	// reconcile and reload mutate the engine generation, so they serialize behind
 	// the exclusive mutex — a reload never tears down the clients a reconcile pass
 	// is mid-drive on; status is a pure read and stays concurrent.
 	d.RegisterExclusive("reconcile", func(hctx context.Context, _ map[string]any) (any, error) {
-		return reconcileAll(hctx)
+		return reconcileAll(hctx, processes.pool)
 	})
 	// The generation reload starts must outlive the request, so it parents to
 	// serve's ctx: the request ctx dies as soon as Dispatch returns, which would
@@ -89,7 +98,7 @@ func serve(ctx context.Context, build string) error {
 	// consent.request|relay|presence ride plain Register (concurrent), never the
 	// exclusive mutex reconcile/reload share: a 10-min Touch ID prompt behind it
 	// would wedge the daemon.
-	registerConsent(d)
+	registerConsent(d, processes.pool)
 
 	executable, err := executableAlias(daemonBinary)
 	if err != nil {
@@ -106,14 +115,17 @@ func serve(ctx context.Context, build string) error {
 		Socket: sock, Build: build, Protocol: int(wire.ProtocolVersion),
 		Peer: peer, Contract: dkdaemon.RequestDaemon, WaitMode: dkdaemon.PIDExit,
 		Admission: &drain.Intake{}, Server: rpcServer.Wire,
-		Workers: &supervisorWorkers{supervisor: sup}, State: runtimeState{},
+		Workers: &runtimeWorkers{supervisor: sup, processes: processes}, State: runtimeState{},
 		Resources: lifecycleResources{peer: peer},
 		Activate: func(activation dkdaemon.Activation) error {
-			return activateServe(activation, sup, sock)
+			return activateServe(activation, sup, processes, sock)
 		},
 	})
 	if err != nil {
 		_ = peer.Close()
+		processes.Close()
+		processes.Cancel()
+		_ = processes.Wait(context.WithoutCancel(ctx))
 		return err
 	}
 	rpcServer.Wire.RegisterLifecycle(runtime)
@@ -139,7 +151,10 @@ func runtimeRPCServer(dispatcher *rpc.Dispatcher, executable, build string) (*rp
 	return rpcServer, nil
 }
 
-func activateServe(activation dkdaemon.Activation, sup *supervisor, sock string) error {
+func activateServe(activation dkdaemon.Activation, sup *supervisor, processes *processOwner, sock string) error {
+	if err := processes.recover(activation.Startup); err != nil {
+		return fmt.Errorf("recover daemon processes: %w", err)
+	}
 	if _, err := ensureManifestsDir(); err != nil {
 		return err
 	}
@@ -180,13 +195,21 @@ type lifecycleResources struct{ peer *wire.LifecyclePeer }
 
 func (r lifecycleResources) Close() error { return r.peer.Close() }
 
-type supervisorWorkers struct{ supervisor *supervisor }
+type runtimeWorkers struct {
+	supervisor *supervisor
+	processes  *processOwner
+}
 
-func (w *supervisorWorkers) Close() { w.supervisor.close() }
+func (w *runtimeWorkers) Close() {
+	w.supervisor.close()
+	w.processes.Close()
+}
 
-func (*supervisorWorkers) Cancel() {}
+func (w *runtimeWorkers) Cancel() { w.processes.Cancel() }
 
-func (w *supervisorWorkers) Wait(ctx context.Context) error { return w.supervisor.wait(ctx) }
+func (w *runtimeWorkers) Wait(ctx context.Context) error {
+	return errors.Join(w.supervisor.wait(ctx), w.processes.Wait(ctx))
+}
 
 // supervisor owns the current generation of watch goroutines and the long-lived
 // local clients those goroutines drive. reload tears the current generation down
@@ -195,6 +218,7 @@ func (w *supervisorWorkers) Wait(ctx context.Context) error { return w.superviso
 // concurrent reload (the rpc reload handler and the SIGHUP goroutine both call
 // it).
 type supervisor struct {
+	pool    *supervise.Pool
 	mu      sync.Mutex
 	cancel  context.CancelFunc
 	wg      *sync.WaitGroup
@@ -203,8 +227,8 @@ type supervisor struct {
 	settled bool
 }
 
-func newSupervisor() *supervisor {
-	return &supervisor{}
+func newSupervisor(pool *supervise.Pool) *supervisor {
+	return &supervisor{pool: pool}
 }
 
 // reload cancels the running watch generation, waits for it to drain, closes the
@@ -258,9 +282,9 @@ func (s *supervisor) reload(parent context.Context) error {
 // round trip happens asynchronously under superviseWatch, keeping reload prompt.
 // The caller holds s.mu, so appending to s.clients is safe.
 func (s *supervisor) startEngine(ctx context.Context, wg *sync.WaitGroup, m manifest.Manifest, reg *hostregistry.Registry) {
-	local := syncservice.NewClient(dialTransport(m, reg.Self, reg.Self))
+	local := syncservice.NewClient(dialTransport(s.pool, m, reg.Self, reg.Self))
 	s.clients = append(s.clients, local)
-	eng := buildEngine(ctx, local, m, reg)
+	eng := buildEngine(ctx, local, m, reg, s.pool)
 
 	// run returns how long it spent inside the backend, so a run that dies in the
 	// list phase (never reaching the backend) reports zero and never counts healthy.
@@ -364,13 +388,25 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // peer is logged once and probed on a backoff instead of on every event. The gate
 // defers a busy item's evaluation at the debounce cadence, firing through after ten
 // windows so a persistently busy item can only delay a change, never park it.
-func buildEngine(ctx context.Context, local *syncservice.Client, m manifest.Manifest, reg *hostregistry.Registry) *watch.Engine[string] {
+func buildEngine(
+	ctx context.Context,
+	local *syncservice.Client,
+	m manifest.Manifest,
+	reg *hostregistry.Registry,
+	pool *supervise.Pool,
+) *watch.Engine[string] {
 	hosts := append([]string{reg.Self}, reg.Hosts...)
 	debounce := time.Duration(m.Watch.Debounce)
 	memo := newFingerprintMemo()
 	return watch.NewEngine[string](
 		manifestResolver{client: local, name: m.Name, memo: memo},
-		newBreakerNotifier(ctx, manifestNotifier{local: local, m: m, self: reg.Self}, m.Name, reg.Self),
+		newBreakerNotifier(
+			ctx,
+			manifestNotifier{local: local, m: m, self: reg.Self, pool: pool},
+			m.Name,
+			reg.Self,
+			pool,
+		),
 		func(id string) string { return id },
 		debounce,
 		hosts,
@@ -511,6 +547,7 @@ type manifestNotifier struct {
 	local *syncservice.Client
 	m     manifest.Manifest
 	self  string
+	pool  *supervise.Pool
 }
 
 func (n manifestNotifier) Notify(ctx context.Context, peer, _ string) error {
@@ -520,7 +557,7 @@ func (n manifestNotifier) Notify(ctx context.Context, peer, _ string) error {
 		}
 		return nil
 	}
-	c := syncservice.NewClient(dialTransport(n.m, peer, n.self))
+	c := syncservice.NewClient(dialTransport(n.pool, n.m, peer, n.self))
 	defer func() { _ = c.Close() }()
 	if _, err := c.Sync(ctx, n.self); err != nil {
 		return fmt.Errorf("ssh sync for %q on %s: %w", n.m.Name, peer, err)

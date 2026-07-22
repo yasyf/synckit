@@ -60,12 +60,14 @@ func newHostAddCmd() *cobra.Command {
 		Short: "Register a peer and SSH-bootstrap the mesh on it.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			manifests, err := discoverManifests()
-			if err != nil {
-				return err
-			}
-			return AddHost(cmd.Context(), hostregistry.NewExecRunner(), manifests, args[0], self, noRecurse, func(msg string) {
-				cmd.Println(msg)
+			return withCLIExecRunner(cmd.Context(), func(runner hostregistry.Runner) error {
+				manifests, err := discoverManifests()
+				if err != nil {
+					return err
+				}
+				return AddHost(cmd.Context(), runner, manifests, args[0], self, noRecurse, func(msg string) {
+					cmd.Println(msg)
+				})
 			})
 		},
 	}
@@ -122,7 +124,9 @@ func newHostVerifyCmd() *cobra.Command {
 		Short: "Probe every peer for reachability and each consumer's install state.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return verifyHosts(cmd.Context(), cmd, hostregistry.NewExecRunner())
+			return withCLIExecRunner(cmd.Context(), func(runner hostregistry.Runner) error {
+				return verifyHosts(cmd.Context(), cmd, runner)
+			})
 		},
 	}
 }

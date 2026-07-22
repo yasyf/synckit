@@ -12,6 +12,7 @@ import (
 
 	dkdaemon "github.com/yasyf/daemonkit/daemon"
 	"github.com/yasyf/daemonkit/daemonrole"
+	"github.com/yasyf/daemonkit/supervise"
 	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/codec"
@@ -246,7 +247,7 @@ func serveFake(t *testing.T, fake *fakeConsumer) syncservice.Transport {
 func fakeMesh(t *testing.T, byPeer map[string]*fakeConsumer) {
 	t.Helper()
 	prev := dialTransport
-	dialTransport = func(_ manifest.Manifest, peer, _ string) syncservice.Transport {
+	dialTransport = func(_ *supervise.Pool, _ manifest.Manifest, peer, _ string) syncservice.Transport {
 		fake, ok := byPeer[peer]
 		if !ok {
 			t.Fatalf("dialTransport: no fake consumer for peer %q", peer)
@@ -417,7 +418,13 @@ func TestEngineEventDrivesLocalSync(t *testing.T) {
 	fakeMesh(t, map[string]*fakeConsumer{"me@self": fake})
 
 	local := syncservice.NewClient(serveFake(t, fake))
-	eng := buildEngine(context.Background(), local, testManifest(), &hostregistry.Registry{Self: "me@self"})
+	eng := buildEngine(
+		context.Background(),
+		local,
+		testManifest(),
+		&hostregistry.Registry{Self: "me@self"},
+		testDaemonPool(t.Context(), t),
+	)
 
 	ctx := context.Background()
 	eng.OnEvent(ctx, "site-a")
@@ -572,7 +579,7 @@ func TestReloadClosesEveryTransport(t *testing.T) {
 		transports []*countingTransport
 	)
 	prev := dialTransport
-	dialTransport = func(manifest.Manifest, string, string) syncservice.Transport {
+	dialTransport = func(*supervise.Pool, manifest.Manifest, string, string) syncservice.Transport {
 		transport := &countingTransport{onClose: func() {
 			mu.Lock()
 			closed++
@@ -586,7 +593,7 @@ func TestReloadClosesEveryTransport(t *testing.T) {
 	}
 	t.Cleanup(func() { dialTransport = prev })
 
-	sup := newSupervisor()
+	sup := newSupervisor(testDaemonPool(t.Context(), t))
 	var stopOnce sync.Once
 	stop := func() { stopOnce.Do(sup.stop) }
 	t.Cleanup(stop)

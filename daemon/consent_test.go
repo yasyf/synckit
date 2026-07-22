@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/yasyf/daemonkit/supervise"
+
 	"github.com/yasyf/synckit/consent"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/presence"
@@ -402,7 +404,7 @@ func TestConsentPresenceCLIPrintsWireSnapshot(t *testing.T) {
 func TestConsentDispatchesUnderParkedExclusive(t *testing.T) {
 	orig := buildConsentEngine
 	t.Cleanup(func() { buildConsentEngine = orig })
-	buildConsentEngine = func() *consent.Engine {
+	buildConsentEngine = func(supervise.TaskRunner) *consent.Engine {
 		return consent.NewEngine(staticSelf("me@self"), &fakeGate{}, staticProbe(presence.SessionSnapshot{}),
 			consent.NewRouter(&recordingRunner{}, consent.PresenceCommand), staticResolve())
 	}
@@ -415,7 +417,7 @@ func TestConsentDispatchesUnderParkedExclusive(t *testing.T) {
 		<-release
 		return nil, nil
 	})
-	registerConsent(d)
+	registerConsent(d, testDaemonPool(t.Context(), t))
 
 	go d.Dispatch(context.Background(), &rpc.Request{Method: "reconcile"})
 	<-entered

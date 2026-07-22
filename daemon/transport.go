@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/yasyf/daemonkit/supervise"
 	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/hostregistry"
@@ -26,17 +27,17 @@ var dialTransport = resolveTransport
 // socket to the resident helper (transport "socket") or the spawned consumer
 // binary's stdio (transport "stdio"). When peer is a remote host, it returns an
 // ssh transport that runs the consumer's rpc-serve command on that peer.
-func resolveTransport(m manifest.Manifest, peer, self string) syncservice.Transport {
+func resolveTransport(pool *supervise.Pool, m manifest.Manifest, peer, self string) syncservice.Transport {
 	if peer == self {
 		switch m.Service.Transport {
 		case "socket":
 			return syncservice.Socket(expandHome(m.Service.Sock))
 		case "stdio":
-			return syncservice.Stdio(m.Binary, m.Service.ServeArgs...)
+			return syncservice.Stdio(pool, m.Binary, m.Service.ServeArgs...)
 		}
 		panic("daemon: manifest " + m.Name + " has invalid local transport " + m.Service.Transport)
 	}
-	return syncservice.SSHStdio(peer, remoteServeCmd(m))
+	return syncservice.SSHStdio(pool, peer, remoteServeCmd(m))
 }
 
 // remoteServeCmd joins the consumer's rpc-serve invocation into a single shell

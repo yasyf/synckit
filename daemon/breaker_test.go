@@ -151,7 +151,7 @@ func (h *breakerHarness) noSnapshot(t *testing.T) {
 func newTestBreaker(ctx context.Context, t *testing.T, inner watch.Notifier[string], self string) (*breakerNotifier, *breakerHarness) {
 	t.Helper()
 	h := &breakerHarness{clock: time.Unix(0, 0), snaps: make(chan string, 16)}
-	b := newBreakerNotifier(ctx, inner, "stub", self)
+	b := newBreakerNotifier(ctx, inner, "stub", self, testDaemonPool(ctx, t))
 	b.now = h.nowFn()
 	b.afterFunc = h.armFn()
 	b.snapshot = h.snapFn()

@@ -5,14 +5,36 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/supervise"
 )
+
+func testTaskPool(t *testing.T) *supervise.Pool {
+	t.Helper()
+	reaper := &proc.Reaper{
+		Store:      &proc.FileStore{Path: filepath.Join(t.TempDir(), "processes.db")},
+		Generation: t.Name(),
+	}
+	pool, err := supervise.NewPool(4, reaper)
+	if err != nil {
+		t.Fatalf("new process pool: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		pool.Cancel()
+		if err := pool.Wait(context.Background()); err != nil {
+			t.Errorf("wait for process pool: %v", err)
+		}
+	})
+	return pool
+}
 
 // fakeSSH writes an executable ssh stand-in that logs the address it was invoked with
 // (the argv before the wrapped remote command) to logPath, then exits by token: 255
@@ -65,7 +87,7 @@ func TestExecSSHTriesAddrsInOrderOn255(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "attempts.log")
 	swapSSHBin(t, fakeSSH(t, logPath))
 
-	out, err := execSSHAddrs(context.Background(), []string{"me@connfail-lan", "me@good-tailnet"}, "echo hi", nil)
+	out, err := execSSHAddrs(context.Background(), testTaskPool(t), []string{"me@connfail-lan", "me@good-tailnet"}, "echo hi", nil)
 	if err != nil {
 		t.Fatalf("execSSHAddrs: %v", err)
 	}
@@ -118,7 +140,7 @@ func TestExecSSHDialBudgetBoundsDeadAddressFailover(t *testing.T) {
 
 	addrs := []string{"me@connfail-1", "me@connfail-2", "me@connfail-3", "me@connfail-4", "me@connfail-5", "me@connfail-final"}
 	start := time.Now()
-	_, err := execSSHAddrs(context.Background(), addrs, "echo hi", nil)
+	_, err := execSSHAddrs(context.Background(), testTaskPool(t), addrs, "echo hi", nil)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("execSSHAddrs succeeded, want the dial failure surfaced")
@@ -144,7 +166,7 @@ func TestExecSSHDialBudgetStillDialsCanonicalTarget(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "attempts.log")
 	swapSSHBin(t, slowConnfailSSH(t, logPath))
 
-	out, err := execSSHAddrs(context.Background(), []string{"me@connfail-1", "me@connfail-2", "me@connfail-3", "me@good-tailnet"}, "echo hi", nil)
+	out, err := execSSHAddrs(context.Background(), testTaskPool(t), []string{"me@connfail-1", "me@connfail-2", "me@connfail-3", "me@good-tailnet"}, "echo hi", nil)
 	if err != nil {
 		t.Fatalf("execSSHAddrs: %v (a spent budget must still dial the canonical target)", err)
 	}
@@ -164,7 +186,7 @@ func TestExecSSHRemoteFailureNeverFailsOver(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "attempts.log")
 	swapSSHBin(t, fakeSSH(t, logPath))
 
-	_, err := execSSHAddrs(context.Background(), []string{"me@remotefail-lan", "me@good-tailnet"}, "echo hi", nil)
+	_, err := execSSHAddrs(context.Background(), testTaskPool(t), []string{"me@remotefail-lan", "me@good-tailnet"}, "echo hi", nil)
 	if err == nil {
 		t.Fatal("execSSHAddrs succeeded, want the remote command's failure surfaced")
 	}
@@ -177,11 +199,8 @@ func TestExecSSHRemoteFailureNeverFailsOver(t *testing.T) {
 	}
 }
 
-// TestExecSSHKillsBackgroundedDescendantOnCtxCancel reproduces the WaitDelay overrun: a
-// fake ssh leader backgrounds a long-lived descendant that keeps our stdout/stderr pipes
-// open, then exits, so exec.CommandContext's own Cancel never fires (the leader is already
-// gone). Without the independent ctx watcher, Wait blocks on the pipe until WaitDelay (5s)
-// and the descendant survives; with it, a 100ms ctx SIGKILLs the whole group at once.
+// TestExecSSHKillsBackgroundedDescendantOnCtxCancel proves daemonkit settles a
+// pipe-holding descendant before a canceled task returns.
 func TestExecSSHKillsBackgroundedDescendantOnCtxCancel(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "descendant.pid")
 	script := "#!/bin/sh\n" +
@@ -201,13 +220,13 @@ func TestExecSSHKillsBackgroundedDescendantOnCtxCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err := execSSHAddrs(ctx, []string{"me@peer"}, "echo hi", nil)
+	_, err := execSSHAddrs(ctx, testTaskPool(t), []string{"me@peer"}, "echo hi", nil)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("execSSHAddrs succeeded, want the ctx-cancelled ssh failure")
 	}
 	if elapsed > time.Second {
-		t.Fatalf("execSSHAddrs took %s, want well under 1s (ctx cancel must SIGKILL the group, not wait out WaitDelay)", elapsed)
+		t.Fatalf("execSSHAddrs took %s, want well under 1s (daemonkit must settle the process session)", elapsed)
 	}
 
 	pid := 0
@@ -261,7 +280,7 @@ func TestExecSSHCtxCancelWithExitZeroLeaderReturnsCtxErr(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err := execSSHAddrs(ctx, []string{"me@peer-a", "me@peer-b"}, "echo hi", nil)
+	_, err := execSSHAddrs(ctx, testTaskPool(t), []string{"me@peer-a", "me@peer-b"}, "echo hi", nil)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("execSSHAddrs returned nil, want the cancelled op surfaced as an error")
@@ -270,7 +289,7 @@ func TestExecSSHCtxCancelWithExitZeroLeaderReturnsCtxErr(t *testing.T) {
 		t.Fatalf("error = %v, want it to wrap context.DeadlineExceeded", err)
 	}
 	if elapsed > time.Second {
-		t.Fatalf("execSSHAddrs took %s, want well under 1s (the deadline must SIGKILL the group, not wait out WaitDelay)", elapsed)
+		t.Fatalf("execSSHAddrs took %s, want well under 1s (the deadline must settle the process session)", elapsed)
 	}
 	if tried := attempts(t, logPath); len(tried) != 1 || tried[0] != "me@peer-a" {
 		t.Fatalf("addresses tried = %v, want only [me@peer-a] (a ctx error must not fail over)", tried)
@@ -311,21 +330,9 @@ func readDescendantPID(path string) int {
 	return pid
 }
 
-// shrinkWaitDelay points sshWaitDelay at d so a test that exercises the leader-exits-first
-// WaitDelay path runs fast, restoring it on cleanup.
-func shrinkWaitDelay(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := sshWaitDelay
-	sshWaitDelay = d
-	t.Cleanup(func() { sshWaitDelay = prev })
-}
-
-// TestExecSSHReapsSurvivingDescendantWhenLeaderExitsFirst covers the leak G2 fixes: a 255
-// leader backgrounds a descendant that holds our pipes and then exits, so the ctx watcher
-// never fires (ctx is live) and WaitDelay alone releases Wait. The unconditional post-Wait
-// group kill must reap the descendant, and the 255 must still fail over to the next address.
+// TestExecSSHReapsSurvivingDescendantWhenLeaderExitsFirst proves a completed
+// daemonkit task settles descendants before applying exit-255 failover.
 func TestExecSSHReapsSurvivingDescendantWhenLeaderExitsFirst(t *testing.T) {
-	shrinkWaitDelay(t, 150*time.Millisecond)
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "descendant.pid")
 	logPath := filepath.Join(dir, "attempts.log")
@@ -348,7 +355,7 @@ func TestExecSSHReapsSurvivingDescendantWhenLeaderExitsFirst(t *testing.T) {
 		}
 	})
 
-	out, err := execSSHAddrs(context.Background(), []string{"me@connfail-lan", "me@good-tailnet"}, "echo hi", nil)
+	out, err := execSSHAddrs(context.Background(), testTaskPool(t), []string{"me@connfail-lan", "me@good-tailnet"}, "echo hi", nil)
 	if err != nil {
 		t.Fatalf("execSSHAddrs: %v (a 255 leader must fail over to the next address)", err)
 	}
@@ -384,7 +391,7 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 		logPath := filepath.Join(t.TempDir(), "attempts.log")
 		swapSSHBin(t, fakeSSH(t, logPath))
 
-		_, err := execSSHAddrs(context.Background(), []string{"me@remotefail-lan"}, "echo hi", nil)
+		_, err := execSSHAddrs(context.Background(), testTaskPool(t), []string{"me@remotefail-lan"}, "echo hi", nil)
 		if err == nil {
 			t.Fatal("execSSHAddrs succeeded, want the remote failure surfaced")
 		}
@@ -398,9 +405,9 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 		if !strings.Contains(sshErr.Stderr, "remote boom") {
 			t.Fatalf("SSHError.Stderr = %q, want it to carry the remote stderr", sshErr.Stderr)
 		}
-		var ee *exec.ExitError
+		var ee *supervise.ExitError
 		if !errors.As(err, &ee) {
-			t.Fatalf("error %v does not unwrap to *exec.ExitError; isConnFailure would misjudge failover", err)
+			t.Fatalf("error %v does not unwrap to *supervise.ExitError; isConnFailure would misjudge failover", err)
 		}
 	})
 
@@ -414,7 +421,7 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
-		_, err := execSSHAddrs(ctx, []string{"me@peer"}, "echo hi", nil)
+		_, err := execSSHAddrs(ctx, testTaskPool(t), []string{"me@peer"}, "echo hi", nil)
 		if err == nil {
 			t.Fatal("execSSHAddrs succeeded, want the ctx-cancelled failure surfaced")
 		}
@@ -518,7 +525,7 @@ func TestExecSSHReturnsStdoutOnTerminalFailure(t *testing.T) {
 	}
 	swapSSHBin(t, path)
 
-	out, err := execSSHAddrs(context.Background(), []string{"me@peer"}, "brew install x", nil)
+	out, err := execSSHAddrs(context.Background(), testTaskPool(t), []string{"me@peer"}, "brew install x", nil)
 	if err == nil {
 		t.Fatal("execSSHAddrs succeeded, want the terminal failure surfaced")
 	}

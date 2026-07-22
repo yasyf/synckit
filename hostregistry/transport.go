@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
+
+	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/supervise"
 )
 
 // Runner executes commands locally and over SSH; the SSH/exec boundary tests mock.
@@ -16,22 +18,21 @@ type Runner interface {
 	SSH(ctx context.Context, target, remoteCmd string) (string, error)
 }
 
-// execRunner is the production Runner: Local shells out directly, SSH wraps the
-// remote command so it sources brew's shellenv (non-interactive ssh on macOS
-// lacks brew, and thus a brew-installed tool, on PATH).
-type execRunner struct{}
+// execRunner is the production Runner: Local and SSH execute through one
+// daemonkit task owner; SSH also sources brew's shellenv remotely.
+type execRunner struct{ runner supervise.TaskRunner }
 
 // NewExecRunner returns the default Runner that executes commands locally and over ssh.
-func NewExecRunner() Runner {
-	return execRunner{}
+func NewExecRunner(runner supervise.TaskRunner) Runner {
+	return execRunner{runner: runner}
 }
 
-func (execRunner) Local(ctx context.Context, name string, args ...string) (string, error) {
-	return runCmd(ctx, name, args...)
+func (r execRunner) Local(ctx context.Context, name string, args ...string) (string, error) {
+	return runCmd(ctx, r.runner, name, args...)
 }
 
-func (execRunner) SSH(ctx context.Context, target, remoteCmd string) (string, error) {
-	return ExecSSH(ctx, target, remoteCmd, nil)
+func (r execRunner) SSH(ctx context.Context, target, remoteCmd string) (string, error) {
+	return ExecSSH(ctx, r.runner, target, remoteCmd, nil)
 }
 
 // SSHArgv returns the full ssh argv that runs remoteCmd on target: the dial options
@@ -42,13 +43,19 @@ func SSHArgv(target, remoteCmd string) []string {
 	return append(append([]string{sshBin}, dialOpts...), target, brewWrap(remoteCmd))
 }
 
-func runCmd(ctx context.Context, name string, args ...string) (string, error) {
-	//nolint:gosec // G204: this is a CLI sync tool whose job is to run ssh/git; name and args come from trusted local state (registered hosts, repo config), not untrusted input.
-	cmd := exec.CommandContext(ctx, name, args...)
+func runCmd(ctx context.Context, runner supervise.TaskRunner, name string, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	err := runner.Run(ctx, supervise.Task{
+		RecoveryClass: proc.RecoveryTask,
+		Path:          name,
+		Args:          args,
+		Stdout:        &stdout,
+		Stderr:        &stderr,
+	})
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
 		return stdout.String(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil

@@ -7,10 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/supervise"
 )
 
 // sshConnFailureExit is the exit status ssh returns for its own connection failures;
@@ -20,10 +21,6 @@ const sshConnFailureExit = 255
 
 // sshBin is the ssh binary ExecSSH shells; a var so tests point it at a fake.
 var sshBin = "ssh"
-
-// sshWaitDelay bounds how long Wait blocks on the pipes after the ssh leader exits, so a
-// descendant that inherited them cannot wedge Wait forever; a var so tests shrink it.
-var sshWaitDelay = 5 * time.Second
 
 // sshDialBudget caps total failover time across dial addresses: once spent, the next
 // 255 skips straight to the final canonical target, so many dead recorded addresses
@@ -42,9 +39,9 @@ var dialOpts = []string{
 }
 
 // SSHError is the failure ExecSSH returns for every ssh attempt that does not succeed: a
-// remote command's non-zero exit, ssh's own 255 connection failure, or a ctx-cancel /
-// post-Wait group kill. Unwrap Err to reach the *exec.ExitError that isConnFailure keys
-// failover off; Stderr carries whatever the attempt captured (possibly empty).
+// remote command's non-zero exit, ssh's own 255 connection failure, or cancellation.
+// Unwrap Err to reach the typed ExitCode cause that isConnFailure keys failover off;
+// Stderr carries whatever the attempt captured (possibly empty).
 type SSHError struct {
 	Addr   string
 	Stderr string
@@ -71,9 +68,9 @@ func brewWrap(remoteCmd string) string {
 
 // ExecSSH runs remoteCmd on target over ssh, piping stdin when non-nil, and returns
 // its stdout. It is the one production ssh path: it dials the addresses DialAddrs
-// resolves for target in order — LAN/.local first, the tailnet FQDN last — and SIGKILLs
-// the whole process group on ctx cancel so no ssh helper that inherited our stdout pipe
-// outlives the deadline. Failover is exit-255-only: ssh returns 255 for its own
+// resolves for target in order — LAN/.local first, the tailnet FQDN last — through a
+// daemonkit task owner that settles the complete process session before returning.
+// Failover is exit-255-only: ssh returns 255 for its own
 // connection failures and passes the remote command's exit code (0-254) through, so
 // only an ssh-level failure advances to the next address; a remote command's own
 // non-zero exit fails immediately and is never re-run on another address — an address
@@ -85,13 +82,13 @@ func brewWrap(remoteCmd string) string {
 // addresses, keepalives that drop a dead peer); a connected command's runtime belongs
 // to the caller's ctx deadline — only the caller knows how long its command should take.
 // Every failing attempt surfaces as a [*SSHError] naming the dial address, its captured
-// stderr, and the unwrappable ssh exit cause.
-func ExecSSH(ctx context.Context, target, remoteCmd string, stdin []byte) (string, error) {
+// stderr, and the unwrappable typed exit cause.
+func ExecSSH(ctx context.Context, runner supervise.TaskRunner, target, remoteCmd string, stdin []byte) (string, error) {
 	addrs, err := DialAddrs(target)
 	if err != nil {
 		return "", err
 	}
-	return execSSHAddrs(ctx, addrs, remoteCmd, stdin)
+	return execSSHAddrs(ctx, runner, addrs, remoteCmd, stdin)
 }
 
 // execSSHAddrs dials each address in order, returning the first success and advancing
@@ -100,11 +97,17 @@ func ExecSSH(ctx context.Context, target, remoteCmd string, stdin []byte) (strin
 // final canonical target is dialed. On the terminal (non-failover) path it propagates
 // the attempt's [*SSHError] unchanged alongside its captured stdout, so a caller like
 // remoteBrewInstall can read brew's "no available formula" message off stdout.
-func execSSHAddrs(ctx context.Context, addrs []string, remoteCmd string, stdin []byte) (string, error) {
+func execSSHAddrs(
+	ctx context.Context,
+	runner supervise.TaskRunner,
+	addrs []string,
+	remoteCmd string,
+	stdin []byte,
+) (string, error) {
 	start := time.Now()
 	var lastErr error
 	for i := 0; i < len(addrs); i++ {
-		out, err := execSSHOnce(ctx, addrs[i], remoteCmd, stdin)
+		out, err := execSSHOnce(ctx, runner, addrs[i], remoteCmd, stdin)
 		if err == nil {
 			return out, nil
 		}
@@ -120,52 +123,30 @@ func execSSHAddrs(ctx context.Context, addrs []string, remoteCmd string, stdin [
 	return "", lastErr
 }
 
-// execSSHOnce runs one ssh attempt to addr with the process-group-kill mechanics: on
-// ctx cancel it SIGKILLs the whole group so a helper holding our stdout pipe dies too,
-// WaitDelay force-closes the pipes as a backstop, and after Wait it unconditionally
-// SIGKILLs the group so no descendant outlives the call. Every failure returns a
+// execSSHOnce runs one durably owned ssh attempt to addr. Every failure returns a
 // [*SSHError].
-func execSSHOnce(ctx context.Context, addr, remoteCmd string, stdin []byte) (string, error) {
+func execSSHOnce(
+	ctx context.Context,
+	runner supervise.TaskRunner,
+	addr, remoteCmd string,
+	stdin []byte,
+) (string, error) {
 	args := append(append([]string{}, dialOpts...), addr, brewWrap(remoteCmd))
-	cmd := exec.CommandContext(ctx, sshBin, args...) //nolint:gosec // G204: this sync tool's job is to run ssh; addr/remoteCmd come from trusted local state (registered hosts), not untrusted input.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
-		}
-		return err
-	}
-	cmd.WaitDelay = sshWaitDelay
-	if stdin != nil {
-		cmd.Stdin = bytes.NewReader(stdin)
+	input, err := taskInput(stdin)
+	if err != nil {
+		return "", &SSHError{Addr: addr, Err: err}
 	}
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return "", &SSHError{Addr: addr, Stderr: stderr.String(), Err: err}
-	}
-	// The watcher records ctxKilled before killing the group so the post-Wait join reads it
-	// consistently; the unconditional kill then reaps a descendant that outlived the leader.
-	ctxKilled := false
-	done := make(chan struct{})
-	watched := make(chan struct{})
-	go func() {
-		defer close(watched)
-		select {
-		case <-ctx.Done():
-			ctxKilled = true
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // best-effort; ESRCH is done
-		case <-done:
-		}
-	}()
-	err := cmd.Wait()
-	close(done)
-	<-watched
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // best-effort backstop; ESRCH is done
-	if ctxKilled {
-		return stdout.String(), &SSHError{Addr: addr, Stderr: stderr.String(), Err: ctx.Err()}
+	err = runner.Run(ctx, supervise.Task{
+		RecoveryClass: proc.RecoveryTask,
+		Path:          sshBin,
+		Args:          args,
+		Stdin:         input,
+		Stdout:        &stdout,
+		Stderr:        &stderr,
+	})
+	if err == nil {
+		err = ctx.Err()
 	}
 	if err != nil {
 		return stdout.String(), &SSHError{Addr: addr, Stderr: stderr.String(), Err: err}
@@ -173,11 +154,31 @@ func execSSHOnce(ctx context.Context, addr, remoteCmd string, stdin []byte) (str
 	return stdout.String(), nil
 }
 
+func taskInput(payload []byte) (*os.File, error) {
+	if payload == nil {
+		return nil, nil
+	}
+	input, err := os.CreateTemp("", "synckit-task-input-*")
+	if err != nil {
+		return nil, fmt.Errorf("create task input: %w", err)
+	}
+	_ = os.Remove(input.Name())
+	if _, err := input.Write(payload); err != nil {
+		_ = input.Close()
+		return nil, fmt.Errorf("write task input: %w", err)
+	}
+	if _, err := input.Seek(0, 0); err != nil {
+		_ = input.Close()
+		return nil, fmt.Errorf("rewind task input: %w", err)
+	}
+	return input, nil
+}
+
 // isConnFailure reports whether err is ssh's own connection failure (exit 255), the
 // only failure ExecSSH fails over on. A remote command's exit code (0-254) or a signal
 // kill is not a connection failure.
 func isConnFailure(err error) bool {
-	var ee *exec.ExitError
+	var ee interface{ ExitCode() int }
 	if errors.As(err, &ee) {
 		return ee.ExitCode() == sshConnFailureExit
 	}

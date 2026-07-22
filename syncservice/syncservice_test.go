@@ -14,9 +14,37 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/supervise"
+
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/rpc"
 )
+
+func testSessionPool(t *testing.T) *supervise.Pool {
+	t.Helper()
+	reaper := &proc.Reaper{
+		Store:      &proc.FileStore{Path: filepath.Join(t.TempDir(), "processes.db")},
+		Generation: t.Name(),
+	}
+	pool, err := supervise.NewPool(4, reaper)
+	if err != nil {
+		t.Fatalf("new process pool: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		pool.Cancel()
+		if err := pool.Wait(context.Background()); err != nil {
+			t.Errorf("wait for process pool: %v", err)
+		}
+	})
+	return pool
+}
+
+func testCmdTransport(t *testing.T, candidates [][]string) *cmdTransport {
+	t.Helper()
+	return &cmdTransport{pool: testSessionPool(t), candidates: candidates}
+}
 
 // stateJSON is a registry literal with a 16-digit int64 added_at stamp. A correct
 // round trip preserves these bytes exactly; decoding through any would render the
@@ -185,7 +213,7 @@ func TestHandlerErrorSurfaces(t *testing.T) {
 func TestStdioTransportClosedRejectsDo(t *testing.T) {
 	// A bogus binary so a Do that slipped past the closed guard would visibly
 	// fail at spawn instead; the guard must short-circuit before start().
-	tx := Stdio(filepath.Join(t.TempDir(), "never-spawned"))
+	tx := Stdio(testSessionPool(t), filepath.Join(t.TempDir(), "never-spawned"))
 	if err := tx.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -210,7 +238,7 @@ func TestStdioTransportRealSubprocess(t *testing.T) {
 		t.Fatalf("build rpcstub: %v\n%s", err, out)
 	}
 
-	tx := Stdio(bin)
+	tx := Stdio(testSessionPool(t), bin)
 	c := NewClient(tx)
 	ctx := context.Background()
 
@@ -255,7 +283,7 @@ func TestStdioTransportRealSubprocess(t *testing.T) {
 // nil dereference in the field.
 func TestStdioTransportCtxTimeout(t *testing.T) {
 	noBackoff(t)
-	tx := Stdio("sleep", "9999")
+	tx := Stdio(testSessionPool(t), "sleep", "9999")
 	t.Cleanup(func() { _ = tx.Close() })
 
 	for range 25 {
@@ -290,7 +318,7 @@ func TestStdioTransportResetRaceSoak(t *testing.T) {
 	defer close(stop)
 
 	noBackoff(t)
-	tx := Stdio("sleep", "9999")
+	tx := Stdio(testSessionPool(t), "sleep", "9999")
 	t.Cleanup(func() { _ = tx.Close() })
 
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
@@ -321,7 +349,7 @@ func TestCmdTransportBackoffAfterConsecutiveResets(t *testing.T) {
 	transportBackoffMax = 400 * time.Millisecond
 	t.Cleanup(func() { transportBackoffBase, transportBackoffMax = prevBase, prevMax })
 
-	tr := &cmdTransport{candidates: [][]string{{"false"}}}
+	tr := testCmdTransport(t, [][]string{{"false"}})
 	t.Cleanup(func() { _ = tr.Close() })
 	ctx := context.Background()
 	req := &rpc.Request{Method: MethodCapabilities}
@@ -357,15 +385,15 @@ func TestCmdTransportReconnectsNextOperationToWorkingCandidate(t *testing.T) {
 		t.Fatalf("build rpcstub: %v\n%s", err, out)
 	}
 
-	tr := &cmdTransport{candidates: [][]string{{"false"}, {bin}}}
+	tr := testCmdTransport(t, [][]string{{"false"}, {bin}})
 	t.Cleanup(func() { _ = tr.Close() })
 
 	c := NewClient(tr)
 	if _, err := c.Capabilities(context.Background()); err == nil {
 		t.Fatal("Capabilities on dead candidate succeeded, want the first operation returned exactly once")
 	}
-	if tr.idx != 1 || tr.cmd != nil {
-		t.Fatalf("after first operation idx=%d cmd==nil:%v, want candidate 1 selected but not spawned", tr.idx, tr.cmd == nil)
+	if tr.idx != 1 || tr.session != nil {
+		t.Fatalf("after first operation idx=%d session==nil:%v, want candidate 1 selected but not spawned", tr.idx, tr.session == nil)
 	}
 
 	caps, err := c.Capabilities(context.Background())
@@ -375,8 +403,8 @@ func TestCmdTransportReconnectsNextOperationToWorkingCandidate(t *testing.T) {
 	if caps.Name != "stub" {
 		t.Fatalf("name = %q, want stub (the second candidate answered)", caps.Name)
 	}
-	if tr.idx != 1 || tr.cmd == nil {
-		t.Fatalf("idx=%d cmd==nil:%v, want a live child pinned to candidate 1", tr.idx, tr.cmd == nil)
+	if tr.idx != 1 || tr.session == nil {
+		t.Fatalf("idx=%d session==nil:%v, want a live child pinned to candidate 1", tr.idx, tr.session == nil)
 	}
 }
 
@@ -403,7 +431,7 @@ func TestCmdTransportPreSendFailureAdvancesOnlyNextOperation(t *testing.T) {
 	partial := buildStub(t, "partialstub")
 	canary, spawns := failingSpawnCandidate(t)
 
-	tr := &cmdTransport{candidates: [][]string{{partial}, canary}}
+	tr := testCmdTransport(t, [][]string{{partial}, canary})
 	t.Cleanup(func() { _ = tr.Close() })
 
 	_, err := tr.Do(context.Background(), &rpc.Request{Method: MethodCapabilities})
@@ -426,7 +454,7 @@ func TestSSHStdioResolvesAddrsAtSpawnNotConstruction(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	peer := "me@node.tail.ts.net"
 
-	tx := SSHStdio(peer, "cookiesync rpc whoami")
+	tx := SSHStdio(testSessionPool(t), peer, "cookiesync rpc whoami")
 	if err := hostregistry.Mesh.AddAddr(context.Background(), peer, "me@node.local"); err != nil {
 		t.Fatalf("AddAddr: %v", err)
 	}
@@ -458,7 +486,7 @@ func TestSSHStdioPoisonedAddrsSurfacesErrorFromDo(t *testing.T) {
 		t.Fatalf("poison addrs: %v", err)
 	}
 
-	tx := SSHStdio("me@node.tail.ts.net", "cookiesync rpc whoami")
+	tx := SSHStdio(testSessionPool(t), "me@node.tail.ts.net", "cookiesync rpc whoami")
 	t.Cleanup(func() { _ = tx.Close() })
 
 	_, err := tx.Do(context.Background(), &rpc.Request{Method: MethodCapabilities})
@@ -497,7 +525,7 @@ func TestCmdTransportBackoffResetsAfterSuccess(t *testing.T) {
 	failing, spawns := failingSpawnCandidate(t)
 	working := buildStub(t, "rpcstub")
 
-	tr := &cmdTransport{candidates: [][]string{failing}}
+	tr := testCmdTransport(t, [][]string{failing})
 	t.Cleanup(func() { _ = tr.Close() })
 	ctx := context.Background()
 	req := &rpc.Request{Method: MethodCapabilities}
@@ -544,7 +572,7 @@ func TestCmdTransportBackoffGrowsAndCaps(t *testing.T) {
 	t.Cleanup(func() { transportBackoffBase, transportBackoffMax = prevBase, prevMax })
 
 	failing, spawns := failingSpawnCandidate(t)
-	tr := &cmdTransport{candidates: [][]string{failing}}
+	tr := testCmdTransport(t, [][]string{failing})
 	t.Cleanup(func() { _ = tr.Close() })
 	ctx := context.Background()
 	req := &rpc.Request{Method: MethodCapabilities}
@@ -597,7 +625,7 @@ func TestCmdTransportCtxTimeoutAfterFirstByteNoFailover(t *testing.T) {
 	hang := buildStub(t, "hangstub")
 	canary, spawns := failingSpawnCandidate(t)
 
-	tr := &cmdTransport{candidates: [][]string{{hang}, canary}}
+	tr := testCmdTransport(t, [][]string{{hang}, canary})
 	t.Cleanup(func() { _ = tr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -620,7 +648,7 @@ func TestCmdTransportDoneCtxTerminalNoSecondCandidate(t *testing.T) {
 	noBackoff(t)
 	first, firstSpawns := failingSpawnCandidate(t)
 	canary, canarySpawns := failingSpawnCandidate(t)
-	tr := &cmdTransport{candidates: [][]string{first, canary}}
+	tr := testCmdTransport(t, [][]string{first, canary})
 	t.Cleanup(func() { _ = tr.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -649,7 +677,7 @@ func TestCmdTransportSpawnFailureArmsBackoff(t *testing.T) {
 	t.Cleanup(func() { transportBackoffBase, transportBackoffMax = prevBase, prevMax })
 
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	tr := &cmdTransport{candidates: [][]string{{missing}}}
+	tr := testCmdTransport(t, [][]string{{missing}})
 	t.Cleanup(func() { _ = tr.Close() })
 	ctx := context.Background()
 	req := &rpc.Request{Method: MethodCapabilities}
@@ -686,13 +714,13 @@ func TestUnknownMethodReturnsErrorResponse(t *testing.T) {
 
 // TestCmdTransportResetKillsBackgroundedDescendant reproduces the orphan leak: a tunnel
 // child backgrounds a descendant that inherits the framing pipes and records its pid, then
-// both wedge. A Do timeout drives reset(), which must SIGKILL the whole process group so the
-// descendant dies too — a leader-only kill would leave it orphaned.
+// both wedge. A Do timeout drives reset(), which must settle the whole daemonkit process
+// session so the descendant dies too — leader-only ownership would leave it orphaned.
 func TestCmdTransportResetKillsBackgroundedDescendant(t *testing.T) {
 	noBackoff(t)
 	pidFile := filepath.Join(t.TempDir(), "descendant.pid")
 	script := "sh -c 'echo $$ > " + pidFile + "; exec sleep 30' &\nexec sleep 30\n"
-	tr := &cmdTransport{candidates: [][]string{{"/bin/sh", "-c", script}}}
+	tr := testCmdTransport(t, [][]string{{"/bin/sh", "-c", script}})
 	t.Cleanup(func() { _ = tr.Close() })
 	t.Cleanup(func() {
 		if pid := readDescendantPID(pidFile); pid > 0 {
@@ -721,7 +749,7 @@ func TestCmdTransportResetKillsBackgroundedDescendant(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("descendant pid %d still alive; reset must SIGKILL the whole process group", pid)
+			t.Fatalf("descendant pid %d still alive; reset must settle the whole process session", pid)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
