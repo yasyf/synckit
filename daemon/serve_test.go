@@ -439,6 +439,7 @@ func TestEngineEventDrivesLocalSync(t *testing.T) {
 }
 
 func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
+	testDaemonRoleAlias(t)
 	cfgHome, err := os.MkdirTemp("", "skd")
 	if err != nil {
 		t.Fatalf("mkdir config home: %v", err)
