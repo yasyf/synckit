@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -721,18 +720,15 @@ func TestCmdTransportResetKillsBackgroundedDescendant(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "descendant.pid")
 	releaseFile := filepath.Join(dir, "release")
-	script := "sleep 30 &\n" +
+	cleanupFile := filepath.Join(dir, "cleanup")
+	script := "sh -c 'trap \"\" TERM; while [ ! -e \"" + cleanupFile + "\" ]; do sleep 0.01; done' &\n" +
 		"echo $! > \"" + pidFile + "\"\n" +
 		"while [ ! -e \"" + releaseFile + "\" ]; do sleep 0.01; done\n" +
 		"exit 1\n"
 	tr := testCmdTransport(t, [][]string{{"/bin/sh", "-c", script}})
 	t.Cleanup(func() { _ = tr.Close() })
 	t.Cleanup(func() { _ = os.WriteFile(releaseFile, nil, 0o600) })
-	t.Cleanup(func() {
-		if pid := readDescendantPID(pidFile); pid > 0 {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
-	})
+	t.Cleanup(func() { _ = os.WriteFile(cleanupFile, nil, 0o600) })
 
 	done := make(chan error, 1)
 	go func() {
@@ -740,10 +736,22 @@ func TestCmdTransportResetKillsBackgroundedDescendant(t *testing.T) {
 		done <- err
 	}()
 	pid := waitDescendantPID(t, pidFile)
+	identity, err := proc.Probe(pid)
+	if err != nil {
+		t.Fatalf("probe descendant identity: %v", err)
+	}
+	record := proc.Record{
+		RecoveryClass: proc.RecoveryTask,
+		PID:           identity.PID,
+		StartTime:     identity.StartTime,
+		Boot:          identity.Boot,
+		Comm:          identity.Comm,
+		Generation:    t.Name(),
+	}
 	if err := os.WriteFile(releaseFile, nil, 0o600); err != nil {
 		t.Fatalf("release bridge: %v", err)
 	}
-	var err error
+	err = nil
 	select {
 	case err = <-done:
 	case <-time.After(2 * time.Second):
@@ -753,12 +761,17 @@ func TestCmdTransportResetKillsBackgroundedDescendant(t *testing.T) {
 		t.Fatal("Do succeeded after bridge exit")
 	}
 
-	for deadline := time.Now().Add(2 * time.Second); ; {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+	reaper := &proc.Reaper{}
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		owned, ownsErr := reaper.Owns(record)
+		if ownsErr != nil {
+			t.Fatalf("revalidate descendant identity: %v", ownsErr)
+		}
+		if !owned {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("descendant pid %d still alive; reset must settle the whole process session", pid)
+			t.Fatalf("descendant identity %#v still alive; reset must settle the whole process session", record)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

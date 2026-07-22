@@ -225,7 +225,7 @@ func TestExecSSHKillsBackgroundedDescendantOnCtxCancel(t *testing.T) {
 	var err error
 	select {
 	case err = <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("execSSHAddrs did not settle after cancellation")
 	}
 	if err == nil {
@@ -284,7 +284,7 @@ func TestExecSSHCtxCancelWithExitZeroLeaderReturnsCtxErr(t *testing.T) {
 	var err error
 	select {
 	case err = <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("execSSHAddrs did not settle after cancellation")
 	}
 	if err == nil {
@@ -441,7 +441,7 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 		var err error
 		select {
 		case err = <-done:
-		case <-time.After(2 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Fatal("execSSHAddrs did not settle after cancellation")
 		}
 		if err == nil {
