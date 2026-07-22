@@ -204,7 +204,8 @@ func TestExecSSHRemoteFailureNeverFailsOver(t *testing.T) {
 func TestExecSSHKillsBackgroundedDescendantOnCtxCancel(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "descendant.pid")
 	script := "#!/bin/sh\n" +
-		"sh -c 'echo $$ > " + pidFile + "; exec sleep 30' &\n" +
+		"sleep 30 &\n" +
+		"echo $! > " + pidFile + "\n" +
 		"exit 255\n"
 	bin := filepath.Join(t.TempDir(), "fake-ssh")
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil { //nolint:gosec // G306: an executable test stub must be +x.
@@ -264,7 +265,8 @@ func TestExecSSHCtxCancelWithExitZeroLeaderReturnsCtxErr(t *testing.T) {
 		"a2=\"\"; a1=\"\"\n" +
 		"for a in \"$@\"; do a2=\"$a1\"; a1=\"$a\"; done\n" +
 		"printf '%s\\n' \"$a2\" >> \"" + logPath + "\"\n" +
-		"sh -c 'echo $$ > " + pidFile + "; exec sleep 30' &\n" +
+		"sleep 30 &\n" +
+		"echo $! > " + pidFile + "\n" +
 		"exit 0\n"
 	bin := filepath.Join(dir, "fake-ssh")
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil { //nolint:gosec // G306: an executable test stub must be +x.
