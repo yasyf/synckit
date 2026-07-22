@@ -714,36 +714,45 @@ func TestUnknownMethodReturnsErrorResponse(t *testing.T) {
 
 // TestCmdTransportResetKillsBackgroundedDescendant reproduces the orphan leak: a tunnel
 // child backgrounds a descendant that inherits the framing pipes and records its pid, then
-// both wedge. A Do timeout drives reset(), which must settle the whole daemonkit process
+// both wedge. A bridge failure drives reset(), which must settle the whole daemonkit process
 // session so the descendant dies too — leader-only ownership would leave it orphaned.
 func TestCmdTransportResetKillsBackgroundedDescendant(t *testing.T) {
 	noBackoff(t)
-	pidFile := filepath.Join(t.TempDir(), "descendant.pid")
-	script := "sh -c 'echo $$ > " + pidFile + "; exec sleep 30' &\nexec sleep 30\n"
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "descendant.pid")
+	releaseFile := filepath.Join(dir, "release")
+	script := "sleep 30 &\n" +
+		"echo $! > \"" + pidFile + "\"\n" +
+		"while [ ! -e \"" + releaseFile + "\" ]; do sleep 0.01; done\n" +
+		"exit 1\n"
 	tr := testCmdTransport(t, [][]string{{"/bin/sh", "-c", script}})
 	t.Cleanup(func() { _ = tr.Close() })
+	t.Cleanup(func() { _ = os.WriteFile(releaseFile, nil, 0o600) })
 	t.Cleanup(func() {
 		if pid := readDescendantPID(pidFile); pid > 0 {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
-	if _, err := tr.Do(ctx, &rpc.Request{Method: MethodCapabilities}); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Do = %v, want context.DeadlineExceeded (the child never answers)", err)
+	done := make(chan error, 1)
+	go func() {
+		_, err := tr.Do(context.Background(), &rpc.Request{Method: MethodCapabilities})
+		done <- err
+	}()
+	pid := waitDescendantPID(t, pidFile)
+	if err := os.WriteFile(releaseFile, nil, 0o600); err != nil {
+		t.Fatalf("release bridge: %v", err)
+	}
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Do did not settle after bridge exit")
+	}
+	if err == nil {
+		t.Fatal("Do succeeded after bridge exit")
 	}
 
-	pid := 0
-	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
-		if pid = readDescendantPID(pidFile); pid > 0 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if pid <= 0 {
-		t.Fatal("tunnel child never recorded its descendant pid")
-	}
 	for deadline := time.Now().Add(2 * time.Second); ; {
 		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
 			break
@@ -767,4 +776,16 @@ func readDescendantPID(path string) int {
 		return 0
 	}
 	return pid
+}
+
+func waitDescendantPID(t *testing.T, path string) int {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if pid := readDescendantPID(path); pid > 0 {
+			return pid
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("tunnel child never recorded its descendant pid")
+	return 0
 }
