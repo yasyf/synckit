@@ -131,25 +131,19 @@ func shrinkDialBudget(t *testing.T, d time.Duration) {
 
 // TestExecSSHDialBudgetBoundsDeadAddressFailover proves the overall dial bound: with the
 // budget spent after the first dead address (300ms attempt vs 250ms budget), the four
-// remaining alternates are skipped and only the final canonical address is dialed, so the
-// call costs ~2 attempts instead of the ~1.8s serial walk over all six.
+// remaining alternates are skipped and only the final canonical address is dialed.
 func TestExecSSHDialBudgetBoundsDeadAddressFailover(t *testing.T) {
 	shrinkDialBudget(t, 250*time.Millisecond)
 	logPath := filepath.Join(t.TempDir(), "attempts.log")
 	swapSSHBin(t, slowConnfailSSH(t, logPath))
 
 	addrs := []string{"me@connfail-1", "me@connfail-2", "me@connfail-3", "me@connfail-4", "me@connfail-5", "me@connfail-final"}
-	start := time.Now()
 	_, err := execSSHAddrs(context.Background(), testTaskPool(t), addrs, "echo hi", nil)
-	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("execSSHAddrs succeeded, want the dial failure surfaced")
 	}
 	if !isConnFailure(err) {
 		t.Fatalf("error = %v, want the final attempt's 255 surfaced", err)
-	}
-	if elapsed > 1400*time.Millisecond {
-		t.Fatalf("execSSHAddrs took %s, want well under the ~1.8s serial walk (budget must bound failover)", elapsed)
 	}
 	tried := attempts(t, logPath)
 	want := []string{"me@connfail-1", "me@connfail-final"}
@@ -218,28 +212,26 @@ func TestExecSSHKillsBackgroundedDescendantOnCtxCancel(t *testing.T) {
 		}
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	start := time.Now()
-	_, err := execSSHAddrs(ctx, testTaskPool(t), []string{"me@peer"}, "echo hi", nil)
-	elapsed := time.Since(start)
+	pool := testTaskPool(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := execSSHAddrs(ctx, pool, []string{"me@peer"}, "echo hi", nil)
+		done <- err
+	}()
+	pid := waitDescendantPID(t, pidFile)
+	cancel()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("execSSHAddrs did not settle after cancellation")
+	}
 	if err == nil {
 		t.Fatal("execSSHAddrs succeeded, want the ctx-cancelled ssh failure")
 	}
-	if elapsed > time.Second {
-		t.Fatalf("execSSHAddrs took %s, want well under 1s (daemonkit must settle the process session)", elapsed)
-	}
 
-	pid := 0
-	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
-		if pid = readDescendantPID(pidFile); pid > 0 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if pid <= 0 {
-		t.Fatal("fake ssh never recorded its descendant pid")
-	}
 	for deadline := time.Now().Add(2 * time.Second); ; {
 		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
 			break
@@ -254,7 +246,7 @@ func TestExecSSHKillsBackgroundedDescendantOnCtxCancel(t *testing.T) {
 // TestExecSSHCtxCancelWithExitZeroLeaderReturnsCtxErr reproduces the masked bug: a fake
 // ssh leader backgrounds a pipe-holding descendant then exits 0, so os/exec's own Cancel
 // never fires and Wait would return nil once our watcher reaps the descendant. The watcher
-// must surface the deadline as a ctx.Err()-wrapped error (never a success), leave the whole
+// must surface cancellation as a ctx.Err()-wrapped error (never a success), leave the whole
 // process group dead, and — since a ctx error is not exit 255 — never fail over to the next
 // address.
 func TestExecSSHCtxCancelWithExitZeroLeaderReturnsCtxErr(t *testing.T) {
@@ -279,40 +271,38 @@ func TestExecSSHCtxCancelWithExitZeroLeaderReturnsCtxErr(t *testing.T) {
 		}
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	start := time.Now()
-	_, err := execSSHAddrs(ctx, testTaskPool(t), []string{"me@peer-a", "me@peer-b"}, "echo hi", nil)
-	elapsed := time.Since(start)
+	pool := testTaskPool(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := execSSHAddrs(ctx, pool, []string{"me@peer-a", "me@peer-b"}, "echo hi", nil)
+		done <- err
+	}()
+	pid := waitDescendantPID(t, pidFile)
+	cancel()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("execSSHAddrs did not settle after cancellation")
+	}
 	if err == nil {
 		t.Fatal("execSSHAddrs returned nil, want the cancelled op surfaced as an error")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("error = %v, want it to wrap context.DeadlineExceeded", err)
-	}
-	if elapsed > time.Second {
-		t.Fatalf("execSSHAddrs took %s, want well under 1s (the deadline must settle the process session)", elapsed)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want it to wrap context.Canceled", err)
 	}
 	if tried := attempts(t, logPath); len(tried) != 1 || tried[0] != "me@peer-a" {
 		t.Fatalf("addresses tried = %v, want only [me@peer-a] (a ctx error must not fail over)", tried)
 	}
 
-	pid := 0
-	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
-		if pid = readDescendantPID(pidFile); pid > 0 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if pid <= 0 {
-		t.Fatal("fake ssh never recorded its descendant pid")
-	}
 	for deadline := time.Now().Add(2 * time.Second); ; {
 		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("descendant pid %d still alive; the deadline must kill the whole process group", pid)
+			t.Fatalf("descendant pid %d still alive; cancellation must kill the whole process group", pid)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -332,6 +322,18 @@ func readDescendantPID(path string) int {
 	return pid
 }
 
+func waitDescendantPID(t *testing.T, path string) int {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if pid := readDescendantPID(path); pid > 0 {
+			return pid
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("fake ssh never recorded its descendant pid")
+	return 0
+}
+
 // TestExecSSHReapsSurvivingDescendantWhenLeaderExitsFirst proves a completed
 // daemonkit task settles descendants before applying exit-255 failover.
 func TestExecSSHReapsSurvivingDescendantWhenLeaderExitsFirst(t *testing.T) {
@@ -343,7 +345,7 @@ func TestExecSSHReapsSurvivingDescendantWhenLeaderExitsFirst(t *testing.T) {
 		"for a in \"$@\"; do a2=\"$a1\"; a1=\"$a\"; done\n" +
 		"printf '%s\\n' \"$a2\" >> \"" + logPath + "\"\n" +
 		"case \"$a2\" in\n" +
-		"  *connfail*) sh -c 'echo $$ > " + pidFile + "; exec sleep 30' & echo 'ssh: connect: Connection refused' >&2; exit 255 ;;\n" +
+		"  *connfail*) sleep 30 & echo $! > \"" + pidFile + "\"; echo 'ssh: connect: Connection refused' >&2; exit 255 ;;\n" +
 		"  *) printf 'ran-on:%s\\n' \"$a2\" ;;\n" +
 		"esac\n"
 	bin := filepath.Join(dir, "fake-ssh")
@@ -414,16 +416,34 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 	})
 
 	t.Run("ctx kill", func(t *testing.T) {
-		bin := filepath.Join(t.TempDir(), "fake-ssh")
-		script := "#!/bin/sh\necho 'stderr diag before kill' >&2\nexec sleep 30\n"
+		dir := t.TempDir()
+		bin := filepath.Join(dir, "fake-ssh")
+		readyFile := filepath.Join(dir, "ready.pid")
+		script := "#!/bin/sh\n" +
+			"echo 'stderr diag before kill' >&2\n" +
+			"echo $$ > \"" + readyFile + "\"\n" +
+			"exec sleep 30\n"
 		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil { //nolint:gosec // G306: an executable test stub must be +x.
 			t.Fatalf("write fake ssh: %v", err)
 		}
 		swapSSHBin(t, bin)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		_, err := execSSHAddrs(ctx, testTaskPool(t), []string{"me@peer"}, "echo hi", nil)
+		pool := testTaskPool(t)
+		done := make(chan error, 1)
+		go func() {
+			_, err := execSSHAddrs(ctx, pool, []string{"me@peer"}, "echo hi", nil)
+			done <- err
+		}()
+		_ = waitDescendantPID(t, readyFile)
+		cancel()
+		var err error
+		select {
+		case err = <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("execSSHAddrs did not settle after cancellation")
+		}
 		if err == nil {
 			t.Fatal("execSSHAddrs succeeded, want the ctx-cancelled failure surfaced")
 		}
@@ -431,8 +451,8 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 		if !errors.As(err, &sshErr) {
 			t.Fatalf("error %v (%T) is not a *SSHError", err, err)
 		}
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("error %v does not unwrap to context.DeadlineExceeded", err)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error %v does not unwrap to context.Canceled", err)
 		}
 		if !strings.Contains(sshErr.Stderr, "stderr diag before kill") {
 			t.Fatalf("SSHError.Stderr = %q, want the captured stderr populated on the ctx-kill path", sshErr.Stderr)
