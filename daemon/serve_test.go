@@ -51,6 +51,7 @@ func TestRuntimeRPCServerProtectsLifecycleCapacity(t *testing.T) {
 
 func TestServePublishesReleaseBuildAfterActivation(t *testing.T) {
 	shortConfigHome(t)
+	testDaemonRoleAlias(t)
 	sock, err := hostregistry.Mesh.SockPath()
 	if err != nil {
 		t.Fatalf("socket path: %v", err)
@@ -100,6 +101,21 @@ func TestServePublishesReleaseBuildAfterActivation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not settle after cancellation")
 	}
+}
+
+func testDaemonRoleAlias(t *testing.T) string {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	dir := t.TempDir()
+	alias := filepath.Join(dir, daemonBinary)
+	if err := os.Symlink(executable, alias); err != nil {
+		t.Fatalf("link daemon role: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	return alias
 }
 
 // fakeConsumer is an in-process SyncConsumer that records what it is asked so a

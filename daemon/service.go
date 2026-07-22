@@ -13,16 +13,18 @@ import (
 )
 
 const (
-	labelPrefix = "com.github.yasyf.synckit"
+	labelPrefix  = "com.github.yasyf.synckit"
+	daemonBinary = "synckitd"
 
 	reconcileInterval = 15 * time.Minute
 	daemonPATH        = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 )
 
 // serviceAgents builds the exact launchd policy owned by synckitd.
-func serviceAgents(manifests []manifest.Manifest, executable string) ([]dkservice.Agent, error) {
-	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
-		return nil, fmt.Errorf("synckit service executable %q is not exact and absolute", executable)
+func serviceAgents(manifests []manifest.Manifest) ([]dkservice.Agent, error) {
+	executable, err := dkservice.CanonicalExecutable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve canonical synckitd executable: %w", err)
 	}
 	logPath := func(label string) (string, error) {
 		home, err := os.UserHomeDir()
@@ -64,12 +66,9 @@ func serviceAgents(manifests []manifest.Manifest, executable string) ([]dkservic
 		if m.Helper == nil {
 			continue
 		}
-		program, err := exec.LookPath(m.Binary)
+		program, err := canonicalHelperProgram(m.Binary)
 		if err != nil {
-			return nil, fmt.Errorf("resolve helper binary %q: %w", m.Binary, err)
-		}
-		if !filepath.IsAbs(program) || filepath.Clean(program) != program {
-			return nil, fmt.Errorf("helper binary %q resolved to non-exact path %q", m.Binary, program)
+			return nil, err
 		}
 		session, err := serviceSessionType(m.Helper.SessionType)
 		if err != nil {
@@ -84,6 +83,33 @@ func serviceAgents(manifests []manifest.Manifest, executable string) ([]dkservic
 		agents = append(agents, helper)
 	}
 	return agents, nil
+}
+
+func executableAlias(binary string) (string, error) {
+	alias, err := exec.LookPath(binary)
+	if err != nil {
+		return "", fmt.Errorf("resolve executable alias %q: %w", binary, err)
+	}
+	alias, err = filepath.Abs(alias)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute executable alias %q: %w", binary, err)
+	}
+	return filepath.Clean(alias), nil
+}
+
+func canonicalHelperProgram(binary string) (string, error) {
+	alias, err := executableAlias(binary)
+	if err != nil {
+		return "", fmt.Errorf("resolve helper binary %q: %w", binary, err)
+	}
+	program, err := filepath.EvalSymlinks(alias)
+	if err != nil {
+		return "", fmt.Errorf("resolve helper binary %q target: %w", binary, err)
+	}
+	if !filepath.IsAbs(program) || filepath.Clean(program) != program {
+		return "", fmt.Errorf("helper binary %q resolved to non-exact target %q", binary, program)
+	}
+	return program, nil
 }
 
 func serviceSessionType(value manifest.SessionType) (dkservice.SessionType, error) {

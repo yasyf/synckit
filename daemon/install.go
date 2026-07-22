@@ -83,11 +83,7 @@ func install(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		executable, err := os.Executable()
-		if err != nil {
-			return fmt.Errorf("resolve synckitd executable: %w", err)
-		}
-		agents, err := serviceAgents(manifests, executable)
+		agents, err := serviceAgents(manifests)
 		if err != nil {
 			return err
 		}

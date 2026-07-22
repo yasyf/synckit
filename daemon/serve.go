@@ -91,7 +91,7 @@ func serve(ctx context.Context, build string) error {
 	// would wedge the daemon.
 	registerConsent(d)
 
-	executable, err := os.Executable()
+	executable, err := executableAlias(daemonBinary)
 	if err != nil {
 		return fmt.Errorf("resolve synckitd role path: %w", err)
 	}

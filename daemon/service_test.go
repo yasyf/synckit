@@ -45,12 +45,19 @@ func TestServiceAgents(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	binDir := t.TempDir()
-	helperPath := filepath.Join(binDir, "cookiesync")
+	helperDir := t.TempDir()
+	helperPath := filepath.Join(helperDir, "cookiesync")
 	if err := os.WriteFile(helperPath, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable fixture
 		t.Fatalf("write helper: %v", err)
 	}
+	if err := os.Symlink(helperPath, filepath.Join(binDir, "cookiesync")); err != nil {
+		t.Fatalf("link helper: %v", err)
+	}
+	helperPath, err := filepath.EvalSymlinks(helperPath)
+	if err != nil {
+		t.Fatalf("canonicalize helper: %v", err)
+	}
 	t.Setenv("PATH", binDir)
-	executable := filepath.Join(t.TempDir(), "synckitd")
 	manifests := []manifest.Manifest{
 		{
 			Name: "cookiesync", Binary: "cookiesync",
@@ -65,7 +72,7 @@ func TestServiceAgents(t *testing.T) {
 		},
 	}
 
-	agents, err := serviceAgents(manifests, executable)
+	agents, err := serviceAgents(manifests)
 	if err != nil {
 		t.Fatalf("serviceAgents: %v", err)
 	}
@@ -78,6 +85,10 @@ func TestServiceAgents(t *testing.T) {
 	}
 
 	reconcile := findAgent(t, agents, labelPrefix+".reconcile")
+	executable, err := dkservice.CanonicalExecutable()
+	if err != nil {
+		t.Fatalf("CanonicalExecutable: %v", err)
+	}
 	if reconcile.Program != executable || !equalStrings(reconcile.Args, []string{"reconcile"}) {
 		t.Errorf("reconcile command = %q %v", reconcile.Program, reconcile.Args)
 	}
@@ -121,15 +132,29 @@ func TestServiceAgentsRejectUnknownSession(t *testing.T) {
 	t.Setenv("PATH", binDir)
 	_, err := serviceAgents([]manifest.Manifest{{
 		Name: "consumer", Binary: "consumer", Helper: &manifest.HelperSpec{Command: "helper", SessionType: manifest.SessionType("Console")},
-	}}, filepath.Join(t.TempDir(), "synckitd"))
+	}})
 	if err == nil {
 		t.Fatal("serviceAgents accepted unknown session type")
 	}
 }
 
-func TestServiceAgentsRejectNonExactExecutable(t *testing.T) {
-	if _, err := serviceAgents(nil, "synckitd"); err == nil {
-		t.Fatal("serviceAgents accepted relative executable")
+func TestExecutableAliasPreservesStableSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "synckitd")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable fixture
+		t.Fatalf("write daemon: %v", err)
+	}
+	alias := filepath.Join(dir, daemonBinary)
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatalf("link daemon: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	got, err := executableAlias(daemonBinary)
+	if err != nil {
+		t.Fatalf("executableAlias: %v", err)
+	}
+	if got != alias {
+		t.Fatalf("role alias = %q, want %q", got, alias)
 	}
 }
 
@@ -162,6 +187,17 @@ func TestInstallConvergesExactDesiredSet(t *testing.T) {
 	}
 	if len(controller.desired) != 1 {
 		t.Fatalf("convergence calls = %d, want 1", len(controller.desired))
+	}
+	executable, err := dkservice.CanonicalExecutable()
+	if err != nil {
+		t.Fatalf("CanonicalExecutable: %v", err)
+	}
+	for _, agent := range controller.desired[0] {
+		if agent.Label == labelPrefix+".reconcile" || agent.Label == labelPrefix+".serve" {
+			if agent.Program != executable {
+				t.Fatalf("%s program = %q, want canonical %q", agent.Label, agent.Program, executable)
+			}
+		}
 	}
 	if got, want := agentLabels(controller.desired[0]), []string{
 		labelPrefix + ".helper.cookiesync", labelPrefix + ".reconcile", labelPrefix + ".serve",
