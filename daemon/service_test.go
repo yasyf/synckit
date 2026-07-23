@@ -68,6 +68,17 @@ func useRuntimeHealth(t *testing.T, health rpc.RuntimeHealth) {
 	t.Cleanup(func() { observeRuntimeHealth = previous })
 }
 
+func useStopExecutable(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	executable := filepath.Join(directory, daemonBinary)
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil { //nolint:gosec // executable fixture
+		t.Fatalf("write stop executable: %v", err)
+	}
+	t.Setenv("PATH", directory)
+	return executable
+}
+
 func TestServiceAgents(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -236,6 +247,7 @@ func TestInstallConvergesExactDesiredSet(t *testing.T) {
 func TestInstallStopsAndSettlesPriorRuntimeBeforeConverge(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	stopExecutable := useStopExecutable(t)
 	controller := &fakeServiceController{status: dkservice.Status{Loaded: true}}
 	useServiceController(t, controller)
 	useRuntimeHealth(t, rpc.RuntimeHealth{
@@ -256,7 +268,7 @@ func TestInstallStopsAndSettlesPriorRuntimeBeforeConverge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.Role != labelPrefix+".stop" || spec.RuntimeBuild != "v1.2.3" ||
+	if spec.Executable != stopExecutable || spec.Role != labelPrefix+".stop" || spec.RuntimeBuild != "v1.2.3" ||
 		spec.RuntimeProtocol != int(rpc.Version) || spec.TargetProcessGeneration != "old-generation" ||
 		spec.Intent != wire.StopIntentUpgrade || !slices.Equal(spec.Args, []string{"stop-control", sock}) {
 		t.Fatalf("stop spec = %+v", spec)
@@ -266,6 +278,7 @@ func TestInstallStopsAndSettlesPriorRuntimeBeforeConverge(t *testing.T) {
 func TestInstallDoesNotConvergeWhenPriorRuntimeCannotSettle(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	useStopExecutable(t)
 	stopErr := errors.New("target did not settle")
 	controller := &fakeServiceController{status: dkservice.Status{Loaded: true}, stopErr: stopErr}
 	useServiceController(t, controller)
@@ -282,6 +295,7 @@ func TestInstallDoesNotConvergeWhenPriorRuntimeCannotSettle(t *testing.T) {
 func TestInstallRestartsSameBuildBeforeConverge(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	useStopExecutable(t)
 	controller := &fakeServiceController{status: dkservice.Status{Loaded: true}}
 	useServiceController(t, controller)
 	useRuntimeHealth(t, rpc.RuntimeHealth{
@@ -310,6 +324,7 @@ func TestUninstallConvergesStoredSetToEmpty(t *testing.T) {
 
 func TestUninstallStopsAndSettlesRuntimeBeforeRemovingServices(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	useStopExecutable(t)
 	controller := &fakeServiceController{status: dkservice.Status{Loaded: true}}
 	useServiceController(t, controller)
 	useRuntimeHealth(t, rpc.RuntimeHealth{
