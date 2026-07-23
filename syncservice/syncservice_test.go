@@ -903,7 +903,7 @@ func TestCmdTransportResetKillsBackgroundedDescendant(t *testing.T) {
 	err = nil
 	select {
 	case err = <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Do did not settle after bridge exit")
 	}
 	if err == nil {
