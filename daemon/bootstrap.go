@@ -23,6 +23,9 @@ var localNodeDiscovery = hostregistry.LocalNodes
 // called with each step as it happens. synckit names no consumer — every consumer
 // specific comes from the manifests slice.
 func AddHost(ctx context.Context, r hostregistry.Runner, manifests []manifest.Manifest, target, self string, noRecurse bool, onStep func(string)) error {
+	if err := hostregistry.Mesh.InitializeState(ctx); err != nil {
+		return fmt.Errorf("initialize host mesh state: %w", err)
+	}
 	step := func(msg string) {
 		if onStep != nil {
 			onStep(msg)

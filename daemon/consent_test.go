@@ -172,6 +172,9 @@ func shortConfigHome(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(base, hostregistry.MeshName), 0o700); err != nil {
 		t.Fatalf("mkdir mesh config dir: %v", err)
 	}
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatalf("initialize mesh state: %v", err)
+	}
 }
 
 // serveConsentEngine binds engine onto a dispatcher and serves it on the mesh

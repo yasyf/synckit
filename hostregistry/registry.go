@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -40,61 +41,35 @@ func (g *Registry) RemoveHost(target string) {
 	g.Hosts = kept
 }
 
-// Load reads the self/hosts identity from state.json, returning a zero Registry
-// when the file does not yet exist.
+// Load reads the self/hosts identity from exact schema v1 state.
 func (c Config) Load() (*Registry, error) {
-	raw, err := c.readRaw()
+	env, err := c.readEnvelope()
 	if err != nil {
 		return nil, err
 	}
-	return registryFromRaw(raw)
+	return &Registry{Self: env.Host.Self, Hosts: slices.Clone(env.Host.Hosts)}, nil
 }
 
 // Update runs fn against the freshly loaded Registry under the shared reconcile
-// lock, then writes back only the self+hosts keys — every other key already in
-// state.json is preserved byte-for-byte. Serializes read-modify-write across
-// processes.
+// lock, then replaces self and hosts while preserving the declared addresses and
+// product payload. It serializes read-modify-write across processes.
 func (c Config) Update(ctx context.Context, fn func(*Registry) error) (*Registry, error) {
 	var out *Registry
-	err := c.UpdateRaw(ctx, func(raw map[string]json.RawMessage) error {
-		g, err := registryFromRaw(raw)
+	err := c.WithLock(ctx, func() error {
+		env, err := c.readEnvelope()
 		if err != nil {
 			return err
 		}
+		g := &Registry{Self: env.Host.Self, Hosts: slices.Clone(env.Host.Hosts)}
 		if err := fn(g); err != nil {
 			return err
 		}
-		selfJSON, err := json.Marshal(g.Self)
-		if err != nil {
-			return fmt.Errorf("encode self: %w", err)
-		}
-		hostsJSON, err := json.Marshal(g.Hosts)
-		if err != nil {
-			return fmt.Errorf("encode hosts: %w", err)
-		}
-		raw["self"] = selfJSON
-		raw["hosts"] = hostsJSON
+		env.Host.Self = g.Self
+		env.Host.Hosts = slices.Clone(g.Hosts)
 		out = g
-		return nil
+		return c.writeEnvelope(env)
 	})
 	return out, err
-}
-
-// registryFromRaw decodes the self/hosts keys out of a raw state map, leaving a
-// Registry's fields zero when their keys are absent.
-func registryFromRaw(raw map[string]json.RawMessage) (*Registry, error) {
-	g := &Registry{}
-	if self, ok := raw["self"]; ok {
-		if err := json.Unmarshal(self, &g.Self); err != nil {
-			return nil, fmt.Errorf("parse self: %w", err)
-		}
-	}
-	if hosts, ok := raw["hosts"]; ok {
-		if err := json.Unmarshal(hosts, &g.Hosts); err != nil {
-			return nil, fmt.Errorf("parse hosts: %w", err)
-		}
-	}
-	return g, nil
 }
 
 // DetectSelf returns the ssh target by which a peer reaches this machine,

@@ -10,6 +10,8 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
+
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 // fakeRunner satisfies hostregistry.Runner with canned, network-free replies: Local
@@ -145,6 +147,9 @@ func fixedBindings(n int) []key.Binding {
 func hermeticOptions(t *testing.T) Options {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatalf("initialize mesh state: %v", err)
+	}
 	return Options{
 		Brand:   "synckit",
 		Screens: []Screen{stubScreen{title: "Content", marker: "content body"}},

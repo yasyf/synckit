@@ -8,21 +8,18 @@
 // (Config.Binary, "command -v <binary>" / "<binary> --version"). Identity-free
 // helpers — discovery, the Runner, DetectSelf, ShellQuote — stay free functions.
 //
-// The registry owns only the host-identity slice of state.json (self, hosts); the
-// owning tool's other keys are preserved byte-for-byte across an Update, so two
-// packages can share one locked file.
+// Every state.json has one exact schema envelope: schema identity, host registry,
+// and one product namespace. Unknown or legacy shapes fail closed.
 package hostregistry
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/yasyf/daemonkit/daemon"
 	"github.com/yasyf/daemonkit/proc"
 )
 
@@ -57,6 +54,8 @@ type Config struct {
 	// the process, notably the shared hostregistry.Mesh whose own Config leaves
 	// DirEnv empty. The variable is read live on each Dir call.
 	DirEnv string
+	// State is the exact whole-file schema contract for state.json.
+	State StateContract
 }
 
 // Dir returns the config directory: the DirEnv override verbatim when that env
@@ -117,52 +116,4 @@ func (c Config) WithLock(ctx context.Context, fn func() error) error {
 		return fmt.Errorf("%w: %w", ErrLockBusy, err)
 	}
 	return errors.Join(fn(), lock.Close())
-}
-
-// readRaw reads state.json as a key-ordered-agnostic map of raw JSON values,
-// returning an empty map when the file does not yet exist.
-func (c Config) readRaw() (map[string]json.RawMessage, error) {
-	path, err := c.Path()
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is the owning tool's own state file under the fixed config dir, not user-supplied.
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]json.RawMessage{}, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read state %s: %w", path, err)
-	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse state %s: %w", path, err)
-	}
-	return raw, nil
-}
-
-// UpdateRaw is the one foreign-key-preserving writer of state.json: it acquires
-// the shared reconcile lock, reads the whole file as raw JSON keys, runs fn to
-// mutate only the keys the caller owns, then writes every key back. Keys fn
-// never touches survive byte-for-byte, so two packages can share one file
-// without clobbering each other's slice of it. encoding/json sorts map keys, so
-// the output key order is stable across writes.
-func (c Config) UpdateRaw(ctx context.Context, fn func(raw map[string]json.RawMessage) error) error {
-	return c.WithLock(ctx, func() error {
-		return c.UpdateRawUnlocked(fn)
-	})
-}
-
-// UpdateRawUnlocked is UpdateRaw without acquiring the reconcile lock: read the
-// whole file as raw JSON keys, run fn to mutate only the keys the caller owns, then
-// write every key back. It is for callers that ALREADY hold the lock — an
-// orchestration that wraps a whole multi-step pass in WithLock and must read and
-// write state.json inside it without re-entering the (non-reentrant) flock. It
-// delegates to daemon.StateFile, whose durable write preserves untouched foreign
-// keys byte-for-byte so two packages can share one file.
-func (c Config) UpdateRawUnlocked(fn func(raw map[string]json.RawMessage) error) error {
-	path, err := c.Path()
-	if err != nil {
-		return err
-	}
-	return daemon.StateFile{Path: path}.UpdateUnlocked(fn)
 }

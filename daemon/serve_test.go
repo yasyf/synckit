@@ -445,6 +445,9 @@ func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(cfgHome) })
 	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := hostregistry.Mesh.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.Self = "me@self"
@@ -545,6 +548,9 @@ func (t *countingTransport) isClosed() bool {
 // stop closes the current one, so no ssh tunnel or child is leaked across a rebind.
 func TestReloadClosesEveryTransport(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := hostregistry.Mesh.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.Self = "me@self"
 		return nil

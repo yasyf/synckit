@@ -2,10 +2,8 @@ package hostregistry
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -182,6 +180,7 @@ func TestVerifyAll(t *testing.T) {
 
 func TestRemoveHost(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeTestState(t, testCfg)
 
 	if _, err := testCfg.Update(context.Background(), func(g *Registry) error {
 		g.UpsertHost("a@host")
@@ -207,98 +206,26 @@ func TestRemoveHost(t *testing.T) {
 	}
 }
 
-// TestUpdatePreservesForeignKeys is the sharpest invariant: an Update that
-// mutates only self/hosts must leave the owning tool's other keys (repos,
-// settings, default_location) byte-for-byte intact in state.json.
-func TestUpdatePreservesForeignKeys(t *testing.T) {
+func TestUpdateRejectsExtraTopLevelKey(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-	cfg := filepath.Join(dir, testCfg.Name)
-	if err := os.MkdirAll(cfg, 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	// A full state.json, including a repos array and settings, written by a tool
-	// writer that hostregistry knows nothing about.
-	original := `{
-  "default_location": "~/Code",
-  "self": "yasyf@old",
-  "hosts": [],
-  "repos": [
-    {"relpath": "cc-review", "origin": "https://github.com/yasyf/cc-review.git", "trunk": "main", "local_only": false},
-    {"relpath": "scratch", "origin": "", "trunk": "", "local_only": true}
-  ],
-  "settings": {"interval": "15m0s", "idle_threshold": "5m0s", "watch_debounce": "3s", "repo_op_timeout": "2m0s", "push_after": "24h0m0s"}
-}`
-	statePath := filepath.Join(cfg, stateFile)
-	if err := os.WriteFile(statePath, []byte(original), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Capture the repos + settings sub-objects before the host upsert.
-	var before map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(original), &before); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := testCfg.Update(context.Background(), func(g *Registry) error {
-		g.UpsertHost("yasyf@yasyf-home")
-		g.Self = "yasyf@new"
-		return nil
-	}); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-
-	//nolint:gosec // G304: test reads a file from a test-controlled temp dir.
-	data, err := os.ReadFile(statePath)
+	initializeTestState(t, testCfg)
+	path, err := testCfg.Path()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var after map[string]json.RawMessage
-	if err := json.Unmarshal(data, &after); err != nil {
-		t.Fatalf("re-parse state: %v", err)
-	}
-
-	// repos and settings must be unchanged; the host upsert touched only self+hosts.
-	for _, key := range []string{"repos", "settings", "default_location"} {
-		if !bytesEqualJSON(t, before[key], after[key]) {
-			t.Fatalf("%s changed across host upsert:\n before: %s\n  after: %s", key, before[key], after[key])
-		}
-	}
-
-	// And the host-identity keys did update.
-	g, err := testCfg.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if g.Self != "yasyf@new" {
-		t.Fatalf("Self = %q, want yasyf@new", g.Self)
-	}
-	if !contains(g.Hosts, "yasyf@yasyf-home") {
-		t.Fatalf("Hosts = %v, want to contain yasyf@yasyf-home", g.Hosts)
-	}
-}
-
-// bytesEqualJSON compares two raw JSON values for semantic equality (re-encoding
-// to normalize whitespace), so a reformat that preserves content still passes.
-func bytesEqualJSON(t *testing.T, a, b json.RawMessage) bool {
-	t.Helper()
-	var av, bv any
-	if err := json.Unmarshal(a, &av); err != nil {
-		t.Fatalf("unmarshal a (%s): %v", a, err)
-	}
-	if err := json.Unmarshal(b, &bv); err != nil {
-		t.Fatalf("unmarshal b (%s): %v", b, err)
-	}
-	an, err := json.Marshal(av)
+	data, err := os.ReadFile(path) //nolint:gosec // temp state path from the fixed test Config
 	if err != nil {
 		t.Fatal(err)
 	}
-	bn, err := json.Marshal(bv)
-	if err != nil {
+	data = []byte(strings.TrimSuffix(string(data), "\n"))
+	data = append(data[:len(data)-1], []byte(`,"foreign":{}}\n`)...)
+	if err := os.WriteFile(path, data, 0o600); err != nil { //nolint:gosec // temp state path from the fixed test Config
 		t.Fatal(err)
 	}
-	return string(an) == string(bn)
+	if _, err := testCfg.Update(context.Background(), func(*Registry) error { return nil }); !errors.Is(err, ErrStateSchema) {
+		t.Fatalf("Update extra state = %v, want ErrStateSchema", err)
+	}
 }
 
 // targetFailingRunner wraps a Runner and forces SSH to one target to fail.

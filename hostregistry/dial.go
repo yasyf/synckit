@@ -3,10 +3,10 @@ package hostregistry
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -215,50 +215,42 @@ func orderDialAddrs(target string, lan []string) []string {
 	return append(ordered, target)
 }
 
-// LoadAddrs reads the target-to-dial-addresses map from state.json, returning an empty
-// map when the "addrs" key is absent.
+// LoadAddrs reads the target-to-dial-addresses map from exact schema v1 state.
 func (c Config) LoadAddrs() (map[string][]string, error) {
-	raw, err := c.readRaw()
+	env, err := c.readEnvelope()
 	if err != nil {
 		return nil, err
 	}
-	return addrsFromRaw(raw)
-}
-
-// addrsFromRaw decodes the "addrs" key out of a raw state map, returning an empty map
-// when the key is absent.
-func addrsFromRaw(raw map[string]json.RawMessage) (map[string][]string, error) {
-	out := map[string][]string{}
-	if a, ok := raw["addrs"]; ok {
-		if err := json.Unmarshal(a, &out); err != nil {
-			return nil, fmt.Errorf("parse addrs: %w", err)
-		}
-	}
-	return out, nil
+	return cloneAddrs(env.Host.Addrs), nil
 }
 
 // AddAddr records addr as an alternate dial address for target, appending it under the
 // "addrs" key while preserving every other key in state.json byte-for-byte. A repeat
 // addr is a no-op.
 func (c Config) AddAddr(ctx context.Context, target, addr string) error {
-	return c.UpdateRaw(ctx, func(raw map[string]json.RawMessage) error {
-		byTarget, err := addrsFromRaw(raw)
+	return c.WithLock(ctx, func() error {
+		env, err := c.readEnvelope()
 		if err != nil {
 			return err
 		}
+		byTarget := cloneAddrs(env.Host.Addrs)
 		for _, a := range byTarget[target] {
 			if a == addr {
 				return nil
 			}
 		}
 		byTarget[target] = append(byTarget[target], addr)
-		encoded, err := json.Marshal(byTarget)
-		if err != nil {
-			return fmt.Errorf("encode addrs: %w", err)
-		}
-		raw["addrs"] = encoded
-		return nil
+		env.Host.Addrs = byTarget
+		return c.writeEnvelope(env)
 	})
+}
+
+func cloneAddrs(in map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(in))
+	for target, addrs := range in {
+		out[target] = slices.Clone(addrs)
+	}
+	return out
 }
 
 // LocalTarget rewrites target's host to its short node's ".local" mDNS name, keeping

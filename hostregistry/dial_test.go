@@ -2,7 +2,6 @@ package hostregistry
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -462,6 +461,7 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 
 func TestDialAddrsDefaultsToTarget(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeTestState(t, Mesh)
 	got, err := DialAddrs("me@node.tail.ts.net")
 	if err != nil {
 		t.Fatalf("DialAddrs: %v", err)
@@ -473,6 +473,7 @@ func TestDialAddrsDefaultsToTarget(t *testing.T) {
 
 func TestDialAddrsLANFirstTailnetLast(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeTestState(t, Mesh)
 	target := "me@node.tail.ts.net"
 	if err := Mesh.AddAddr(context.Background(), target, "me@node.local"); err != nil {
 		t.Fatalf("AddAddr: %v", err)
@@ -487,11 +488,9 @@ func TestDialAddrsLANFirstTailnetLast(t *testing.T) {
 	}
 }
 
-// TestAddAddrPreservesForeignKeys proves the new addrs writer honors the shared-state
-// FK contract: appending an address leaves self/hosts and a consumer's domain keys
-// byte-for-byte intact, and a repeat address is a no-op.
-func TestAddAddrPreservesForeignKeys(t *testing.T) {
+func TestAddAddrPreservesRegistryAndDeduplicates(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeTestState(t, Mesh)
 	target := "peer@node.tail.ts.net"
 
 	if _, err := Mesh.Update(context.Background(), func(g *Registry) error {
@@ -501,19 +500,16 @@ func TestAddAddrPreservesForeignKeys(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed mesh: %v", err)
 	}
-	if err := Mesh.UpdateRaw(context.Background(), func(raw map[string]json.RawMessage) error {
-		raw["repos"] = json.RawMessage(`[{"relpath":"cc-review","local_only":false}]`)
-		return nil
-	}); err != nil {
-		t.Fatalf("seed repos: %v", err)
-	}
-
-	before := readState(t)
 	if err := Mesh.AddAddr(context.Background(), target, "peer@node.local"); err != nil {
 		t.Fatalf("AddAddr: %v", err)
 	}
-	after := readState(t)
-	assertKeysByteEqual(t, "addr write", before, after, []string{"self", "hosts", "repos"})
+	reg, err := Mesh.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reg.Self != "me@self" || len(reg.Hosts) != 1 || reg.Hosts[0] != target {
+		t.Fatalf("registry changed across AddAddr: %+v", reg)
+	}
 
 	byTarget, err := Mesh.LoadAddrs()
 	if err != nil {
@@ -561,6 +557,7 @@ func TestExecSSHReturnsStdoutOnTerminalFailure(t *testing.T) {
 // self/hosts) leaves the addrs key byte-for-byte intact.
 func TestUpdatePreservesAddrsKey(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeTestState(t, Mesh)
 	target := "peer@node.tail.ts.net"
 
 	if _, err := Mesh.Update(context.Background(), func(g *Registry) error {
@@ -574,17 +571,12 @@ func TestUpdatePreservesAddrsKey(t *testing.T) {
 		t.Fatalf("AddAddr: %v", err)
 	}
 
-	before := readState(t)
 	if _, err := Mesh.Update(context.Background(), func(g *Registry) error {
 		g.UpsertHost("other@host")
 		return nil
 	}); err != nil {
 		t.Fatalf("addrs-unaware Update: %v", err)
 	}
-	after := readState(t)
-	assertKeysByteEqual(t, "addrs-unaware update", before, after, []string{"addrs"})
-	assertKeysChanged(t, "addrs-unaware update", before, after, []string{"hosts"})
-
 	byTarget, err := Mesh.LoadAddrs()
 	if err != nil {
 		t.Fatalf("LoadAddrs: %v", err)

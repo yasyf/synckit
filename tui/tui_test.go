@@ -244,6 +244,9 @@ func TestMergeHostItemsRegisteredSortFirst(t *testing.T) {
 func seedMesh(t *testing.T, hosts ...string) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := hostregistry.Mesh.Update(context.Background(), func(g *hostregistry.Registry) error {
 		for _, h := range hosts {
 			g.UpsertHost(h)

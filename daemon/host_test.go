@@ -13,6 +13,9 @@ import (
 // address that DialAddrs then returns ahead of the target's own FQDN.
 func TestHostAddrAddRecordsDialAddr(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 
 	cmd := newHostCmd()
 	cmd.SetArgs([]string{"addr", "add", "me@node.tail.ts.net", "me@node.local"})
@@ -34,6 +37,9 @@ func TestHostAddrAddRecordsDialAddr(t *testing.T) {
 
 func TestHostLsJSONShape(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := hostregistry.Mesh.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.Self = "me@self"
 		g.UpsertHost("a@one")

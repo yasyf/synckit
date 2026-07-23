@@ -1,8 +1,8 @@
 package syncservice
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -25,6 +25,9 @@ import (
 
 func TestWithTransportRunnerConcurrentTransports(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatalf("initialize mesh state: %v", err)
+	}
 	bin := buildStub(t, "rpcstub")
 	fakeBin := t.TempDir()
 	ssh := filepath.Join(fakeBin, "ssh")
@@ -589,6 +592,9 @@ func TestCmdTransportPreSendFailureAdvancesOnlyNextOperation(t *testing.T) {
 // the bare peer.
 func TestSSHStdioResolvesAddrsAtSpawnNotConstruction(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	peer := "me@node.tail.ts.net"
 
 	tx := synctransport.NewSSHStdio(testSessionPool(t), peer, "cookiesync rpc whoami")
@@ -617,17 +623,26 @@ func TestSSHStdioResolvesAddrsAtSpawnNotConstruction(t *testing.T) {
 // returned by Do rather than masked by a silent [peer] fallback.
 func TestSSHStdioPoisonedAddrsSurfacesErrorFromDo(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if err := hostregistry.Mesh.UpdateRaw(context.Background(), func(raw map[string]json.RawMessage) error {
-		raw["addrs"] = json.RawMessage(`"not-a-map"`)
-		return nil
-	}); err != nil {
-		t.Fatalf("poison addrs: %v", err)
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	path, err := hostregistry.Mesh.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // temp state path from the fixed Mesh Config
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = bytes.Replace(data, []byte(`"addrs":{}`), []byte(`"addrs":"not-a-map"`), 1)
+	if err := os.WriteFile(path, data, 0o600); err != nil { //nolint:gosec // temp state path from the fixed Mesh Config
+		t.Fatal(err)
 	}
 
 	tx := synctransport.NewSSHStdio(testSessionPool(t), "me@node.tail.ts.net", "cookiesync rpc whoami")
 	t.Cleanup(func() { _ = tx.Close() })
 
-	_, err := tx.Do(context.Background(), &rpc.Request{Method: MethodCapabilities})
+	_, err = tx.Do(context.Background(), &rpc.Request{Method: MethodCapabilities})
 	if err == nil {
 		t.Fatal("Do succeeded, want the DialAddrs decode failure surfaced, not a silent [peer] fallback")
 	}

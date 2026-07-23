@@ -105,6 +105,9 @@ func newStopControlCmd() *cobra.Command {
 }
 
 func install(ctx context.Context, build string) error {
+	if err := hostregistry.Mesh.InitializeState(ctx); err != nil {
+		return fmt.Errorf("initialize host mesh state: %w", err)
+	}
 	return withServiceController(ctx, func(controller serviceController) error {
 		manifests, err := discoverManifests()
 		if err != nil {
