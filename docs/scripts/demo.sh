@@ -36,7 +36,7 @@ func main() {
 	ln, _ := rpc.Listen(ctx, sock)
 	go rpc.NewServer(d).Serve(ctx, ln)
 
-	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), Build: rpc.Build})
+	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), WireBuild: rpc.WireBuild})
 	defer client.Close()
 	resp, _ := client.Call(ctx, &rpc.Request{
 		Method: "ping",

@@ -3,12 +3,19 @@ package hostregistry
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/yasyf/daemonkit/proc"
 	"github.com/yasyf/daemonkit/supervise"
+
+	"github.com/yasyf/synckit/internal/clirunner"
 )
+
+// ErrRunnerClosed means a callback-scoped command runner has left its scope.
+var ErrRunnerClosed = errors.New("hostregistry: runner scope closed")
 
 // Runner executes commands locally and over SSH; the SSH/exec boundary tests mock.
 type Runner interface {
@@ -25,6 +32,43 @@ type execRunner struct{ runner supervise.TaskRunner }
 // NewExecRunner returns the default Runner that executes commands locally and over ssh.
 func NewExecRunner(runner supervise.TaskRunner) Runner {
 	return execRunner{runner: runner}
+}
+
+// WithExecRunner runs callback with the sole crash-recoverable CLI command
+// owner. The runner is safe for concurrent use only while callback is active.
+func WithExecRunner(ctx context.Context, callback func(Runner) error) error {
+	if callback == nil {
+		return errors.New("hostregistry: runner callback is required")
+	}
+	directory, err := Mesh.Dir()
+	if err != nil {
+		return fmt.Errorf("resolve synckit state directory: %w", err)
+	}
+	return clirunner.WithPool(ctx, directory, func(pool *supervise.Pool) error {
+		runner := &scopedRunner{runner: execRunner{runner: pool}}
+		runner.active.Store(true)
+		defer runner.active.Store(false)
+		return callback(runner)
+	})
+}
+
+type scopedRunner struct {
+	runner execRunner
+	active atomic.Bool
+}
+
+func (r *scopedRunner) Local(ctx context.Context, name string, args ...string) (string, error) {
+	if !r.active.Load() {
+		return "", ErrRunnerClosed
+	}
+	return r.runner.Local(ctx, name, args...)
+}
+
+func (r *scopedRunner) SSH(ctx context.Context, target, remoteCmd string) (string, error) {
+	if !r.active.Load() {
+		return "", ErrRunnerClosed
+	}
+	return r.runner.SSH(ctx, target, remoteCmd)
 }
 
 func (r execRunner) Local(ctx context.Context, name string, args ...string) (string, error) {

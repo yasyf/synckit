@@ -9,12 +9,13 @@ import (
 
 	dkservice "github.com/yasyf/daemonkit/service"
 
+	"github.com/yasyf/synckit/internal/serviceidentity"
 	"github.com/yasyf/synckit/manifest"
 )
 
 const (
-	labelPrefix  = "com.github.yasyf.synckit"
-	daemonBinary = "synckitd"
+	labelPrefix  = serviceidentity.LabelPrefix
+	daemonBinary = serviceidentity.DaemonBinary
 
 	reconcileInterval = 15 * time.Minute
 	daemonPATH        = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -74,7 +75,11 @@ func serviceAgents(manifests []manifest.Manifest) ([]dkservice.Agent, error) {
 		if err != nil {
 			return nil, fmt.Errorf("manifest %q helper: %w", m.Name, err)
 		}
-		helper, err := build(labelPrefix+".helper."+m.Name, []string{m.Helper.Command}, program)
+		helperLabel, err := serviceidentity.HelperLabel(m.Name)
+		if err != nil {
+			return nil, fmt.Errorf("manifest %q helper identity: %w", m.Name, err)
+		}
+		helper, err := build(helperLabel, []string{m.Helper.Command}, program)
 		if err != nil {
 			return nil, err
 		}

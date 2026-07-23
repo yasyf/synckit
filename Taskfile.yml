@@ -28,9 +28,15 @@ tasks:
     cmds:
       - golangci-lint fmt
 
+  generate-check:
+    desc: Verify generated wire identity
+    cmds:
+      - go run ./rpc/gen -check
+
   ci:
     desc: Everything CI runs
     cmds:
+      - task: generate-check
       - task: vet
       - task: lint
       - task: test

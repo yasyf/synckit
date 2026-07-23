@@ -34,8 +34,8 @@ func TestServeSessionUsesSpawnedParentIdentityAndJoins(t *testing.T) {
 		t.Fatalf("NewDuplexConn: %v", err)
 	}
 	client := NewClient(ClientConfig{
-		Build: Build,
-		Dial:  func(context.Context) (net.Conn, error) { return conn, nil },
+		WireBuild: WireBuild,
+		Dial:      func(context.Context) (net.Conn, error) { return conn, nil },
 	})
 	response, err := client.Call(context.Background(), &Request{Method: "peer"})
 	if err != nil {

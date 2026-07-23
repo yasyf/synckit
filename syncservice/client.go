@@ -5,27 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/yasyf/synckit/internal/synctransport"
 	"github.com/yasyf/synckit/rpc"
 )
 
 // Response is the typed sync envelope: an rpc response whose result is kept as raw
 // JSON bytes rather than decoded into any, so the registry's int64 CRDT stamps never
 // pass through float64.
-type Response struct {
-	OK     bool            `json:"ok"`
-	Result json.RawMessage `json:"result"`
-	Error  string          `json:"error,omitempty"`
-}
+type Response = synctransport.Response
 
 // Transport carries one typed request to a sync service and returns its raw-result
 // [Response]. Implementations reach the service over a unix socket, a spawned child's
 // stdio, or ssh to a peer's rpc-serve bridge.
-type Transport interface {
-	// Do sends req and returns the service's response.
-	Do(ctx context.Context, req *rpc.Request) (*Response, error)
-	// Close releases any resources the transport holds (a spawned child, say).
-	Close() error
-}
+type Transport = synctransport.Transport
 
 // Client is the typed caller for the sync contract. It drives a [Transport] and
 // decodes each method's result into its Go type.

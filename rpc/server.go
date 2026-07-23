@@ -45,7 +45,7 @@ func NewServer(dispatcher *Dispatcher) *Server {
 		panic("rpc: dispatcher is required")
 	}
 	server := &Server{Dispatcher: dispatcher}
-	server.Wire = &wire.Server{Build: Build, MaxFrame: MaxFrame}
+	server.Wire = &wire.Server{WireBuild: WireBuild, MaxFrame: MaxFrame}
 	server.Wire.RegisterConcurrent(callOp, server.dispatch)
 	return server
 }

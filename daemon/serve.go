@@ -14,13 +14,14 @@ import (
 
 	"github.com/spf13/cobra"
 	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/daemonrole"
 	"github.com/yasyf/daemonkit/drain"
 	"github.com/yasyf/daemonkit/supervise"
 	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/debug"
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/internal/runtimehealth"
+	"github.com/yasyf/synckit/internal/runtimeowner"
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
@@ -100,55 +101,37 @@ func serve(ctx context.Context, build string) error {
 	// would wedge the daemon.
 	registerConsent(d, processes.pool)
 
-	executable, err := executableAlias(daemonBinary)
-	if err != nil {
-		return fmt.Errorf("resolve synckitd role path: %w", err)
-	}
-	rpcServer, err := runtimeRPCServer(d, executable, build)
+	stopRole, stopVerifier, err := runtimeowner.StopAuthority()
 	if err != nil {
 		return err
 	}
-	peer := &wire.LifecyclePeer{Config: wire.ClientConfig{
-		Dial: wire.UnixDialer(sock), Build: rpc.Build, LifecycleBuild: build, MaxFrame: rpc.MaxFrame,
-	}}
-	runtime, err := dkdaemon.NewRuntime(dkdaemon.RuntimeConfig{
-		Socket: sock, Build: build, Protocol: int(wire.ProtocolVersion),
-		Peer: peer, Contract: dkdaemon.RequestDaemon, WaitMode: dkdaemon.PIDExit,
-		Admission: &drain.Intake{}, Server: rpcServer.Wire,
-		Workers: &runtimeWorkers{supervisor: sup, processes: processes}, State: runtimeState{},
-		Resources: lifecycleResources{peer: peer},
+	rpcServer := rpc.NewServer(d)
+	var runtime *dkdaemon.Runtime
+	runtime, err = wire.NewRuntime(wire.RuntimeConfig{
+		Socket: sock, RuntimeBuild: build, RuntimeProtocol: int(rpc.Version),
+		Wire: rpcServer.Wire, Classifier: stopRole, ReservedProtectedSessions: 1,
+		StopVerifier: stopVerifier,
+		Observations: []wire.ObservationRoute{runtimehealth.Observation(func(ctx context.Context) (dkdaemon.Health, error) {
+			return runtime.Health(ctx)
+		})},
+		Admission: &drain.Intake{},
+		Workers:   &runtimeWorkers{supervisor: sup, processes: processes}, State: runtimeState{},
+		Resources: runtimeState{},
 		Activate: func(activation dkdaemon.Activation) error {
 			return activateServe(activation, sup, processes, sock)
 		},
 	})
 	if err != nil {
-		_ = peer.Close()
 		processes.Close()
 		processes.Cancel()
 		_ = processes.Wait(context.WithoutCancel(ctx))
 		return err
 	}
-	rpcServer.Wire.RegisterLifecycle(runtime)
 	err = runtime.Run(ctx)
 	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 		return nil
 	}
 	return err
-}
-
-func runtimeRPCServer(dispatcher *rpc.Dispatcher, executable, build string) (*rpc.Server, error) {
-	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
-		return nil, fmt.Errorf("synckitd role path %q is not exact and absolute", executable)
-	}
-	role := daemonrole.Classifier{RoleID: labelPrefix + ".serve", RolePath: executable}
-	if err := role.Validate(); err != nil {
-		return nil, fmt.Errorf("validate synckitd role: %w", err)
-	}
-	rpcServer := rpc.NewServer(dispatcher)
-	rpcServer.Wire.LifecycleBuild = build
-	rpcServer.Wire.ReservedProtectedSessions = 1
-	rpcServer.Wire.ProtectedSessionClassifier = role
-	return rpcServer, nil
 }
 
 func activateServe(activation dkdaemon.Activation, sup *supervisor, processes *processOwner, sock string) error {
@@ -190,10 +173,6 @@ func activateServe(activation dkdaemon.Activation, sup *supervisor, processes *p
 type runtimeState struct{}
 
 func (runtimeState) Close() error { return nil }
-
-type lifecycleResources struct{ peer *wire.LifecyclePeer }
-
-func (r lifecycleResources) Close() error { return r.peer.Close() }
 
 type runtimeWorkers struct {
 	supervisor *supervisor

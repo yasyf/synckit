@@ -3,11 +3,12 @@
 // (capabilities, list, reconcile, sync, get_state) by registering a [SyncConsumer]
 // on an [rpc.Dispatcher] via [RegisterConsumer]; the daemon serves them.
 //
-// A [Client] is the typed caller. It speaks the same wire over a [Transport], which
-// abstracts the three ways to reach a sync service: the resident unix socket
-// ([Socket]), a spawned child's stdio ([Stdio]), or ssh to a peer's rpc-serve
-// bridge ([SSHStdio]). The client decodes each method's result into its Go type, so
-// callers never touch the raw envelope.
+// A [Client] is the typed caller. It speaks the same wire over a [Transport].
+// [Socket] reaches a resident Unix socket; [WithTransportRunner] owns one scoped,
+// crash-recoverable process pool whose [TransportRunner.Stdio] and
+// [TransportRunner.SSHStdio] methods reach spawned local and remote bridges. The
+// client decodes each method's result into its Go type, so callers never touch the
+// raw envelope.
 //
 // The registry payload is the one value the contract keeps opaque. get_state returns
 // it as a [RawRegistry] (a json.RawMessage) and the client surfaces it as the same

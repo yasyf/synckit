@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,8 +19,148 @@ import (
 	"github.com/yasyf/daemonkit/supervise"
 
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/internal/synctransport"
 	"github.com/yasyf/synckit/rpc"
 )
+
+func TestWithTransportRunnerConcurrentTransports(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	bin := buildStub(t, "rpcstub")
+	fakeBin := t.TempDir()
+	ssh := filepath.Join(fakeBin, "ssh")
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nexec \"$SYNCKIT_TEST_RPC_STUB\"\n"), 0o755); err != nil { //nolint:gosec // executable fixture
+		t.Fatalf("write fake ssh: %v", err)
+	}
+	t.Setenv("SYNCKIT_TEST_RPC_STUB", bin)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	const count = 8
+	err := WithTransportRunner(context.Background(), func(runner TransportRunner) error {
+		var wg sync.WaitGroup
+		errs := make(chan error, count)
+		for i := range count {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				transport := runner.Stdio(bin)
+				if i%2 == 1 {
+					transport = runner.SSHStdio("peer", "ignored")
+				}
+				client := NewClient(transport)
+				defer func() { _ = client.Close() }()
+				caps, err := client.Capabilities(context.Background())
+				if err != nil {
+					errs <- err
+					return
+				}
+				if caps.Name != "stub" {
+					errs <- fmt.Errorf("worker %d name = %q", i, caps.Name)
+				}
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WithTransportRunner: %v", err)
+	}
+}
+
+func TestWithTransportRunnerKeepsLongGetStateSessionAlive(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("SYNCKIT_TEST_GET_STATE_DELAY", "10s")
+	bin := buildStub(t, "rpcstub")
+	started := time.Now()
+	err := WithTransportRunner(context.Background(), func(runner TransportRunner) error {
+		client := NewClient(runner.Stdio(bin))
+		defer func() { _ = client.Close() }()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		state, err := client.GetState(ctx)
+		if err != nil {
+			return err
+		}
+		if string(state) != stateJSON {
+			return fmt.Errorf("state = %s, want %s", state, stateJSON)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WithTransportRunner: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 10*time.Second {
+		t.Fatalf("long get_state returned after %s, want at least 10s", elapsed)
+	}
+}
+
+func TestWithTransportRunnerInvalidatesEscapes(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var runner TransportRunner
+	var transport Transport
+	if err := WithTransportRunner(context.Background(), func(value TransportRunner) error {
+		runner = value
+		transport = value.Stdio("true")
+		return nil
+	}); err != nil {
+		t.Fatalf("WithTransportRunner: %v", err)
+	}
+	if _, err := transport.Do(context.Background(), &rpc.Request{Method: MethodCapabilities}); !errors.Is(err, ErrTransportRunnerClosed) {
+		t.Fatalf("escaped transport Do = %v, want ErrTransportRunnerClosed", err)
+	}
+	escaped := runner.Stdio("true")
+	if _, err := escaped.Do(context.Background(), &rpc.Request{Method: MethodCapabilities}); !errors.Is(err, ErrTransportRunnerClosed) {
+		t.Fatalf("escaped runner transport Do = %v, want ErrTransportRunnerClosed", err)
+	}
+}
+
+func TestWithTransportRunnerSettlesInFlightSessionOnError(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	sentinel := errors.New("callback failed")
+	err := WithTransportRunner(context.Background(), func(runner TransportRunner) error {
+		transport := runner.Stdio("sh", "-c", "printf x; sleep 9999")
+		go func() {
+			close(started)
+			_, err := transport.Do(context.Background(), &rpc.Request{Method: MethodCapabilities})
+			done <- err
+		}()
+		<-started
+		time.Sleep(50 * time.Millisecond)
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("WithTransportRunner = %v, want callback error", err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("in-flight Do succeeded after scope settlement")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight transport did not settle before scope returned")
+	}
+}
+
+func TestWithTransportRunnerReleasesOwnerAfterPanic(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("callback panic was not propagated")
+			}
+		}()
+		_ = WithTransportRunner(context.Background(), func(TransportRunner) error {
+			panic("boom")
+		})
+	}()
+	if err := WithTransportRunner(context.Background(), func(TransportRunner) error { return nil }); err != nil {
+		t.Fatalf("owner remained locked after panic: %v", err)
+	}
+}
 
 func testSessionPool(t *testing.T) *supervise.Pool {
 	t.Helper()
@@ -40,9 +182,9 @@ func testSessionPool(t *testing.T) *supervise.Pool {
 	return pool
 }
 
-func testCmdTransport(t *testing.T, candidates [][]string) *cmdTransport {
+func testCmdTransport(t *testing.T, candidates [][]string) *synctransport.CommandTransport {
 	t.Helper()
-	return &cmdTransport{pool: testSessionPool(t), candidates: candidates}
+	return synctransport.NewCandidates(testSessionPool(t), candidates)
 }
 
 // stateJSON is a registry literal with a 16-digit int64 added_at stamp. A correct
@@ -212,7 +354,7 @@ func TestHandlerErrorSurfaces(t *testing.T) {
 func TestStdioTransportClosedRejectsDo(t *testing.T) {
 	// A bogus binary so a Do that slipped past the closed guard would visibly
 	// fail at spawn instead; the guard must short-circuit before start().
-	tx := Stdio(testSessionPool(t), filepath.Join(t.TempDir(), "never-spawned"))
+	tx := synctransport.NewStdio(testSessionPool(t), filepath.Join(t.TempDir(), "never-spawned"))
 	if err := tx.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -237,7 +379,7 @@ func TestStdioTransportRealSubprocess(t *testing.T) {
 		t.Fatalf("build rpcstub: %v\n%s", err, out)
 	}
 
-	tx := Stdio(testSessionPool(t), bin)
+	tx := synctransport.NewStdio(testSessionPool(t), bin)
 	c := NewClient(tx)
 	ctx := context.Background()
 
@@ -282,7 +424,7 @@ func TestStdioTransportRealSubprocess(t *testing.T) {
 // nil dereference in the field.
 func TestStdioTransportCtxTimeout(t *testing.T) {
 	noBackoff(t)
-	tx := Stdio(testSessionPool(t), "sleep", "9999")
+	tx := synctransport.NewStdio(testSessionPool(t), "sleep", "9999")
 	t.Cleanup(func() { _ = tx.Close() })
 
 	for range 25 {
@@ -317,7 +459,7 @@ func TestStdioTransportResetRaceSoak(t *testing.T) {
 	defer close(stop)
 
 	noBackoff(t)
-	tx := Stdio(testSessionPool(t), "sleep", "9999")
+	tx := synctransport.NewStdio(testSessionPool(t), "sleep", "9999")
 	t.Cleanup(func() { _ = tx.Close() })
 
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
@@ -333,9 +475,7 @@ func TestStdioTransportResetRaceSoak(t *testing.T) {
 // respawns on every Do (a reset-race soak), restoring it on cleanup.
 func noBackoff(t *testing.T) {
 	t.Helper()
-	prev := transportBackoffBase
-	transportBackoffBase = 0
-	t.Cleanup(func() { transportBackoffBase = prev })
+	t.Cleanup(synctransport.SetBackoff(0, 0))
 }
 
 // TestCmdTransportBackoffAfterConsecutiveResets drives a transport whose child exits
@@ -343,10 +483,8 @@ func noBackoff(t *testing.T) {
 // consecutive failure arms the backoff so the third Do fails fast without respawning,
 // and a Do after the window spawns again.
 func TestCmdTransportBackoffAfterConsecutiveResets(t *testing.T) {
-	prevBase, prevMax := transportBackoffBase, transportBackoffMax
-	transportBackoffBase = 100 * time.Millisecond
-	transportBackoffMax = 400 * time.Millisecond
-	t.Cleanup(func() { transportBackoffBase, transportBackoffMax = prevBase, prevMax })
+	const backoffMax = 400 * time.Millisecond
+	t.Cleanup(synctransport.SetBackoff(100*time.Millisecond, backoffMax))
 
 	tr := testCmdTransport(t, [][]string{{"false"}})
 	t.Cleanup(func() { _ = tr.Close() })
@@ -365,7 +503,7 @@ func TestCmdTransportBackoffAfterConsecutiveResets(t *testing.T) {
 		t.Fatalf("Do during backoff = %v, want a fast-fail backoff error", err)
 	}
 
-	time.Sleep(transportBackoffMax + 50*time.Millisecond)
+	time.Sleep(backoffMax + 50*time.Millisecond)
 	if _, err := tr.Do(ctx, req); err == nil || strings.Contains(err.Error(), "backing off") {
 		t.Fatalf("Do after the backoff window = %v, want a fresh spawn's framing error", err)
 	}
@@ -391,8 +529,8 @@ func TestCmdTransportReconnectsNextOperationToWorkingCandidate(t *testing.T) {
 	if _, err := c.Capabilities(context.Background()); err == nil {
 		t.Fatal("Capabilities on dead candidate succeeded, want the first operation returned exactly once")
 	}
-	if tr.idx != 1 || tr.session != nil {
-		t.Fatalf("after first operation idx=%d session==nil:%v, want candidate 1 selected but not spawned", tr.idx, tr.session == nil)
+	if idx, active := tr.State(); idx != 1 || active {
+		t.Fatalf("after first operation idx=%d active=%v, want candidate 1 selected but not spawned", idx, active)
 	}
 
 	caps, err := c.Capabilities(context.Background())
@@ -402,8 +540,8 @@ func TestCmdTransportReconnectsNextOperationToWorkingCandidate(t *testing.T) {
 	if caps.Name != "stub" {
 		t.Fatalf("name = %q, want stub (the second candidate answered)", caps.Name)
 	}
-	if tr.idx != 1 || tr.session == nil {
-		t.Fatalf("idx=%d session==nil:%v, want a live child pinned to candidate 1", tr.idx, tr.session == nil)
+	if idx, active := tr.State(); idx != 1 || !active {
+		t.Fatalf("idx=%d active=%v, want a live child pinned to candidate 1", idx, active)
 	}
 }
 
@@ -440,8 +578,8 @@ func TestCmdTransportPreSendFailureAdvancesOnlyNextOperation(t *testing.T) {
 	if got := spawns(); got != 0 {
 		t.Fatalf("second candidate spawned %d times during the failed operation, want 0", got)
 	}
-	if tr.idx != 1 {
-		t.Fatalf("idx = %d, want 1 selected for the next operation", tr.idx)
+	if idx, _ := tr.State(); idx != 1 {
+		t.Fatalf("idx = %d, want 1 selected for the next operation", idx)
 	}
 }
 
@@ -453,23 +591,24 @@ func TestSSHStdioResolvesAddrsAtSpawnNotConstruction(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	peer := "me@node.tail.ts.net"
 
-	tx := SSHStdio(testSessionPool(t), peer, "cookiesync rpc whoami")
+	tx := synctransport.NewSSHStdio(testSessionPool(t), peer, "cookiesync rpc whoami")
 	if err := hostregistry.Mesh.AddAddr(context.Background(), peer, "me@node.local"); err != nil {
 		t.Fatalf("AddAddr: %v", err)
 	}
 
-	tr := tx.(*cmdTransport)
-	if err := tr.ensureCandidates(); err != nil {
+	tr := tx.(*synctransport.CommandTransport)
+	if err := tr.EnsureCandidates(); err != nil {
 		t.Fatalf("ensureCandidates: %v", err)
 	}
+	candidates := tr.Candidates()
 	addrOf := func(argv []string) string { return argv[len(argv)-2] }
-	if len(tr.candidates) != 2 {
-		t.Fatalf("candidates = %d, want 2 (post-construction LAN addr + tailnet FQDN)", len(tr.candidates))
+	if len(candidates) != 2 {
+		t.Fatalf("candidates = %d, want 2 (post-construction LAN addr + tailnet FQDN)", len(candidates))
 	}
-	if got := addrOf(tr.candidates[0]); got != "me@node.local" {
+	if got := addrOf(candidates[0]); got != "me@node.local" {
 		t.Fatalf("first candidate dials %q, want the post-construction LAN addr me@node.local", got)
 	}
-	if got := addrOf(tr.candidates[1]); got != peer {
+	if got := addrOf(candidates[1]); got != peer {
 		t.Fatalf("last candidate dials %q, want the tailnet FQDN %q", got, peer)
 	}
 }
@@ -485,7 +624,7 @@ func TestSSHStdioPoisonedAddrsSurfacesErrorFromDo(t *testing.T) {
 		t.Fatalf("poison addrs: %v", err)
 	}
 
-	tx := SSHStdio(testSessionPool(t), "me@node.tail.ts.net", "cookiesync rpc whoami")
+	tx := synctransport.NewSSHStdio(testSessionPool(t), "me@node.tail.ts.net", "cookiesync rpc whoami")
 	t.Cleanup(func() { _ = tx.Close() })
 
 	_, err := tx.Do(context.Background(), &rpc.Request{Method: MethodCapabilities})
@@ -516,10 +655,8 @@ func failingSpawnCandidate(t *testing.T) ([]string, func() int) {
 // consecutive-failure counter and clears the armed backoff window, asserting child-spawn
 // counts: the working child never runs the failing script.
 func TestCmdTransportBackoffResetsAfterSuccess(t *testing.T) {
-	prevBase, prevMax := transportBackoffBase, transportBackoffMax
-	transportBackoffBase = 50 * time.Millisecond
-	transportBackoffMax = 200 * time.Millisecond
-	t.Cleanup(func() { transportBackoffBase, transportBackoffMax = prevBase, prevMax })
+	const backoffMax = 200 * time.Millisecond
+	t.Cleanup(synctransport.SetBackoff(50*time.Millisecond, backoffMax))
 
 	failing, spawns := failingSpawnCandidate(t)
 	working := buildStub(t, "rpcstub")
@@ -537,24 +674,23 @@ func TestCmdTransportBackoffResetsAfterSuccess(t *testing.T) {
 	if got := spawns(); got != 2 {
 		t.Fatalf("spawns after two failures = %d, want 2", got)
 	}
-	if tr.resetCount != 2 {
-		t.Fatalf("resetCount = %d, want 2 after two consecutive failures", tr.resetCount)
+	if count, _ := tr.FailureState(); count != 2 {
+		t.Fatalf("resetCount = %d, want 2 after two consecutive failures", count)
 	}
 
 	// Clear the armed window without sleeping, then a success against a working child
 	// zeroes the counter and the window.
-	tr.resetAt = time.Now().Add(-transportBackoffMax)
-	tr.candidates = [][]string{{working}}
+	tr.BackdateReset(backoffMax)
+	tr.ReplaceCandidates([][]string{{working}})
 	if _, err := tr.Do(ctx, req); err != nil {
 		t.Fatalf("Do against working child: %v", err)
 	}
 	if got := spawns(); got != 2 {
 		t.Fatalf("the working child spawned the failing script: spawns = %d, want still 2", got)
 	}
-	if tr.resetCount != 0 {
-		t.Fatalf("resetCount after a success = %d, want 0 (success clears the failure counter)", tr.resetCount)
-	}
-	if wait := tr.backoffRemaining(); wait != 0 {
+	if count, wait := tr.FailureState(); count != 0 {
+		t.Fatalf("resetCount after a success = %d, want 0 (success clears the failure counter)", count)
+	} else if wait != 0 {
 		t.Fatalf("backoffRemaining after a success = %s, want 0 (reset clears the window)", wait)
 	}
 }
@@ -565,10 +701,11 @@ func TestCmdTransportBackoffResetsAfterSuccess(t *testing.T) {
 // window has elapsed. resetAt is backdated to advance the window deterministically
 // without sleeping.
 func TestCmdTransportBackoffGrowsAndCaps(t *testing.T) {
-	prevBase, prevMax := transportBackoffBase, transportBackoffMax
-	transportBackoffBase = 50 * time.Millisecond
-	transportBackoffMax = 120 * time.Millisecond
-	t.Cleanup(func() { transportBackoffBase, transportBackoffMax = prevBase, prevMax })
+	const (
+		backoffBase = 50 * time.Millisecond
+		backoffMax  = 120 * time.Millisecond
+	)
+	t.Cleanup(synctransport.SetBackoff(backoffBase, backoffMax))
 
 	failing, spawns := failingSpawnCandidate(t)
 	tr := testCmdTransport(t, [][]string{failing})
@@ -594,24 +731,24 @@ func TestCmdTransportBackoffGrowsAndCaps(t *testing.T) {
 			t.Fatalf("a backed-off Do spawned a child: spawns = %d, want %d", got, wantSpawns)
 		}
 	}
-	backdate := func(d time.Duration) { tr.resetAt = time.Now().Add(-d) }
+	backdate := tr.BackdateReset
 
 	fail(1) // resetCount 1, window 0
 	fail(2) // resetCount 2, window = base (50ms)
 
 	backoff(2) // inside the base window
-	backdate(transportBackoffBase + 5*time.Millisecond)
+	backdate(backoffBase + 5*time.Millisecond)
 	fail(3) // window elapsed → spawn; resetCount 3, window = 2*base (100ms)
 
-	backdate(transportBackoffBase + 5*time.Millisecond) // 55ms < 100ms
-	backoff(3)                                          // still backing off proves the window doubled
+	backdate(backoffBase + 5*time.Millisecond) // 55ms < 100ms
+	backoff(3)                                 // still backing off proves the window doubled
 
-	backdate(2*transportBackoffBase + 5*time.Millisecond) // > 100ms
-	fail(4)                                               // resetCount 4, window = base*4 clamped to max (120ms)
+	backdate(2*backoffBase + 5*time.Millisecond) // > 100ms
+	fail(4)                                      // resetCount 4, window = base*4 clamped to max (120ms)
 
 	// 125ms is past the 120ms cap but short of the uncapped base*4 (200ms), so a spawn
 	// here proves the window was clamped rather than still doubling.
-	backdate(transportBackoffMax + 5*time.Millisecond)
+	backdate(backoffMax + 5*time.Millisecond)
 	fail(5)
 }
 
@@ -635,8 +772,8 @@ func TestCmdTransportCtxTimeoutAfterFirstByteNoFailover(t *testing.T) {
 	if got := spawns(); got != 0 {
 		t.Fatalf("second candidate spawned %d times; a mid-Do ctx timeout must not fail over", got)
 	}
-	if tr.idx != 0 {
-		t.Fatalf("idx = %d, want 0 (no failover on timeout)", tr.idx)
+	if idx, _ := tr.State(); idx != 0 {
+		t.Fatalf("idx = %d, want 0 (no failover on timeout)", idx)
 	}
 }
 
@@ -670,10 +807,7 @@ func TestCmdTransportDoneCtxTerminalNoSecondCandidate(t *testing.T) {
 // every Do, and two such failures arm the window so the third Do fast-fails rather than
 // storming respawns.
 func TestCmdTransportSpawnFailureArmsBackoff(t *testing.T) {
-	prevBase, prevMax := transportBackoffBase, transportBackoffMax
-	transportBackoffBase = 100 * time.Millisecond
-	transportBackoffMax = 400 * time.Millisecond
-	t.Cleanup(func() { transportBackoffBase, transportBackoffMax = prevBase, prevMax })
+	t.Cleanup(synctransport.SetBackoff(100*time.Millisecond, 400*time.Millisecond))
 
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 	tr := testCmdTransport(t, [][]string{{missing}})
@@ -687,8 +821,8 @@ func TestCmdTransportSpawnFailureArmsBackoff(t *testing.T) {
 			t.Fatalf("Do #%d = %v, want a spawn failure, not backoff", i, err)
 		}
 	}
-	if tr.resetCount != 2 {
-		t.Fatalf("resetCount = %d, want 2 (two spawn failures armed the backoff)", tr.resetCount)
+	if count, _ := tr.FailureState(); count != 2 {
+		t.Fatalf("resetCount = %d, want 2 (two spawn failures armed the backoff)", count)
 	}
 	if _, err := tr.Do(ctx, req); err == nil || !strings.Contains(err.Error(), "backing off") {
 		t.Fatalf("Do during backoff = %v, want a fast-fail backoff error (spawn failures throttle)", err)

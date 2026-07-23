@@ -10,9 +10,12 @@ import (
 	"testing"
 
 	dkservice "github.com/yasyf/daemonkit/service"
+	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/codec"
+	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
+	"github.com/yasyf/synckit/rpc"
 )
 
 type fakeServiceController struct {
@@ -21,11 +24,28 @@ type fakeServiceController struct {
 	closeCtxErr error
 	runErr      error
 	closeErr    error
+	status      dkservice.Status
+	stopSpecs   []dkservice.StopControlSpec
+	events      []string
+	stopErr     error
 }
 
 func (f *fakeServiceController) Converge(_ context.Context, agents []dkservice.Agent) error {
+	f.events = append(f.events, "converge")
 	f.desired = append(f.desired, append([]dkservice.Agent(nil), agents...))
 	return f.runErr
+}
+
+func (f *fakeServiceController) Status(_ context.Context, label string) (dkservice.Status, error) {
+	status := f.status
+	status.Label = label
+	return status, nil
+}
+
+func (f *fakeServiceController) StopRuntime(_ context.Context, spec dkservice.StopControlSpec) (wire.StopResult, error) {
+	f.events = append(f.events, "stop")
+	f.stopSpecs = append(f.stopSpecs, spec)
+	return wire.StopResult{Stopped: f.stopErr == nil, ProcessGeneration: spec.TargetProcessGeneration}, f.stopErr
 }
 
 func (f *fakeServiceController) Close(ctx context.Context) error {
@@ -39,6 +59,13 @@ func useServiceController(t *testing.T, controller serviceController) {
 	previous := openServiceController
 	openServiceController = func(context.Context) (serviceController, error) { return controller, nil }
 	t.Cleanup(func() { openServiceController = previous })
+}
+
+func useRuntimeHealth(t *testing.T, health rpc.RuntimeHealth) {
+	t.Helper()
+	previous := observeRuntimeHealth
+	observeRuntimeHealth = func(context.Context, string) (rpc.RuntimeHealth, error) { return health, nil }
+	t.Cleanup(func() { observeRuntimeHealth = previous })
 }
 
 func TestServiceAgents(t *testing.T) {
@@ -179,7 +206,7 @@ func TestInstallConvergesExactDesiredSet(t *testing.T) {
 	}
 	controller := &fakeServiceController{}
 	useServiceController(t, controller)
-	if err := install(context.Background()); err != nil {
+	if err := install(context.Background(), "v1.2.3"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	if controller.closed != 1 {
@@ -206,14 +233,95 @@ func TestInstallConvergesExactDesiredSet(t *testing.T) {
 	}
 }
 
+func TestInstallStopsAndSettlesPriorRuntimeBeforeConverge(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	controller := &fakeServiceController{status: dkservice.Status{Loaded: true}}
+	useServiceController(t, controller)
+	useRuntimeHealth(t, rpc.RuntimeHealth{
+		RuntimeBuild: "v1.2.2", RuntimeProtocol: int(rpc.Version),
+		ProcessGeneration: "old-generation", PID: os.Getpid(), State: "healthy", Ready: true,
+	})
+	if err := install(context.Background(), "v1.2.3"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !slices.Equal(controller.events, []string{"stop", "converge"}) {
+		t.Fatalf("events = %v, want stop then converge", controller.events)
+	}
+	if len(controller.stopSpecs) != 1 {
+		t.Fatalf("stop specs = %d, want 1", len(controller.stopSpecs))
+	}
+	spec := controller.stopSpecs[0]
+	sock, err := hostregistry.Mesh.SockPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Role != labelPrefix+".stop" || spec.RuntimeBuild != "v1.2.3" ||
+		spec.RuntimeProtocol != int(rpc.Version) || spec.TargetProcessGeneration != "old-generation" ||
+		spec.Intent != wire.StopIntentUpgrade || !slices.Equal(spec.Args, []string{"stop-control", sock}) {
+		t.Fatalf("stop spec = %+v", spec)
+	}
+}
+
+func TestInstallDoesNotConvergeWhenPriorRuntimeCannotSettle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	stopErr := errors.New("target did not settle")
+	controller := &fakeServiceController{status: dkservice.Status{Loaded: true}, stopErr: stopErr}
+	useServiceController(t, controller)
+	useRuntimeHealth(t, rpc.RuntimeHealth{
+		RuntimeBuild: "v1.2.2", RuntimeProtocol: int(rpc.Version),
+		ProcessGeneration: "old-generation", PID: os.Getpid(), State: "healthy", Ready: true,
+	})
+	err := install(context.Background(), "v1.2.3")
+	if !errors.Is(err, stopErr) || !slices.Equal(controller.events, []string{"stop"}) {
+		t.Fatalf("install = %v events=%v, want stop failure before converge", err, controller.events)
+	}
+}
+
+func TestInstallRestartsSameBuildBeforeConverge(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	controller := &fakeServiceController{status: dkservice.Status{Loaded: true}}
+	useServiceController(t, controller)
+	useRuntimeHealth(t, rpc.RuntimeHealth{
+		RuntimeBuild: "v1.2.3", RuntimeProtocol: int(rpc.Version),
+		ProcessGeneration: "current-generation", PID: os.Getpid(), State: "healthy", Ready: true,
+	})
+	if err := install(context.Background(), "v1.2.3"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !slices.Equal(controller.events, []string{"stop", "converge"}) ||
+		len(controller.stopSpecs) != 1 || controller.stopSpecs[0].Intent != wire.StopIntentRestart {
+		t.Fatalf("events=%v stop=%+v, want restart before converge", controller.events, controller.stopSpecs)
+	}
+}
+
 func TestUninstallConvergesStoredSetToEmpty(t *testing.T) {
 	controller := &fakeServiceController{}
 	useServiceController(t, controller)
-	if err := uninstall(context.Background()); err != nil {
+	if err := uninstall(context.Background(), "v1.2.3"); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
 	if controller.closed != 1 || len(controller.desired) != 1 || controller.desired[0] != nil {
 		t.Fatalf("controller state: closed=%d desired=%v", controller.closed, controller.desired)
+	}
+}
+
+func TestUninstallStopsAndSettlesRuntimeBeforeRemovingServices(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	controller := &fakeServiceController{status: dkservice.Status{Loaded: true}}
+	useServiceController(t, controller)
+	useRuntimeHealth(t, rpc.RuntimeHealth{
+		RuntimeBuild: "v1.2.3", RuntimeProtocol: int(rpc.Version),
+		ProcessGeneration: "current-generation", PID: os.Getpid(), State: "healthy", Ready: true,
+	})
+	if err := uninstall(context.Background(), "v1.2.3"); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if !slices.Equal(controller.events, []string{"stop", "converge"}) || len(controller.stopSpecs) != 1 ||
+		controller.stopSpecs[0].Intent != wire.StopIntentUninstall || controller.desired[0] != nil {
+		t.Fatalf("events=%v stop=%+v desired=%v", controller.events, controller.stopSpecs, controller.desired)
 	}
 }
 

@@ -9,13 +9,14 @@ import (
 	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/internal/synctransport"
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 )
 
 func daemonClient(sock string) *rpc.Client {
-	return rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), Build: rpc.Build})
+	return rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), WireBuild: rpc.WireBuild})
 }
 
 // dialTransport is the seam serve and reconcile use to reach a consumer's typed
@@ -33,11 +34,11 @@ func resolveTransport(pool *supervise.Pool, m manifest.Manifest, peer, self stri
 		case "socket":
 			return syncservice.Socket(expandHome(m.Service.Sock))
 		case "stdio":
-			return syncservice.Stdio(pool, m.Binary, m.Service.ServeArgs...)
+			return synctransport.NewStdio(pool, m.Binary, m.Service.ServeArgs...)
 		}
 		panic("daemon: manifest " + m.Name + " has invalid local transport " + m.Service.Transport)
 	}
-	return syncservice.SSHStdio(pool, peer, remoteServeCmd(m))
+	return synctransport.NewSSHStdio(pool, peer, remoteServeCmd(m))
 }
 
 // remoteServeCmd joins the consumer's rpc-serve invocation into a single shell

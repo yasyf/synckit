@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
@@ -29,7 +30,20 @@ func (stub) Sync(context.Context, string) (syncservice.SyncResult, error) {
 	return syncservice.SyncResult{Converged: 1}, nil
 }
 
-func (stub) GetState(context.Context) (syncservice.RawRegistry, error) {
+func (stub) GetState(ctx context.Context) (syncservice.RawRegistry, error) {
+	if raw := os.Getenv("SYNCKIT_TEST_GET_STATE_DELAY"); raw != "" {
+		delay, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, err
+		}
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 	return syncservice.RawRegistry(stateJSON), nil
 }
 

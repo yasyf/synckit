@@ -44,7 +44,7 @@ func main() {
 	ln, _ := rpc.Listen(ctx, sock)
 	go rpc.NewServer(d).Serve(ctx, ln)
 
-	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), Build: rpc.Build})
+	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), WireBuild: rpc.WireBuild})
 	defer client.Close()
 	resp, _ := client.Call(ctx, &rpc.Request{
 		Method: "ping",
@@ -69,7 +69,7 @@ Driving with an agent? Paste this:
 Run `go get github.com/yasyf/synckit`, then use its rpc package to stand up a
 unix-socket server: register a ping handler on rpc.NewDispatcher, bind with
 rpc.Listen, serve with rpc.NewServer, and call it through a persistent
-rpc.NewClient using rpc.Build. Keep the exact-build handshake, same-UID trust,
+rpc.NewClient using rpc.WireBuild. Keep the exact-build handshake, same-UID trust,
 and bounded framing as shipped.
 ```
 
@@ -87,6 +87,12 @@ synckitd register manifest.json
 ```
 
 `synckitd` installs the manifest under `~/.config/synckit/manifests` and drives your tool's typed sync service — list, reconcile, sync — over the transport the manifest declares: a unix socket, a spawned child's stdio, or ssh to a peer. The daemon never imports your code.
+
+Consumer CLIs share one crash-recoverable process owner across an entire
+concurrent pass with `syncservice.WithTransportRunner`; its opaque runner creates
+local `Stdio` and remote `SSHStdio` transports and settles every session when the
+callback ends. Resident socket helpers use `helperruntime.New`, supplying only
+their product workers, state, resources, activation, and pre-settlement drain.
 
 ### Watch files without chasing your own writes
 
@@ -114,7 +120,7 @@ A pass fetches every peer's registry read-only, folds them in with the CRDT merg
 | Package | What it holds |
 |---|---|
 | `rpc` | Exact persistent daemonkit sessions carrying typed `{method,params}` calls with same-UID trust and bounded frames |
-| `syncservice` | The typed sync contract over `rpc` (capabilities, list, reconcile, sync, get_state) plus the client and its three transports |
+| `syncservice` | The typed sync contract over `rpc` plus socket transport and callback-scoped local/SSH process transports |
 | `watch` | The generic anti-echo watch engine: debounce, fingerprint dedupe, record-before-notify, concurrent peer fan-out, busy gating |
 | `watchbackend` | Filesystem events mapped to watch ids over recursive fsnotify (inotify/kqueue) |
 | `hostregistry` | The host mesh: reachability detection, Tailscale and Bonjour discovery, an ssh runner, flock-guarded `state.json` |

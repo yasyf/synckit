@@ -11,42 +11,35 @@ import (
 	"time"
 
 	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/daemonrole"
+	"github.com/yasyf/daemonkit/proc"
 	"github.com/yasyf/daemonkit/supervise"
 	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/codec"
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/internal/runtimeowner"
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 )
 
-func TestRuntimeRPCServerProtectsLifecycleCapacity(t *testing.T) {
-	executable, err := os.Executable()
+func TestRuntimeOwnershipUsesExactSuiteAndStopRole(t *testing.T) {
+	shortConfigHome(t)
+	executable := testDaemonRoleAlias(t)
+	server := rpc.NewServer(rpc.NewDispatcher())
+	role, verifier, err := runtimeowner.StopAuthority()
 	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
+		t.Fatalf("StopAuthority: %v", err)
 	}
-	const build = "v9.8.7-test"
-	server, err := runtimeRPCServer(rpc.NewDispatcher(), executable, build)
-	if err != nil {
-		t.Fatalf("runtimeRPCServer: %v", err)
+	if server.Wire.WireBuild != rpc.WireBuild {
+		t.Fatalf("wire build = %q, want %q", server.Wire.WireBuild, rpc.WireBuild)
 	}
-	if server.Wire.Build != rpc.Build {
-		t.Fatalf("business build = %q, want %q", server.Wire.Build, rpc.Build)
-	}
-	if server.Wire.LifecycleBuild != build {
-		t.Fatalf("lifecycle build = %q, want %q", server.Wire.LifecycleBuild, build)
-	}
-	if server.Wire.ReservedProtectedSessions != 1 {
-		t.Fatalf("reserved protected sessions = %d, want 1", server.Wire.ReservedProtectedSessions)
-	}
-	role, ok := server.Wire.ProtectedSessionClassifier.(daemonrole.Classifier)
-	if !ok {
-		t.Fatalf("protected classifier = %T, want daemonrole.Classifier", server.Wire.ProtectedSessionClassifier)
-	}
-	if role.RoleID != labelPrefix+".serve" || role.RolePath != executable {
+	if role.RoleID != labelPrefix+".stop" || role.RolePath != executable {
 		t.Fatalf("role = %+v", role)
+	}
+	store, ok := verifier.Store.(*proc.FileStore)
+	if !ok || filepath.Base(store.Path) != "service-processes.db" {
+		t.Fatalf("stop store = %#v", verifier.Store)
 	}
 }
 
@@ -62,15 +55,13 @@ func TestServePublishesReleaseBuildAfterActivation(t *testing.T) {
 	const build = "v9.8.7-test"
 	go func() { served <- serve(ctx, build) }()
 
-	peer := &wire.LifecyclePeer{Config: wire.ClientConfig{
-		Dial: wire.UnixDialer(sock), Build: rpc.Build, LifecycleBuild: build, MaxFrame: rpc.MaxFrame,
-	}}
-	t.Cleanup(func() { _ = peer.Close() })
+	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), WireBuild: rpc.WireBuild})
+	t.Cleanup(func() { _ = client.Close() })
 	deadline := time.Now().Add(5 * time.Second)
-	var health dkdaemon.Health
+	var health rpc.RuntimeHealth
 	for {
 		probeCtx, probeCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		health, err = peer.Health(probeCtx)
+		health, err = client.RuntimeHealth(probeCtx)
 		probeCancel()
 		if err == nil {
 			break
@@ -81,7 +72,8 @@ func TestServePublishesReleaseBuildAfterActivation(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if health.Build != build || health.Protocol != int(wire.ProtocolVersion) || health.State != dkdaemon.StateHealthy {
+	if health.RuntimeBuild != build || health.RuntimeProtocol != int(rpc.Version) ||
+		health.State != string(dkdaemon.StateHealthy) || !health.Ready || health.ProcessGeneration == "" {
 		t.Fatalf("health = %+v", health)
 	}
 	dir, err := manifestsDir()
@@ -92,7 +84,7 @@ func TestServePublishesReleaseBuildAfterActivation(t *testing.T) {
 		t.Fatalf("activation did not create manifests dir: info=%v err=%v", info, err)
 	}
 
-	_ = peer.Close()
+	_ = client.Close()
 	cancel()
 	select {
 	case err := <-served:

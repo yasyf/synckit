@@ -59,7 +59,7 @@ func TestRequestDerivesRequestorFromPeerSID(t *testing.T) {
 		<-done
 	})
 
-	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), Build: rpc.Build})
+	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), WireBuild: rpc.WireBuild})
 	defer func() { _ = client.Close() }()
 	resp, err := client.Call(context.Background(), &rpc.Request{
 		Method: MethodRequest,

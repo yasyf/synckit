@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/yasyf/synckit/codec"
+	"github.com/yasyf/synckit/internal/serviceidentity"
 )
 
 // Manifest is a consumer's registration: its binary, watch spec, and the typed
@@ -74,16 +75,7 @@ func validTransport(t string) bool {
 }
 
 func validName(name string) bool {
-	if len(name) == 0 || len(name) > 63 || name[0] == '-' || name[len(name)-1] == '-' {
-		return false
-	}
-	for _, char := range []byte(name) {
-		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-' {
-			continue
-		}
-		return false
-	}
-	return true
+	return serviceidentity.ValidateName(name) == nil
 }
 
 func validSessionType(value SessionType) bool {

@@ -6,19 +6,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `helperruntime.New` composes an embedded consumer helper from product-owned
+  workers, state, resources, activation, and drain hooks while Synckit privately
+  owns exact wire identity, runtime health, admission, stop authority, and the
+  shared service-process store.
+- `hostregistry.WithExecRunner` and `syncservice.WithTransportRunner` provide
+  callback-scoped, crash-recoverable process ownership for concurrent CLI
+  commands and local/SSH sync transports. Escaped runners and transports fail
+  deterministically after the scope settles.
+
 ### Changed
-- The Synckit-owned business RPC is hard-reset to the single exact
-  `synckit.rpc.v1` build identity. Daemonkit rejects every other schema before
-  dispatch; the redundant typed-service protocol field and negotiation pass are
-  removed.
+- The Synckit-owned RPC suite now derives one exact
+  `com.yasyf.synckit.rpc/<schema-sha256>/v1` wire build from its canonical schema.
+  Daemonkit rejects every other schema before dispatch.
 - `rpc.Server.ServeSession` now serves one spawned-parent stdio session through
   daemonkit's exact framed engine without a synthetic listener or local adapter.
-- `synckitd serve` now uses daemonkit's composed runtime, exact business/release
-  build identities, protected lifecycle admission, takeover, readiness, and drain.
-- LaunchAgent installation now converges an exact durable desired set through
-  daemonkit's crash-recoverable service controller and typed launch policy.
+- `synckitd serve` now uses daemonkit's sole composed wire runtime, product runtime-health
+  observation, receipt-authenticated stop control, exact release identity, readiness, and drain.
+- LaunchAgent installation now stops and settles the exact incumbent generation before
+  converging the durable desired set through daemonkit's service controller.
 
 ### Removed
+- Public `syncservice.Stdio` and `syncservice.SSHStdio` constructors that exposed
+  a caller-owned `*supervise.Pool`; process-backed transports now require the
+  opaque scoped runner.
 - The duplicate `service` package, arbitrary plist keys, manual launchctl retry
   machinery, and the unused manifest `launchd`/helper-label fields.
 

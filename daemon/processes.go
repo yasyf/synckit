@@ -4,14 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"path/filepath"
 
 	"github.com/yasyf/daemonkit/proc"
 	"github.com/yasyf/daemonkit/supervise"
 
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/internal/clirunner"
 )
 
 const processWorkerLimit = 64
@@ -53,39 +52,16 @@ func (o *processOwner) Cancel() { o.pool.Cancel() }
 
 func (o *processOwner) Wait(ctx context.Context) error { return o.pool.Wait(ctx) }
 
-func withCLIProcessOwner(ctx context.Context, run func(*supervise.Pool) error) (err error) {
+func withCLIProcessOwner(ctx context.Context, run func(*supervise.Pool) error) error {
 	dir, err := hostregistryDir()
 	if err != nil {
 		return err
 	}
-	lock, err := (proc.FileLockSpec{
-		Path: filepath.Join(dir, "cli-processes.lock"),
-		Mode: proc.FileLockExclusive,
-	}).Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire CLI process owner: %w", err)
-	}
-	defer func() { err = errors.Join(err, lock.Close()) }()
-
-	owner, err := newProcessOwner(filepath.Join(dir, "cli-processes.db"))
-	if err != nil {
-		return err
-	}
-	defer func() {
-		owner.Close()
-		owner.Cancel()
-		err = errors.Join(err, owner.Wait(context.WithoutCancel(ctx)))
-	}()
-	if err := owner.recover(ctx); err != nil {
-		return fmt.Errorf("recover CLI processes: %w", err)
-	}
-	return run(owner.pool)
+	return clirunner.WithPool(ctx, dir, run)
 }
 
 func withCLIExecRunner(ctx context.Context, run func(hostregistry.Runner) error) error {
-	return withCLIProcessOwner(ctx, func(pool *supervise.Pool) error {
-		return run(hostregistry.NewExecRunner(pool))
-	})
+	return hostregistry.WithExecRunner(ctx, run)
 }
 
 func hostregistryDir() (string, error) {

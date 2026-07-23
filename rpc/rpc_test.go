@@ -48,7 +48,7 @@ func serve(t *testing.T, dispatcher *Dispatcher, configure func(*Server)) string
 }
 
 func client(sock string) *Client {
-	return NewClient(ClientConfig{Dial: wire.UnixDialer(sock), Build: Build})
+	return NewClient(ClientConfig{Dial: wire.UnixDialer(sock), WireBuild: WireBuild})
 }
 
 func decodeResult[T any](t *testing.T, response *Response) T {
@@ -153,9 +153,9 @@ func TestHandlerPanicDoesNotEndSession(t *testing.T) {
 	}
 }
 
-func TestOldBusinessBuildRejectsBeforeDispatch(t *testing.T) {
-	if Build != "synckit.rpc.v1" {
-		t.Fatalf("business build = %q, want exact v1", Build)
+func TestWrongWireBuildRejectsBeforeDispatch(t *testing.T) {
+	if !strings.HasPrefix(WireBuild, "com.yasyf.synckit.rpc/") || !strings.HasSuffix(WireBuild, "/v1") {
+		t.Fatalf("wire build = %q, want fingerprinted v1 suite", WireBuild)
 	}
 	var calls atomic.Int32
 	dispatcher := NewDispatcher()
@@ -164,7 +164,7 @@ func TestOldBusinessBuildRejectsBeforeDispatch(t *testing.T) {
 		return nil, nil
 	})
 	sock := serve(t, dispatcher, nil)
-	c := NewClient(ClientConfig{Dial: wire.UnixDialer(sock), Build: "synckit.rpc.v4"})
+	c := NewClient(ClientConfig{Dial: wire.UnixDialer(sock), WireBuild: "com.yasyf.synckit.rpc/wrong/v1"})
 	defer func() { _ = c.Close() }()
 	_, err := c.Call(context.Background(), &Request{Method: "mutate"})
 	var transportErr *TransportError
@@ -240,7 +240,7 @@ func TestPostSendFailureIsNotReplayedAndNextCallReconnects(t *testing.T) {
 		}
 		return wire.UnixDialer(sock)(ctx)
 	}
-	c := NewClient(ClientConfig{Dial: dial, Build: Build})
+	c := NewClient(ClientConfig{Dial: dial, WireBuild: WireBuild})
 	defer func() { _ = c.Close() }()
 	_, err := c.Call(context.Background(), &Request{Method: "mutate"})
 	var transportErr *TransportError
@@ -266,10 +266,10 @@ func closeAfterRequest(conn net.Conn) {
 	if err != nil || hello.Kind != wire.FrameHello {
 		return
 	}
-	identity, err := json.Marshal(wire.BuildIdentity{
-		Protocol: wire.ProtocolVersion,
-		Build:    Build,
-		Session:  make([]byte, 16),
+	identity, err := json.Marshal(wire.WireIdentity{
+		Protocol:  wire.ProtocolVersion,
+		WireBuild: WireBuild,
+		Session:   make([]byte, 16),
 	})
 	if err != nil {
 		return
