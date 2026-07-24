@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-07-24
+
+### Changed
+- Pin daemonkit v0.17.4 so helper runtime drain settles admitted requests and
+  terminal transport acknowledgements before socket teardown.
+
+## [0.33.0] - 2026-07-24
+
 ### Added
 - Exact schema-v1 `rpc-serve-v1` remote sessions with a 32-byte random nonce
   echo before daemonkit framing.
