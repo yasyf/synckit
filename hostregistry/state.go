@@ -41,9 +41,8 @@ type schemaDescriptor struct {
 }
 
 type hostRegistryState struct {
-	Self  string              `json:"self"`
-	Hosts []string            `json:"hosts"`
-	Addrs map[string][]string `json:"addrs"`
+	Self  string        `json:"self"`
+	Hosts []SSHHostFact `json:"hosts"`
 }
 
 type stateEnvelope struct {
@@ -84,7 +83,7 @@ func (c Config) InitializeState(ctx context.Context) error {
 		}
 		env := stateEnvelope{
 			Schema:  schemaDescriptor{Identity: c.State.Identity, Version: StateSchemaVersion, Fingerprint: c.State.Fingerprint},
-			Host:    hostRegistryState{Hosts: []string{}, Addrs: map[string][]string{}},
+			Host:    hostRegistryState{Hosts: []SSHHostFact{}},
 			Product: slices.Clone(c.State.InitialProduct),
 		}
 		return c.writeEnvelope(env)
@@ -156,7 +155,7 @@ func (c Config) decodeEnvelope(data []byte) (stateEnvelope, error) {
 	if schema.Identity != c.State.Identity || schema.Version != StateSchemaVersion || schema.Fingerprint != c.State.Fingerprint {
 		return stateEnvelope{}, fmt.Errorf("%w: got identity=%q version=%d fingerprint=%q", ErrStateSchema, schema.Identity, schema.Version, schema.Fingerprint)
 	}
-	if _, err := exactObject(top["host_registry"], []string{"self", "hosts", "addrs"}); err != nil {
+	if _, err := exactObject(top["host_registry"], []string{"self", "hosts"}); err != nil {
 		return stateEnvelope{}, fmt.Errorf("%w: host_registry: %w", ErrStateSchema, err)
 	}
 	var host hostRegistryState
@@ -213,33 +212,27 @@ func (c Config) validateContract() error {
 }
 
 func validateHostRegistry(host hostRegistryState) error {
-	if host.Hosts == nil || host.Addrs == nil {
-		return errors.New("hosts and addrs must be present")
+	if host.Hosts == nil {
+		return errors.New("hosts must be present")
+	}
+	if host.Self != "" {
+		if _, _, err := splitSSHIdentity(host.Self); err != nil {
+			return fmt.Errorf("self: %w", err)
+		}
 	}
 	seen := map[string]struct{}{}
-	for _, target := range host.Hosts {
-		if target == "" {
-			return errors.New("hosts contains an empty target")
+	for i, fact := range host.Hosts {
+		validated, err := NewSSHHostFact(fact.Identity, fact.SynckitdPath, fact.Addresses)
+		if err != nil {
+			return fmt.Errorf("hosts[%d]: %w", i, err)
 		}
-		if _, ok := seen[target]; ok {
-			return fmt.Errorf("hosts contains duplicate %q", target)
+		if !equalSSHHostFact(validated, fact) {
+			return fmt.Errorf("hosts[%d]: non-canonical host fact", i)
 		}
-		seen[target] = struct{}{}
-	}
-	for target, addrs := range host.Addrs {
-		if target == "" || addrs == nil {
-			return errors.New("addrs contains an empty target or null address list")
+		if _, ok := seen[fact.Identity]; ok {
+			return fmt.Errorf("hosts contains duplicate %q", fact.Identity)
 		}
-		seenAddr := map[string]struct{}{}
-		for _, addr := range addrs {
-			if addr == "" {
-				return fmt.Errorf("addrs[%q] contains an empty address", target)
-			}
-			if _, ok := seenAddr[addr]; ok {
-				return fmt.Errorf("addrs[%q] contains duplicate %q", target, addr)
-			}
-			seenAddr[addr] = struct{}{}
-		}
+		seen[fact.Identity] = struct{}{}
 	}
 	return nil
 }

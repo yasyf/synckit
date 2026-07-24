@@ -28,6 +28,13 @@ func TestWithTransportRunnerConcurrentTransports(t *testing.T) {
 	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
 		t.Fatalf("initialize mesh state: %v", err)
 	}
+	fact, err := hostregistry.NewSSHHostFact("me@peer", "/opt/homebrew/bin/synckitd", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hostregistry.Mesh.RegisterHost(context.Background(), fact); err != nil {
+		t.Fatal(err)
+	}
 	bin := buildStub(t, "rpcstub")
 	fakeBin := t.TempDir()
 	ssh := filepath.Join(fakeBin, "ssh")
@@ -37,7 +44,7 @@ func TestWithTransportRunnerConcurrentTransports(t *testing.T) {
 	t.Setenv("SYNCKIT_TEST_RPC_STUB", bin)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	const count = 8
-	err := WithTransportRunner(context.Background(), func(runner TransportRunner) error {
+	err = WithTransportRunner(context.Background(), func(runner TransportRunner) error {
 		var wg sync.WaitGroup
 		errs := make(chan error, count)
 		for i := range count {
@@ -46,7 +53,7 @@ func TestWithTransportRunnerConcurrentTransports(t *testing.T) {
 				defer wg.Done()
 				transport := runner.Stdio(bin)
 				if i%2 == 1 {
-					transport = runner.SSHStdio("peer", "ignored")
+					transport = runner.SSHStdio("me@peer", "ignored")
 				}
 				client := NewClient(transport)
 				defer func() { _ = client.Close() }()
@@ -598,8 +605,12 @@ func TestSSHStdioResolvesAddrsAtSpawnNotConstruction(t *testing.T) {
 	peer := "me@node.tail.ts.net"
 
 	tx := synctransport.NewSSHStdio(testSessionPool(t), peer, "cookiesync rpc whoami")
-	if err := hostregistry.Mesh.AddAddr(context.Background(), peer, "me@node.local"); err != nil {
-		t.Fatalf("AddAddr: %v", err)
+	fact, err := hostregistry.NewSSHHostFact(peer, "/opt/homebrew/bin/synckitd", []string{"me@node.local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hostregistry.Mesh.RegisterHost(context.Background(), fact); err != nil {
+		t.Fatalf("RegisterHost: %v", err)
 	}
 
 	tr := tx.(*synctransport.CommandTransport)
@@ -634,7 +645,7 @@ func TestSSHStdioPoisonedAddrsSurfacesErrorFromDo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data = bytes.Replace(data, []byte(`"addrs":{}`), []byte(`"addrs":"not-a-map"`), 1)
+	data = bytes.Replace(data, []byte(`"hosts":[]`), []byte(`"hosts":"not-an-array"`), 1)
 	if err := os.WriteFile(path, data, 0o600); err != nil { //nolint:gosec // temp state path from the fixed Mesh Config
 		t.Fatal(err)
 	}

@@ -462,6 +462,7 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 func TestDialAddrsDefaultsToTarget(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	initializeTestState(t, Mesh)
+	registerTestHost(t, Mesh, "me@node.tail.ts.net")
 	got, err := DialAddrs("me@node.tail.ts.net")
 	if err != nil {
 		t.Fatalf("DialAddrs: %v", err)
@@ -475,9 +476,7 @@ func TestDialAddrsLANFirstTailnetLast(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	initializeTestState(t, Mesh)
 	target := "me@node.tail.ts.net"
-	if err := Mesh.AddAddr(context.Background(), target, "me@node.local"); err != nil {
-		t.Fatalf("AddAddr: %v", err)
-	}
+	registerTestHost(t, Mesh, target, "me@node.local")
 	got, err := DialAddrs(target)
 	if err != nil {
 		t.Fatalf("DialAddrs: %v", err)
@@ -488,46 +487,32 @@ func TestDialAddrsLANFirstTailnetLast(t *testing.T) {
 	}
 }
 
-func TestAddAddrPreservesRegistryAndDeduplicates(t *testing.T) {
+func TestRegisterHostPersistsOneCanonicalFact(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	initializeTestState(t, Mesh)
 	target := "peer@node.tail.ts.net"
 
 	if _, err := Mesh.Update(context.Background(), func(g *Registry) error {
 		g.Self = "me@self"
-		g.UpsertHost(target)
 		return nil
 	}); err != nil {
 		t.Fatalf("seed mesh: %v", err)
 	}
-	if err := Mesh.AddAddr(context.Background(), target, "peer@node.local"); err != nil {
-		t.Fatalf("AddAddr: %v", err)
-	}
+	registerTestHost(t, Mesh, target, "peer@node.local", "peer@node.local")
 	reg, err := Mesh.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reg.Self != "me@self" || len(reg.Hosts) != 1 || reg.Hosts[0] != target {
-		t.Fatalf("registry changed across AddAddr: %+v", reg)
+		t.Fatalf("registry changed across RegisterHost: %+v", reg)
 	}
 
 	byTarget, err := Mesh.LoadAddrs()
 	if err != nil {
 		t.Fatalf("LoadAddrs: %v", err)
 	}
-	if got := byTarget[target]; len(got) != 1 || got[0] != "peer@node.local" {
-		t.Fatalf("addrs[%q] = %v, want [peer@node.local]", target, got)
-	}
-
-	if err := Mesh.AddAddr(context.Background(), target, "peer@node.local"); err != nil {
-		t.Fatalf("AddAddr repeat: %v", err)
-	}
-	byTarget, err = Mesh.LoadAddrs()
-	if err != nil {
-		t.Fatalf("LoadAddrs: %v", err)
-	}
-	if got := byTarget[target]; len(got) != 1 {
-		t.Fatalf("repeat AddAddr recorded a duplicate: %v", got)
+	if got := byTarget[target]; len(got) != 2 || got[0] != "peer@node.local" || got[1] != target {
+		t.Fatalf("addrs[%q] = %v, want [peer@node.local %s]", target, got, target)
 	}
 }
 
@@ -552,37 +537,36 @@ func TestExecSSHReturnsStdoutOnTerminalFailure(t *testing.T) {
 	}
 }
 
-// TestUpdatePreservesAddrsKey proves the reverse FK direction: once AddAddr has written
-// the "addrs" key, a plain Mesh.Update by an addrs-unaware writer (it touches only
-// self/hosts) leaves the addrs key byte-for-byte intact.
-func TestUpdatePreservesAddrsKey(t *testing.T) {
+func TestUpdatePreservesHostFacts(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	initializeTestState(t, Mesh)
 	target := "peer@node.tail.ts.net"
 
-	if _, err := Mesh.Update(context.Background(), func(g *Registry) error {
-		g.Self = "me@self"
-		g.UpsertHost(target)
-		return nil
-	}); err != nil {
-		t.Fatalf("seed mesh: %v", err)
-	}
-	if err := Mesh.AddAddr(context.Background(), target, "peer@node.local"); err != nil {
-		t.Fatalf("AddAddr: %v", err)
-	}
+	registerTestHost(t, Mesh, target, "peer@node.local")
 
 	if _, err := Mesh.Update(context.Background(), func(g *Registry) error {
-		g.UpsertHost("other@host")
+		g.Self = "me@self"
 		return nil
 	}); err != nil {
-		t.Fatalf("addrs-unaware Update: %v", err)
+		t.Fatalf("identity-only Update: %v", err)
 	}
 	byTarget, err := Mesh.LoadAddrs()
 	if err != nil {
 		t.Fatalf("LoadAddrs: %v", err)
 	}
-	if got := byTarget[target]; len(got) != 1 || got[0] != "peer@node.local" {
-		t.Fatalf("addrs[%q] = %v, want [peer@node.local] preserved through Update", target, got)
+	if got := byTarget[target]; len(got) != 2 || got[0] != "peer@node.local" || got[1] != target {
+		t.Fatalf("addrs[%q] = %v, want [peer@node.local %s] preserved through Update", target, got, target)
+	}
+}
+
+func registerTestHost(t *testing.T, config Config, identity string, addresses ...string) {
+	t.Helper()
+	fact, err := NewSSHHostFact(identity, "/opt/homebrew/bin/synckitd", addresses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.RegisterHost(context.Background(), fact); err != nil {
+		t.Fatal(err)
 	}
 }
 

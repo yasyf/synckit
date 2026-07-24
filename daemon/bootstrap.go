@@ -41,7 +41,6 @@ func AddHost(ctx context.Context, r hostregistry.Runner, manifests []manifest.Ma
 	}
 
 	if _, err := hostregistry.Mesh.Update(ctx, func(g *hostregistry.Registry) error {
-		g.UpsertHost(target)
 		if self != "" {
 			g.Self = self
 		}
@@ -49,39 +48,60 @@ func AddHost(ctx context.Context, r hostregistry.Runner, manifests []manifest.Ma
 	}); err != nil {
 		return fmt.Errorf("save mesh after registering %s: %w", target, err)
 	}
-	step("registered host " + target + " in local mesh")
 	if self != "" {
 		step("self identity: " + self)
 	}
 
-	recordLANAddr(ctx, target, self, step)
-
+	addresses := discoverLANAddresses(ctx, target, self)
+	var daemonPath string
 	if noRecurse {
-		step("no-recurse: skipping remote bootstrap")
+		var ok bool
+		daemonPath, ok = hostregistry.Mesh.RemoteBinaryPath(ctx, r, target, hostregistry.MeshBinary)
+		if !ok {
+			return fmt.Errorf("register %s: exact remote synckitd path is unavailable", target)
+		}
+		step("no-recurse: skipping remote install and reconciliation")
+	} else {
+		var err error
+		daemonPath, err = ensureRemoteDaemon(ctx, r, target, step)
+		if err != nil {
+			return err
+		}
+	}
+	fact, err := hostregistry.NewSSHHostFact(target, daemonPath, addresses)
+	if err != nil {
+		return err
+	}
+	if err := hostregistry.Mesh.RegisterHost(ctx, fact); err != nil {
+		return fmt.Errorf("register exact SSH fact for %s: %w", target, err)
+	}
+	step("registered host " + target + " in local mesh")
+	for _, address := range fact.Addresses[:len(fact.Addresses)-1] {
+		step("recorded LAN dial address " + fact.User + "@" + address)
+	}
+	if noRecurse {
 		return nil
 	}
 
-	if err := ensureRemoteDaemon(ctx, r, target, step); err != nil {
-		return err
-	}
 	for _, m := range manifests {
 		if err := ensureRemoteConsumer(ctx, r, target, m, step); err != nil {
 			return err
 		}
 	}
 
-	if _, err := r.SSH(ctx, target, "synckitd host add "+self+" --no-recurse"); err != nil {
+	remote := hostregistry.ShellQuote(daemonPath)
+	if _, err := r.SSH(ctx, target, remote+" host add "+hostregistry.ShellQuote(self)+" --no-recurse"); err != nil {
 		return fmt.Errorf("register inverse host on %s: %w", target, err)
 	}
 	step("registered inverse host " + self + " on " + target)
 
-	if _, err := r.SSH(ctx, target, "synckitd reconcile"); err != nil {
+	if _, err := r.SSH(ctx, target, remote+" reconcile"); err != nil {
 		step(fmt.Sprintf("WARN reconcile on %s: %v", target, err))
 	} else {
 		step("reconciled " + target)
 	}
 
-	if _, err := r.SSH(ctx, target, "synckitd install"); err != nil {
+	if _, err := r.SSH(ctx, target, remote+" install"); err != nil {
 		step(fmt.Sprintf("WARN install services on %s: %v", target, err))
 	} else {
 		step("installed services on " + target)
@@ -94,35 +114,34 @@ func AddHost(ctx context.Context, r hostregistry.Runner, manifests []manifest.Ma
 // bonjour sees target's node on the network, so a later ExecSSH reaches it over the LAN
 // (under sshd's TCC identity) before the tailnet. Best-effort: a browse miss or a
 // record failure is a note, never fatal.
-func recordLANAddr(ctx context.Context, target, self string, step func(string)) {
+func discoverLANAddresses(ctx context.Context, target, self string) []string {
 	nodes, _ := localNodeDiscovery(ctx, hostregistry.HostNode(self))
 	tgtNode := hostregistry.HostNode(target)
 	for _, n := range nodes {
 		if !strings.EqualFold(n, tgtNode) {
 			continue
 		}
-		addr := hostregistry.LocalTarget(target)
-		if err := hostregistry.Mesh.AddAddr(ctx, target, addr); err != nil {
-			step(fmt.Sprintf("WARN record LAN address %s: %v", addr, err))
-			return
-		}
-		step("recorded LAN dial address " + addr)
-		return
+		return []string{hostregistry.LocalTarget(target)}
 	}
+	return nil
 }
 
 // ensureRemoteDaemon installs synckitd on target over ssh unless it is already on
 // the peer's PATH.
-func ensureRemoteDaemon(ctx context.Context, r hostregistry.Runner, target string, step func(string)) error {
-	if hostregistry.Mesh.RemoteInstalledBinary(ctx, r, target, "synckitd") {
+func ensureRemoteDaemon(ctx context.Context, r hostregistry.Runner, target string, step func(string)) (string, error) {
+	if path, ok := hostregistry.Mesh.RemoteBinaryPath(ctx, r, target, hostregistry.MeshBinary); ok {
 		step("synckitd already installed on " + target)
-		return nil
+		return path, nil
 	}
 	if err := remoteBrewInstall(ctx, r, target, synckitdBrew); err != nil {
-		return err
+		return "", err
 	}
 	step("installed synckitd on " + target + " via brew")
-	return nil
+	path, ok := hostregistry.Mesh.RemoteBinaryPath(ctx, r, target, hostregistry.MeshBinary)
+	if !ok {
+		return "", fmt.Errorf("resolve exact synckitd path on %s after install", target)
+	}
+	return path, nil
 }
 
 // ensureRemoteConsumer installs the manifest's consumer binary on target over ssh

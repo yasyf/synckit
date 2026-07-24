@@ -26,9 +26,8 @@ func TestAddHostStepSequence(t *testing.T) {
 	stubLocalNodes(t)
 
 	mock := hostregistry.NewMockRunner().
-		OnSSH("command -v synckitd", "", nil).   // synckitd not installed
+		OnSSH("command -v synckitd", "/opt/homebrew/bin/synckitd", nil).
 		OnSSH("command -v cookiesync", "", nil). // consumer not installed
-		OnSSH("brew install yasyf/tap/synckitd", "", nil).
 		OnSSH("brew install yasyf/tap/cookiesync", "", nil).
 		DefaultSSH("", nil)
 
@@ -63,12 +62,11 @@ func TestAddHostStepSequence(t *testing.T) {
 	cmds := mock.SSHCmds("peer@node")
 	wantContains := []string{
 		"command -v synckitd",
-		"brew install yasyf/tap/synckitd",
 		"command -v cookiesync",
 		"brew install yasyf/tap/cookiesync",
-		"synckitd host add me@self --no-recurse",
-		"synckitd reconcile",
-		"synckitd install",
+		"'/opt/homebrew/bin/synckitd' host add 'me@self' --no-recurse",
+		"'/opt/homebrew/bin/synckitd' reconcile",
+		"'/opt/homebrew/bin/synckitd' install",
 	}
 	assertOrderedContains(t, cmds, wantContains)
 }
@@ -76,14 +74,16 @@ func TestAddHostStepSequence(t *testing.T) {
 func TestAddHostNoRecurse(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	stubLocalNodes(t)
-	mock := hostregistry.NewMockRunner().DefaultSSH("", nil)
+	mock := hostregistry.NewMockRunner().
+		OnSSH("command -v synckitd", "/opt/homebrew/bin/synckitd", nil).
+		DefaultSSH("", nil)
 
 	err := AddHost(context.Background(), mock, nil, "peer@node", "me@self", true, nil)
 	if err != nil {
 		t.Fatalf("AddHost no-recurse: %v", err)
 	}
-	if cmds := mock.SSHCmdsAll(); len(cmds) != 0 {
-		t.Errorf("no-recurse ran ssh %v, want none", cmds)
+	if cmds := mock.SSHCmdsAll(); len(cmds) != 1 || cmds[0] != "command -v synckitd" {
+		t.Errorf("no-recurse ran ssh %v, want only exact path discovery", cmds)
 	}
 	reg, err := hostregistry.Mesh.Load()
 	if err != nil {
@@ -123,7 +123,9 @@ func TestAddHostRecordsBonjourLocalAddr(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	stubLocalNodes(t, "node")
 
-	mock := hostregistry.NewMockRunner().DefaultSSH("", nil)
+	mock := hostregistry.NewMockRunner().
+		OnSSH("command -v synckitd", "/opt/homebrew/bin/synckitd", nil).
+		DefaultSSH("", nil)
 	if err := AddHost(context.Background(), mock, nil, "peer@node.tail.ts.net", "me@self", true, nil); err != nil {
 		t.Fatalf("AddHost: %v", err)
 	}

@@ -182,13 +182,8 @@ func TestRemoveHost(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	initializeTestState(t, testCfg)
 
-	if _, err := testCfg.Update(context.Background(), func(g *Registry) error {
-		g.UpsertHost("a@host")
-		g.UpsertHost("b@host")
-		return nil
-	}); err != nil {
-		t.Fatalf("seed registry: %v", err)
-	}
+	registerTestHost(t, testCfg, "a@host")
+	registerTestHost(t, testCfg, "b@host")
 
 	if err := testCfg.RemoveHost(context.Background(), "a@host"); err != nil {
 		t.Fatalf("RemoveHost: %v", err)

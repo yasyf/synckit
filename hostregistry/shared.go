@@ -13,7 +13,7 @@ const MeshBinary = "synckitd"
 
 // Mesh is the canonical handle to the single shared host mesh, rpc socket, and
 // reconcile lock that every synckit consumer registers against.
-const meshStateDeclaration = "schema:{identity:string,version:uint64,fingerprint:string};host_registry:{self:string,hosts:array<string>,addrs:map<string,array<string>>};synckit:{}"
+const meshStateDeclaration = "schema:{identity:string,version:uint64,fingerprint:string};host_registry:{self:string,hosts:array<{identity:string,user:string,host_key_alias:string,addresses:array<string>,synckitd_path:string}>};synckit:{}"
 
 // Mesh is the canonical exact-schema handle for the shared host mesh.
 var Mesh = Config{Name: MeshName, Binary: MeshBinary, State: StateContract{

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"slices"
 	"strings"
 	"time"
 
@@ -190,29 +189,15 @@ func isConnFailure(err error) bool {
 // a call reaches the peer over the LAN — under sshd's stable TCC identity — before
 // falling back to the tailnet. With no recorded addresses it is just [target].
 func DialAddrs(target string) ([]string, error) {
-	byTarget, err := Mesh.LoadAddrs()
+	fact, err := Mesh.Host(target)
 	if err != nil {
 		return nil, err
 	}
-	return orderDialAddrs(target, byTarget[target]), nil
-}
-
-// orderDialAddrs puts the recorded LAN addresses first and target last, dropping empty
-// or duplicate entries and any recorded copy of target itself.
-func orderDialAddrs(target string, lan []string) []string {
-	ordered := make([]string, 0, len(lan)+1)
-	seen := map[string]struct{}{}
-	for _, a := range lan {
-		if a == "" || a == target {
-			continue
-		}
-		if _, dup := seen[a]; dup {
-			continue
-		}
-		seen[a] = struct{}{}
-		ordered = append(ordered, a)
+	result := make([]string, len(fact.Addresses))
+	for i, address := range fact.Addresses {
+		result[i] = fact.User + "@" + address
 	}
-	return append(ordered, target)
+	return result, nil
 }
 
 // LoadAddrs reads the target-to-dial-addresses map from exact schema v1 state.
@@ -221,36 +206,15 @@ func (c Config) LoadAddrs() (map[string][]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cloneAddrs(env.Host.Addrs), nil
-}
-
-// AddAddr records addr as an alternate dial address for target, appending it under the
-// "addrs" key while preserving every other key in state.json byte-for-byte. A repeat
-// addr is a no-op.
-func (c Config) AddAddr(ctx context.Context, target, addr string) error {
-	return c.WithLock(ctx, func() error {
-		env, err := c.readEnvelope()
-		if err != nil {
-			return err
+	result := make(map[string][]string, len(env.Host.Hosts))
+	for _, fact := range env.Host.Hosts {
+		addresses := make([]string, len(fact.Addresses))
+		for i, address := range fact.Addresses {
+			addresses[i] = fact.User + "@" + address
 		}
-		byTarget := cloneAddrs(env.Host.Addrs)
-		for _, a := range byTarget[target] {
-			if a == addr {
-				return nil
-			}
-		}
-		byTarget[target] = append(byTarget[target], addr)
-		env.Host.Addrs = byTarget
-		return c.writeEnvelope(env)
-	})
-}
-
-func cloneAddrs(in map[string][]string) map[string][]string {
-	out := make(map[string][]string, len(in))
-	for target, addrs := range in {
-		out[target] = slices.Clone(addrs)
+		result[fact.Identity] = addresses
 	}
-	return out
+	return result, nil
 }
 
 // LocalTarget rewrites target's host to its short node's ".local" mDNS name, keeping

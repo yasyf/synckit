@@ -25,9 +25,9 @@ type SSHHostFact struct {
 
 // NewSSHHostFact validates and copies one exact registered host fact.
 func NewSSHHostFact(identity, synckitdPath string, addresses []string) (SSHHostFact, error) {
-	user, host, ok := strings.Cut(identity, "@")
-	if !ok || strings.Contains(host, "@") || !validSSHUser(user) || !validSSHHost(host) {
-		return SSHHostFact{}, fmt.Errorf("hostregistry: identity %q must be explicit user@host", identity)
+	user, host, err := splitSSHIdentity(identity)
+	if err != nil {
+		return SSHHostFact{}, err
 	}
 	if !exactRemotePath(synckitdPath) {
 		return SSHHostFact{}, errors.New("hostregistry: synckitd path must be exact and absolute")
@@ -55,6 +55,19 @@ func NewSSHHostFact(identity, synckitdPath string, addresses []string) (SSHHostF
 		result.Addresses = append(result.Addresses, address)
 	}
 	return result, nil
+}
+
+func splitSSHIdentity(identity string) (string, string, error) {
+	user, host, ok := strings.Cut(identity, "@")
+	if !ok || strings.Contains(host, "@") || !validSSHUser(user) || !validSSHHost(host) {
+		return "", "", fmt.Errorf("hostregistry: identity %q must be explicit user@host", identity)
+	}
+	return user, host, nil
+}
+
+func equalSSHHostFact(a, b SSHHostFact) bool {
+	return a.Identity == b.Identity && a.User == b.User && a.HostKeyAlias == b.HostKeyAlias &&
+		a.SynckitdPath == b.SynckitdPath && slices.Equal(a.Addresses, b.Addresses)
 }
 
 // RemoteSSHArgv returns the sealed OpenSSH invocation for one registered service.

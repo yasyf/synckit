@@ -8,7 +8,7 @@ import (
 )
 
 func TestDecodeEnvelopeAcceptsOnlyExactV1Contract(t *testing.T) {
-	valid := fmt.Sprintf(`{"schema":{"identity":%q,"version":1,"fingerprint":%q},"host_registry":{"self":"","hosts":[],"addrs":{}},"synckit":{}}`, Mesh.State.Identity, Mesh.State.Fingerprint)
+	valid := fmt.Sprintf(`{"schema":{"identity":%q,"version":1,"fingerprint":%q},"host_registry":{"self":"","hosts":[]},"synckit":{}}`, Mesh.State.Identity, Mesh.State.Fingerprint)
 	tests := map[string]string{
 		"old flat":             `{"self":"old@host","hosts":[],"addrs":{}}`,
 		"missing product":      strings.Replace(valid, `,"synckit":{}`, "", 1),
@@ -27,6 +27,27 @@ func TestDecodeEnvelopeAcceptsOnlyExactV1Contract(t *testing.T) {
 		t.Fatalf("decode exact v1 envelope: %v", err)
 	}
 	for name, encoded := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Mesh.decodeEnvelope([]byte(encoded)); !errors.Is(err, ErrStateSchema) {
+				t.Fatalf("decode = %v, want ErrStateSchema", err)
+			}
+		})
+	}
+}
+
+func TestDecodeEnvelopeRequiresCompleteCanonicalSSHHostFacts(t *testing.T) {
+	empty := fmt.Sprintf(`{"schema":{"identity":%q,"version":1,"fingerprint":%q},"host_registry":{"self":"me@self","hosts":[]} ,"synckit":{}}`, Mesh.State.Identity, Mesh.State.Fingerprint)
+	host := `{"identity":"peer@node.tail.ts.net","user":"peer","host_key_alias":"node.tail.ts.net","addresses":["node.local","node.tail.ts.net"],"synckitd_path":"/opt/homebrew/bin/synckitd"}`
+	valid := strings.Replace(empty, `"hosts":[]`, `"hosts":[`+host+`]`, 1)
+	if _, err := Mesh.decodeEnvelope([]byte(valid)); err != nil {
+		t.Fatalf("decode canonical host fact: %v", err)
+	}
+	for name, encoded := range map[string]string{
+		"missing path": strings.Replace(valid, `,"synckitd_path":"/opt/homebrew/bin/synckitd"`, "", 1),
+		"wrong user":   strings.Replace(valid, `"user":"peer"`, `"user":"other"`, 1),
+		"wrong alias":  strings.Replace(valid, `"host_key_alias":"node.tail.ts.net"`, `"host_key_alias":"node.local"`, 1),
+		"extra field":  strings.Replace(valid, `"user":"peer"`, `"user":"peer","legacy":true`, 1),
+	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Mesh.decodeEnvelope([]byte(encoded)); !errors.Is(err, ErrStateSchema) {
 				t.Fatalf("decode = %v, want ErrStateSchema", err)

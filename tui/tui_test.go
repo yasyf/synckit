@@ -247,13 +247,14 @@ func seedMesh(t *testing.T, hosts ...string) {
 	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := hostregistry.Mesh.Update(context.Background(), func(g *hostregistry.Registry) error {
-		for _, h := range hosts {
-			g.UpsertHost(h)
+	for _, identity := range hosts {
+		fact, err := hostregistry.NewSSHHostFact(identity, "/opt/homebrew/bin/synckitd", nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return nil
-	}); err != nil {
-		t.Fatalf("seed mesh: %v", err)
+		if err := hostregistry.Mesh.RegisterHost(context.Background(), fact); err != nil {
+			t.Fatalf("seed mesh: %v", err)
+		}
 	}
 }
 

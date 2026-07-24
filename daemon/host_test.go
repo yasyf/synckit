@@ -9,29 +9,13 @@ import (
 	"github.com/yasyf/synckit/hostregistry"
 )
 
-// TestHostAddrAddRecordsDialAddr proves `host addr add` records an alternate dial
-// address that DialAddrs then returns ahead of the target's own FQDN.
-func TestHostAddrAddRecordsDialAddr(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
+func TestHostAddrMutationCommandIsRemoved(t *testing.T) {
 	cmd := newHostCmd()
 	cmd.SetArgs([]string{"addr", "add", "me@node.tail.ts.net", "me@node.local"})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("host addr add: %v", err)
-	}
-
-	got, err := hostregistry.DialAddrs("me@node.tail.ts.net")
-	if err != nil {
-		t.Fatalf("DialAddrs: %v", err)
-	}
-	want := []string{"me@node.local", "me@node.tail.ts.net"}
-	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("DialAddrs = %v, want %v", got, want)
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("removed host addr mutation command succeeded")
 	}
 }
 
@@ -42,11 +26,18 @@ func TestHostLsJSONShape(t *testing.T) {
 	}
 	if _, err := hostregistry.Mesh.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.Self = "me@self"
-		g.UpsertHost("a@one")
-		g.UpsertHost("b@two")
 		return nil
 	}); err != nil {
 		t.Fatalf("seed mesh: %v", err)
+	}
+	for _, identity := range []string{"a@one", "b@two"} {
+		fact, err := hostregistry.NewSSHHostFact(identity, "/opt/homebrew/bin/synckitd", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := hostregistry.Mesh.RegisterHost(context.Background(), fact); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	cmd := newHostLsCmd()
