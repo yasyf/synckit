@@ -1,0 +1,44 @@
+{
+  "command": "rpc-once-v1",
+  "dependency": "rpc.WireBuild",
+  "limits": {
+    "request_bytes": 16777216,
+    "response_bytes": 16777216
+  },
+  "request": {
+    "encoding": "canonical-json",
+    "fields": {
+      "protocol": "integer:1|required",
+      "request": "rpc.Request|required",
+      "suite": "once-wire-build|required"
+    },
+    "request_constraints": {
+      "method": "svc.get_state",
+      "params": "null"
+    },
+    "termination": "eof"
+  },
+  "response": {
+    "encoding": "canonical-json",
+    "fields": {
+      "protocol": "integer:1|required",
+      "response": "rpc.Response|required",
+      "suite": "once-wire-build|required"
+    },
+    "response_constraints": {
+      "error": {
+        "error": "nonempty|required",
+        "ok": false,
+        "result": "null"
+      },
+      "success": {
+        "error": "absent",
+        "ok": true,
+        "result": "object|required"
+      }
+    },
+    "termination": "eof"
+  },
+  "suite": "com.yasyf.synckit.rpc-once",
+  "version": 1
+}

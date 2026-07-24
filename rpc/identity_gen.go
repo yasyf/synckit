@@ -5,3 +5,6 @@ package rpc
 const Version uint16 = 1
 const SchemaFingerprint = "c995c1f72784aeb4676b6279dd241c814f9eb9c12bca0e3fb056892f0ce8f3d7"
 const WireBuild = "com.yasyf.synckit.rpc/c995c1f72784aeb4676b6279dd241c814f9eb9c12bca0e3fb056892f0ce8f3d7/v1"
+const OnceVersion uint16 = 1
+const OnceSchemaFingerprint = "1047f76cf32e126fd6414fac2259180c5724012bc2ab12121298a8214a3c0072"
+const OnceWireBuild = "com.yasyf.synckit.rpc-once/1047f76cf32e126fd6414fac2259180c5724012bc2ab12121298a8214a3c0072/v1"
