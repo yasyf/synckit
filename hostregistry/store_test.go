@@ -176,6 +176,13 @@ func TestPathAndSockPath(t *testing.T) {
 	if sock != filepath.Join(dir, sockFile) {
 		t.Errorf("SockPath = %q, want %q", sock, filepath.Join(dir, sockFile))
 	}
+	knownHosts, err := testCfg.KnownHostsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if knownHosts != filepath.Join(dir, "known_hosts") {
+		t.Errorf("KnownHostsPath = %q, want %q", knownHosts, filepath.Join(dir, "known_hosts"))
+	}
 }
 
 func TestDirHonorsConfigName(t *testing.T) {

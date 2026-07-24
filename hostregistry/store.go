@@ -95,6 +95,15 @@ func (c Config) SockPath() (string, error) {
 	return filepath.Join(dir, sockFile), nil
 }
 
+// KnownHostsPath returns the sole OpenSSH trust file for this Synckit state.
+func (c Config) KnownHostsPath() (string, error) {
+	dir, err := c.Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "known_hosts"), nil
+}
+
 // WithLock runs fn while holding an exclusive flock on the reconcile lock file,
 // giving up with ErrLockBusy once ctx is done so a contended acquire fails fast
 // instead of blocking on a wedged holder. Every cross-package writer of

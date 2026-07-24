@@ -1,4 +1,17 @@
 {
+  "remote_session": {
+    "command": {
+      "argv": [
+        "rpc-serve-v1",
+        "service_id"
+      ],
+      "executable": "synckitd"
+    },
+    "hello": {
+      "encoding": "uint32be-length-prefixed-bytes",
+      "nonce_bytes": 32
+    }
+  },
   "operations": {
     "synckit.rpc.call": {
       "request": {
