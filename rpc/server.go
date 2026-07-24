@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 
+	dkdaemon "github.com/yasyf/daemonkit/daemon"
 	"github.com/yasyf/daemonkit/wire"
 )
 
@@ -32,18 +33,21 @@ func Listen(ctx context.Context, sockPath string) (net.Listener, error) {
 	return config.Listen(ctx, "unix", sockPath)
 }
 
-// Server maps one Dispatcher onto exact persistent daemonkit sessions.
+// Server resolves one admitted Dispatcher for each persistent request.
 type Server struct {
-	Dispatcher *Dispatcher
-	Wire       *wire.Server
+	resolve DispatcherResolver
+	Wire    *wire.Server
 }
 
+// DispatcherResolver resolves the graph already admitted for one wire request.
+type DispatcherResolver func(dkdaemon.Publication) (*Dispatcher, error)
+
 // NewServer returns a server with synckit's exact RPC schema identity.
-func NewServer(dispatcher *Dispatcher) *Server {
-	if dispatcher == nil {
-		panic("rpc: dispatcher is required")
+func NewServer(resolve DispatcherResolver) *Server {
+	if resolve == nil {
+		panic("rpc: dispatcher resolver is required")
 	}
-	server := &Server{Dispatcher: dispatcher}
+	server := &Server{resolve: resolve}
 	server.Wire = &wire.Server{WireBuild: WireBuild, MaxFrame: MaxFrame}
 	server.Wire.Register(wire.HandlerSpec{Op: callOp, Handler: server.dispatch, Concurrent: true})
 	return server
@@ -55,12 +59,16 @@ func (s *Server) dispatch(ctx context.Context, request wire.Request) (any, error
 		payload, encodeErr := EncodeResponse(&Response{OK: false, Error: err.Error()})
 		return json.RawMessage(payload), encodeErr
 	}
+	dispatcher, err := s.resolve(request.Publication)
+	if err != nil {
+		return nil, err
+	}
 	peer := request.Peer
 	ctx = context.WithValue(ctx, peerPIDKey{}, peer.PID)
 	if sid, err := sidOf(peer.PID); err == nil {
 		ctx = context.WithValue(ctx, peerSIDKey{}, sid)
 	}
-	payload, err := EncodeResponse(s.Dispatcher.Dispatch(ctx, req))
+	payload, err := EncodeResponse(dispatcher.Dispatch(ctx, req))
 	if err != nil {
 		return nil, fmt.Errorf("encode response: %w", err)
 	}

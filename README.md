@@ -14,7 +14,7 @@ go get github.com/yasyf/synckit
 
 A persistent RPC suite with exact build admission, same-UID trust, multiplexing,
 and bounded 16 MiB frames is already wired. Register product methods, then pass
-the server and exact daemonkit process owners to `helperruntime.New`:
+the dispatcher and exact daemonkit process owners to `helperruntime.New`:
 
 ```go
 package main
@@ -25,12 +25,12 @@ import (
 	"github.com/yasyf/synckit/rpc"
 )
 
-func rpcServer() *rpc.Server {
+func dispatcher() *rpc.Dispatcher {
 	d := rpc.NewDispatcher()
 	d.Register("ping", func(ctx context.Context, p map[string]any) (any, error) {
 		return map[string]any{"pong": p["msg"]}, nil
 	})
-	return rpc.NewServer(d)
+	return d
 }
 ```
 
@@ -39,9 +39,9 @@ Driving with an agent? Paste this:
 ```text
 Run `go get github.com/yasyf/synckit`, then use its rpc package to stand up a
 unix-socket server: register handlers on `rpc.NewDispatcher`, compose
-`rpc.NewServer(...).Wire` into daemonkit Runtime, and call it through a persistent
-`rpc.NewClient` using `rpc.WireBuild`. Listener ownership, readiness, trust, and
-bounded framing stay in daemonkit.
+the dispatcher with `helperruntime.New`, and call it through a persistent
+`rpc.NewClient` using `rpc.WireBuild`. Listener ownership, publication admission,
+readiness, trust, and bounded framing stay in daemonkit.
 ```
 
 ---

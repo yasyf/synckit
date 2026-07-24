@@ -22,7 +22,8 @@ import (
 )
 
 func TestRuntimeOwnershipUsesExactSuite(t *testing.T) {
-	server := rpc.NewServer(rpc.NewDispatcher())
+	dispatcher := rpc.NewDispatcher()
+	server := rpc.NewServer(func(dkdaemon.Publication) (*rpc.Dispatcher, error) { return dispatcher, nil })
 	if server.Wire.WireBuild != rpc.WireBuild {
 		t.Fatalf("wire build = %q, want %q", server.Wire.WireBuild, rpc.WireBuild)
 	}
@@ -66,6 +67,10 @@ func TestServePublishesReleaseBuildAfterActivation(t *testing.T) {
 	}
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		t.Fatalf("activation did not create manifests dir: info=%v err=%v", info, err)
+	}
+	status, err := client.Call(t.Context(), &rpc.Request{Method: "status"})
+	if err != nil || !status.OK {
+		t.Fatalf("admitted status request = %+v, err=%v", status, err)
 	}
 
 	_ = client.Close()

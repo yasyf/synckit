@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	dkdaemon "github.com/yasyf/daemonkit/daemon"
 	"github.com/yasyf/daemonkit/proc"
 	"github.com/yasyf/daemonkit/wire"
 )
@@ -73,7 +74,7 @@ func RunSpawnedServer(ctx context.Context, identity proc.SpawnedSessionIdentity,
 	if dispatcher == nil {
 		return errors.New("rpc: dispatcher is required")
 	}
-	server := NewServer(dispatcher)
+	server := NewServer(func(dkdaemon.Publication) (*Dispatcher, error) { return dispatcher, nil })
 	return wire.RunSpawnedSession(ctx, wire.SpawnedSessionConfig{
 		Identity: identity, WireBuild: WireBuild, Limits: spawnedSessionLimits,
 		Handlers: []wire.HandlerSpec{{Op: callOp, Handler: server.dispatch, Concurrent: true}},

@@ -7,7 +7,7 @@ import (
 
 func TestConfigSurfaceIsExact(t *testing.T) {
 	typeOf := reflect.TypeFor[Config]()
-	want := []string{"App", "Socket", "Server", "Workers", "Children", "StopStore", "Prepare"}
+	want := []string{"App", "Socket", "Dispatcher", "Workers", "Children", "StopStore", "Prepare"}
 	if typeOf.NumField() != len(want) {
 		t.Fatalf("Config fields = %d, want %d", typeOf.NumField(), len(want))
 	}

@@ -34,20 +34,26 @@ type Product interface {
 
 // Config supplies the exact daemonkit process owners and product preparation.
 type Config struct {
-	App       App
-	Socket    string
-	Server    *rpc.Server
-	Workers   *worker.Pool
-	Children  *proc.Manager
-	StopStore *proc.FileStore
-	Prepare   func(dkdaemon.Activation) (Product, error)
+	App        App
+	Socket     string
+	Dispatcher *rpc.Dispatcher
+	Workers    *worker.Pool
+	Children   *proc.Manager
+	StopStore  *proc.FileStore
+	Prepare    func(dkdaemon.Activation) (Product, error)
 }
 
 // Runtime owns daemonkit readiness and the product publication lifetime.
 type Runtime struct {
-	daemon  *dkdaemon.Runtime
-	slot    *dkdaemon.PublicationSlot[Product]
-	prepare func(dkdaemon.Activation) (Product, error)
+	daemon     *dkdaemon.Runtime
+	slot       *dkdaemon.PublicationSlot[*runtimeProduct]
+	dispatcher *rpc.Dispatcher
+	prepare    func(dkdaemon.Activation) (Product, error)
+}
+
+type runtimeProduct struct {
+	product    Product
+	dispatcher *rpc.Dispatcher
 }
 
 // New constructs one exact helper runtime. It performs no I/O or preparation.
@@ -58,17 +64,25 @@ func New(config Config) (*Runtime, error) {
 	if config.App.RuntimeBuild == "" {
 		return nil, errors.New("helperruntime: runtime build is required")
 	}
-	if config.Socket == "" || config.Server == nil || config.Workers == nil || config.Children == nil || config.StopStore == nil || config.Prepare == nil {
-		return nil, errors.New("helperruntime: socket, server, workers, children, stop store, and prepare are required")
+	if config.Socket == "" || config.Dispatcher == nil || config.Workers == nil || config.Children == nil || config.StopStore == nil || config.Prepare == nil {
+		return nil, errors.New("helperruntime: socket, dispatcher, workers, children, stop store, and prepare are required")
 	}
 	policy, err := runtimeowner.TrustPolicy()
 	if err != nil {
 		return nil, err
 	}
+	runtime := &Runtime{dispatcher: config.Dispatcher, prepare: config.Prepare}
+	rpcServer := rpc.NewServer(func(publication dkdaemon.Publication) (*rpc.Dispatcher, error) {
+		admitted, err := runtime.slot.Value(publication)
+		if err != nil {
+			return nil, err
+		}
+		return admitted.dispatcher, nil
+	})
 	var daemonRuntime *dkdaemon.Runtime
 	daemonRuntime, err = wire.NewRuntime(wire.RuntimeConfig{
 		Socket: config.Socket, RuntimeBuild: config.App.RuntimeBuild, RuntimeProtocol: int(rpc.Version),
-		Wire: config.Server.Wire, TrustPolicy: policy, StopControlStore: config.StopStore,
+		Wire: rpcServer.Wire, TrustPolicy: policy, StopControlStore: config.StopStore,
 		Observations: []wire.ObservationRoute{runtimehealth.Observation(func(ctx context.Context) (dkdaemon.Health, error) {
 			return daemonRuntime.Health(ctx)
 		})},
@@ -77,9 +91,9 @@ func New(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Runtime{
-		daemon: daemonRuntime, slot: dkdaemon.NewPublicationSlot[Product](daemonRuntime), prepare: config.Prepare,
-	}, nil
+	runtime.daemon = daemonRuntime
+	runtime.slot = dkdaemon.NewPublicationSlot[*runtimeProduct](daemonRuntime)
+	return runtime, nil
 }
 
 // Run prepares, publishes, serves, drains, and settles one helper generation.
@@ -96,7 +110,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 		_ = activation.Fail(err)
 		return errors.Join(err, r.closeDaemon(ctx))
 	}
-	publication, err := r.slot.Stage(activation, product)
+	publication, err := r.slot.Stage(activation, &runtimeProduct{product: product, dispatcher: r.dispatcher})
 	if err == nil {
 		err = activation.CommitReady(publication)
 	}

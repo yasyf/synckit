@@ -49,6 +49,11 @@ var (
 	watchHealthyRun  = 30 * time.Second
 )
 
+type runtimeProduct struct {
+	supervisor *supervisor
+	dispatcher *rpc.Dispatcher
+}
+
 func newServeCmd(build string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
@@ -108,8 +113,16 @@ func serve(ctx context.Context, build string) error {
 	if err != nil {
 		return err
 	}
-	rpcServer := rpc.NewServer(d)
+	product := &runtimeProduct{supervisor: sup, dispatcher: d}
 	var runtime *dkdaemon.Runtime
+	var slot *dkdaemon.PublicationSlot[*runtimeProduct]
+	rpcServer := rpc.NewServer(func(publication dkdaemon.Publication) (*rpc.Dispatcher, error) {
+		admitted, err := slot.Value(publication)
+		if err != nil {
+			return nil, err
+		}
+		return admitted.dispatcher, nil
+	})
 	runtime, err = wire.NewRuntime(wire.RuntimeConfig{
 		Socket: sock, RuntimeBuild: build, RuntimeProtocol: int(rpc.Version),
 		Wire: rpcServer.Wire, TrustPolicy: policy, StopControlStore: stopStore,
@@ -121,7 +134,7 @@ func serve(ctx context.Context, build string) error {
 	if err != nil {
 		return err
 	}
-	slot := dkdaemon.NewPublicationSlot[*supervisor](runtime)
+	slot = dkdaemon.NewPublicationSlot[*runtimeProduct](runtime)
 	activation, err := runtime.Begin(ctx)
 	if err != nil {
 		return err
@@ -136,7 +149,7 @@ func serve(ctx context.Context, build string) error {
 	if err := activateServe(activation.Context(), sup, sock); err != nil { //nolint:contextcheck
 		return fail(ctx, err)
 	}
-	publication, err := slot.Stage(activation, sup)
+	publication, err := slot.Stage(activation, product)
 	if err != nil {
 		return fail(ctx, err)
 	}

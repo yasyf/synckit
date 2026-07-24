@@ -17,8 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and no-change suppression.
 
 ### Changed
-- Pin daemonkit v0.16.0 and adopt its exact typed owner generations and
-  recovery IDs across daemon, CLI, transport, and test process owners.
+- Pin daemonkit v0.17.2 and resolve each RPC dispatcher from the exact
+  publication already admitted for its wire request. `helperruntime.Config`
+  accepts the dispatcher directly so consumers cannot bypass that resolution.
 - The Synckit-owned RPC suite now derives one exact
   `com.yasyf.synckit.rpc/<schema-sha256>/v1` wire build from its canonical schema.
   Daemonkit rejects every other schema before dispatch.

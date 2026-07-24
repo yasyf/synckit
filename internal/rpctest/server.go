@@ -47,21 +47,25 @@ func Start(ctx context.Context, socket, stateDir string, dispatcher *rpc.Dispatc
 	if err != nil {
 		return nil, err
 	}
+	var slot *dkdaemon.PublicationSlot[*rpc.Dispatcher]
+	rpcServer := rpc.NewServer(func(publication dkdaemon.Publication) (*rpc.Dispatcher, error) {
+		return slot.Value(publication)
+	})
 	runtime, err := wire.NewRuntime(wire.RuntimeConfig{
 		Socket: socket, RuntimeBuild: "synckit-rpctest", RuntimeProtocol: int(rpc.Version),
-		Wire: rpc.NewServer(dispatcher).Wire, TrustPolicy: policy,
+		Wire: rpcServer.Wire, TrustPolicy: policy,
 		StopControlStore: &proc.FileStore{Path: filepath.Join(stateDir, "stop.db")},
 		Workers:          workers, Children: children,
 	})
 	if err != nil {
 		return nil, err
 	}
-	slot := dkdaemon.NewPublicationSlot[struct{}](runtime)
+	slot = dkdaemon.NewPublicationSlot[*rpc.Dispatcher](runtime)
 	activation, err := runtime.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
-	publication, err := slot.Stage(activation, struct{}{})
+	publication, err := slot.Stage(activation, dispatcher)
 	if err == nil {
 		err = activation.CommitReady(publication)
 	}

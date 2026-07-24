@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	dkdaemon "github.com/yasyf/daemonkit/daemon"
 	"github.com/yasyf/daemonkit/wire"
 )
 
@@ -52,6 +53,55 @@ func TestDispatcherBusinessFailuresRemainResponses(t *testing.T) {
 		if response.OK || response.Error == "" {
 			t.Fatalf("%s response = %+v", method, response)
 		}
+	}
+}
+
+func TestServerResolvesAdmittedDispatcherBeforeDispatch(t *testing.T) {
+	dispatcher := NewDispatcher()
+	dispatched := false
+	dispatcher.Register("status", func(context.Context, map[string]any) (any, error) {
+		dispatched = true
+		return true, nil
+	})
+	resolved := false
+	server := NewServer(func(dkdaemon.Publication) (*Dispatcher, error) {
+		resolved = true
+		return dispatcher, nil
+	})
+	payload, err := EncodeRequest(&Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := server.dispatch(t.Context(), wire.Request{Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved || !dispatched {
+		t.Fatalf("resolved=%v dispatched=%v", resolved, dispatched)
+	}
+	if _, ok := result.(json.RawMessage); !ok {
+		t.Fatalf("result type = %T, want json.RawMessage", result)
+	}
+}
+
+func TestServerRejectsUnresolvedPublicationBeforeDispatch(t *testing.T) {
+	dispatcher := NewDispatcher()
+	dispatched := false
+	dispatcher.Register("status", func(context.Context, map[string]any) (any, error) {
+		dispatched = true
+		return true, nil
+	})
+	want := errors.New("stale publication")
+	server := NewServer(func(dkdaemon.Publication) (*Dispatcher, error) { return nil, want })
+	payload, err := EncodeRequest(&Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.dispatch(t.Context(), wire.Request{Payload: payload}); !errors.Is(err, want) {
+		t.Fatalf("dispatch error = %v, want %v", err, want)
+	}
+	if dispatched {
+		t.Fatal("dispatcher ran for an unresolved publication")
 	}
 }
 
