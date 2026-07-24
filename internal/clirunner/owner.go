@@ -4,7 +4,6 @@ package clirunner
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -98,14 +97,14 @@ func withOwner(ctx context.Context, directory string, includeChildren bool, run 
 	return run(claim.Product(), children)
 }
 
-func newGeneration() (string, error) {
-	var value [16]byte
+func newGeneration() (proc.OwnerGeneration, error) {
+	var value proc.OwnerGeneration
 	if _, err := rand.Read(value[:]); err != nil {
-		return "", fmt.Errorf("generate CLI process owner identity: %w", err)
+		return proc.OwnerGeneration{}, fmt.Errorf("generate CLI process owner identity: %w", err)
 	}
-	return hex.EncodeToString(value[:]), nil
+	return value, nil
 }
 
-func reaper(path, generation string) *proc.Reaper {
+func reaper(path string, generation proc.OwnerGeneration) *proc.Reaper {
 	return &proc.Reaper{Store: &proc.FileStore{Path: path}, Generation: generation}
 }

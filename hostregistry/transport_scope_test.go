@@ -151,9 +151,9 @@ func TestWithExecRunnerRecoversPriorTrackedProcess(t *testing.T) {
 	})
 	reaper := &proc.Reaper{
 		Store:      &proc.FileStore{Path: filepath.Join(directory, "cli-workers.db")},
-		Generation: "prior-generation",
+		Generation: proc.OwnerGeneration{1},
 	}
-	if _, err := reaper.TrackGroup(context.Background(), cmd.Process.Pid, proc.RecoveryTask); err != nil {
+	if _, err := reaper.TrackGroup(context.Background(), cmd.Process.Pid, proc.RecoveryTaskID); err != nil {
 		t.Fatalf("track prior process: %v", err)
 	}
 	if err := WithExecRunner(context.Background(), func(Runner) error { return nil }); err != nil {

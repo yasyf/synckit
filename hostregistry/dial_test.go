@@ -17,9 +17,13 @@ import (
 
 func testTaskPool(t *testing.T) *worker.Pool {
 	t.Helper()
+	generation, err := proc.ProcessGeneration()
+	if err != nil {
+		t.Fatal(err)
+	}
 	reaper := &proc.Reaper{
 		Store:      &proc.FileStore{Path: filepath.Join(t.TempDir(), "processes.db")},
-		Generation: t.Name(),
+		Generation: generation,
 	}
 	pool, err := worker.NewPool(worker.Config{
 		Capacity: 4, QueueCapacity: 4, MaxTotalRun: 12 * time.Minute,

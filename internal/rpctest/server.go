@@ -26,15 +26,19 @@ type Server struct {
 
 // Start binds socket and publishes dispatcher through daemonkit Runtime.
 func Start(ctx context.Context, socket, stateDir string, dispatcher *rpc.Dispatcher) (*Server, error) {
+	generation, err := proc.ProcessGeneration()
+	if err != nil {
+		return nil, err
+	}
 	workers, err := worker.NewPool(worker.Config{
 		Capacity: 4, QueueCapacity: 4, MaxTotalRun: 5 * time.Second,
 		MaxStdinBytes: 4096, MaxStdoutBytes: 4096, MaxStderrBytes: 4096,
-	}, &proc.Reaper{Store: &proc.FileStore{Path: filepath.Join(stateDir, "workers.db")}, Generation: "rpctest-workers"})
+	}, &proc.Reaper{Store: &proc.FileStore{Path: filepath.Join(stateDir, "workers.db")}, Generation: generation})
 	if err != nil {
 		return nil, err
 	}
 	children, err := proc.NewManager(4, &proc.Reaper{
-		Store: &proc.FileStore{Path: filepath.Join(stateDir, "children.db")}, Generation: "rpctest-children",
+		Store: &proc.FileStore{Path: filepath.Join(stateDir, "children.db")}, Generation: generation,
 	})
 	if err != nil {
 		return nil, err

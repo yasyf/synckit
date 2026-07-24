@@ -329,7 +329,7 @@ func spawnedRequest(executable string, args []string, sealed bool) (proc.SpawnRe
 		stdin, stdout = proc.StdioNull, proc.StdioNull
 	}
 	return proc.NewSpawnRequest(proc.SpawnConfig{
-		RecoveryClass: proc.RecoveryTask, Executable: executable, Args: args,
+		RecoveryID: "synckit.transport.v1", Executable: executable, Args: args,
 		Dir: filepath.Dir(executable), Env: []string{"HOME=" + home},
 		Stdin: stdin, Stdout: stdout, Stderr: proc.StdioPipe,
 		SpawnedSession: sealed, ExpectedSignature: &signature,

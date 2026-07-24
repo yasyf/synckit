@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -23,23 +21,22 @@ type processOwner struct {
 }
 
 func newProcessOwner(directory string) (*processOwner, error) {
-	var generation [16]byte
-	if _, err := rand.Read(generation[:]); err != nil {
-		return nil, fmt.Errorf("generate process owner identity: %w", err)
+	generation, err := proc.ProcessGeneration()
+	if err != nil {
+		return nil, fmt.Errorf("resolve process owner identity: %w", err)
 	}
-	generationID := hex.EncodeToString(generation[:])
 	workers, err := worker.NewPool(worker.Config{
 		Capacity: processWorkerLimit, QueueCapacity: processWorkerLimit,
 		MaxTotalRun: 12 * time.Minute, MaxStdinBytes: 16 << 20,
 		MaxStdoutBytes: 16 << 20, MaxStderrBytes: 1 << 20,
 	}, &proc.Reaper{
-		Store: &proc.FileStore{Path: filepath.Join(directory, "process-workers.db")}, Generation: generationID,
+		Store: &proc.FileStore{Path: filepath.Join(directory, "process-workers.db")}, Generation: generation,
 	})
 	if err != nil {
 		return nil, err
 	}
 	children, err := proc.NewManager(processWorkerLimit, &proc.Reaper{
-		Store: &proc.FileStore{Path: filepath.Join(directory, "process-children.db")}, Generation: generationID,
+		Store: &proc.FileStore{Path: filepath.Join(directory, "process-children.db")}, Generation: generation,
 	})
 	if err != nil {
 		return nil, err

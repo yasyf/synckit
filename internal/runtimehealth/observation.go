@@ -21,7 +21,7 @@ func Observation(health func(context.Context) (dkdaemon.Health, error)) wire.Obs
 			}
 			payload, err := rpc.EncodeRuntimeHealth(rpc.RuntimeHealth{
 				RuntimeBuild: value.RuntimeBuild, RuntimeProtocol: value.RuntimeProtocol,
-				ProcessGeneration: value.ProcessGeneration, PID: value.PID, State: string(value.State),
+				ProcessGeneration: value.ProcessGeneration.String(), PID: value.PID, State: string(value.State),
 				Draining: value.Draining, Busy: value.Busy, Ready: value.Ready,
 			})
 			if err != nil {
