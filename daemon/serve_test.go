@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -94,10 +95,18 @@ type fakeConsumer struct {
 	reconcileCalls      int
 	lastSyncOrigin      string
 	syncCalls           int
+	exportKind          syncservice.ChangeKind
+	exportBase          syncservice.Revision
+	exportSource        syncservice.Revision
+	lastExportRequest   syncservice.ExportRequest
+	exportCalls         int
 }
 
 func newFakeConsumer(items ...syncservice.WatchItem) *fakeConsumer {
-	return &fakeConsumer{items: items}
+	return &fakeConsumer{
+		items: items, exportKind: syncservice.ChangeSnapshot,
+		exportBase: syncservice.NewRevision(0), exportSource: syncservice.NewRevision(1),
+	}
 }
 
 func (f *fakeConsumer) Capabilities(context.Context) (syncservice.Capabilities, error) {
@@ -123,9 +132,13 @@ func (f *fakeConsumer) Reconcile(_ context.Context, origin string) (syncservice.
 }
 
 func (f *fakeConsumer) Export(_ context.Context, request syncservice.ExportRequest) (syncservice.ChangeEnvelope, error) {
+	f.mu.Lock()
+	f.lastExportRequest = request
+	f.exportCalls++
+	kind, base, source := f.exportKind, f.exportBase, f.exportSource
+	f.mu.Unlock()
 	return syncservice.NewExportedChange(
-		request.ServiceID, request.SchemaFingerprint, syncservice.ChangeSnapshot,
-		syncservice.NewRevision(0), syncservice.NewRevision(1), []byte(`{}`),
+		request.ServiceID, request.SchemaFingerprint, kind, base, source, []byte(`{}`),
 	)
 }
 
@@ -153,6 +166,12 @@ func (f *fakeConsumer) listCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.listCalls
+}
+
+func (f *fakeConsumer) exportState() (syncservice.ExportRequest, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastExportRequest, f.exportCalls
 }
 
 type errString string
@@ -351,6 +370,64 @@ func TestManifestNotifierPeer(t *testing.T) {
 	}
 	if _, selfCalls := self.syncOrigin(); selfCalls != 0 {
 		t.Errorf("self consumer saw %d syncs on a peer notify, want 0", selfCalls)
+	}
+}
+
+func TestManifestNotifierSkipsUnchangedExport(t *testing.T) {
+	self := newFakeConsumer()
+	self.exportKind = syncservice.ChangeDelta
+	self.exportBase = syncservice.NewRevision(1)
+	self.exportSource = syncservice.NewRevision(1)
+	fakeMesh(t, map[string]*fakeConsumer{"me@self": self})
+
+	store := newDeliveryStore(t.TempDir())
+	settled, err := syncservice.NewExportedChange(
+		"stub", testManifest().Service.SchemaFingerprint, syncservice.ChangeDelta,
+		syncservice.NewRevision(0), syncservice.NewRevision(1), []byte(`{}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled, err = syncservice.BindDelivery(settled, "me@self")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.putPending(t.Context(), "peer@node", settled); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.acknowledge(t.Context(), "peer@node", settled, syncservice.ApplyResult{
+		AckedRevision: settled.SourceRevision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n := manifestNotifier{
+		local: syncservice.NewClient(serveFake(t, self)), m: testManifest(), self: "me@self", delivery: store,
+	}
+	if err := n.Notify(t.Context(), "peer@node", "site-a"); err != nil {
+		t.Fatalf("Notify unchanged peer: %v", err)
+	}
+	after, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("unchanged export rewrote delivery state\nbefore: %s\nafter:  %s", before, after)
+	}
+	acked, pending, err := store.load(t.Context(), "stub", "peer@node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acked != syncservice.NewRevision(1) || pending != nil {
+		t.Fatalf("unchanged delivery ack=%q pending=%#v", acked, pending)
+	}
+	request, calls := self.exportState()
+	if calls != 1 || request.SinceRevision != syncservice.NewRevision(1) {
+		t.Fatalf("export calls=%d request=%#v", calls, request)
 	}
 }
 

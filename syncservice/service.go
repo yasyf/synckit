@@ -122,8 +122,11 @@ func (e ChangeEnvelope) Validate(requireDelivery bool) error {
 	if err != nil {
 		return err
 	}
-	if source == 0 || source <= base {
-		return errors.New("syncservice: source revision must exceed base revision")
+	if source == 0 {
+		return errors.New("syncservice: source revision must be non-zero")
+	}
+	if source < base {
+		return errors.New("syncservice: source revision must not precede base revision")
 	}
 	if e.Kind != ChangeSnapshot && e.Kind != ChangeDelta {
 		return errors.New("syncservice: change kind is invalid")

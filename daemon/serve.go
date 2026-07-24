@@ -556,6 +556,9 @@ func (n manifestNotifier) Notify(ctx context.Context, peer, _ string) error {
 		if err != nil {
 			return fmt.Errorf("export sync for %q: %w", n.m.Name, err)
 		}
+		if change.SourceRevision == acked {
+			return nil
+		}
 		change, err = syncservice.BindDelivery(change, n.self)
 		if err != nil {
 			return err
