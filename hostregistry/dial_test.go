@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/trust"
 	"github.com/yasyf/daemonkit/worker"
 )
 
@@ -32,7 +33,7 @@ func testTaskPool(t *testing.T) *worker.Pool {
 	if err != nil {
 		t.Fatalf("new process pool: %v", err)
 	}
-	claim, err := pool.ClaimRuntime()
+	claim, err := pool.ClaimRuntime(trust.VerifierWorkerBudgets())
 	if err != nil {
 		t.Fatal(err)
 	}

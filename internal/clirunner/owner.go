@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/trust"
 	"github.com/yasyf/daemonkit/worker"
 )
 
@@ -61,7 +62,7 @@ func withOwner(ctx context.Context, directory string, includeChildren bool, run 
 	if err != nil {
 		return err
 	}
-	claim, err := workers.ClaimRuntime()
+	claim, err := workers.ClaimRuntime(trust.VerifierWorkerBudgets())
 	if err != nil {
 		return err
 	}

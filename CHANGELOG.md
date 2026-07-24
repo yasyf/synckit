@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-07-24
+
+### Changed
+- Pin daemonkit v0.18.0: the verifier worker lane sizes itself from
+  `trust.VerifierWorkerBudgets()`, and `synckitd` dispatches
+  `trust.RunVerifierChild` at the top of `Execute` so the serve-time trust
+  self-probe passes and signed-role peers verify.
+
 ## [0.34.0] - 2026-07-24
 
 ### Changed

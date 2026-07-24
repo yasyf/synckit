@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/trust"
 	"github.com/yasyf/daemonkit/worker"
 )
 
@@ -22,7 +23,7 @@ func testDaemonOwner(ctx context.Context, t *testing.T) (*worker.Pool, *proc.Man
 	if err := owner.children.Recover(ctx); err != nil {
 		t.Fatalf("recover children: %v", err)
 	}
-	claim, err := owner.workers.ClaimRuntime()
+	claim, err := owner.workers.ClaimRuntime(trust.VerifierWorkerBudgets())
 	if err != nil {
 		t.Fatalf("claim workers: %v", err)
 	}

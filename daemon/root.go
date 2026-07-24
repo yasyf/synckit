@@ -15,12 +15,23 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"github.com/yasyf/daemonkit/trust"
 	"github.com/yasyf/daemonkit/version"
 )
 
 // Execute builds and runs the synckitd root command under a context canceled on
 // SIGINT/SIGTERM, exiting non-zero on error.
 func Execute(stampedVersion string) {
+	// The serving daemon re-execs this binary as daemonkit's trust-verifier child
+	// for every connecting peer and for the serve-time self-probe; without this
+	// dispatch the daemon refuses to start and every peer is rejected as untrusted.
+	if handled, err := trust.RunVerifierChild(os.Args[1:], os.Stdout); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
