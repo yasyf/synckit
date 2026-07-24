@@ -6,8 +6,8 @@ var AllMethods = []string{
 	MethodCapabilities,
 	MethodList,
 	MethodReconcile,
-	MethodSync,
-	MethodGetState,
+	MethodExport,
+	MethodApply,
 }
 
 // DefaultCapabilities returns the standard [Capabilities] for a consumer named name

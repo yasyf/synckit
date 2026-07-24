@@ -15,8 +15,8 @@ import (
 type Response = synctransport.Response
 
 // Transport carries one typed request to a sync service and returns its raw-result
-// [Response]. Implementations reach the service over a unix socket, a spawned child's
-// stdio, or ssh to a peer's rpc-serve bridge.
+// [Response]. Public callers use a resident Unix socket; Synckit's daemon alone owns
+// spawned and remote transport construction.
 type Transport = synctransport.Transport
 
 // Client is the typed caller for the sync contract. It drives a [Transport] and
@@ -63,24 +63,35 @@ func (c *Client) Reconcile(ctx context.Context, origin string) (ReconcileResult,
 	return out, err
 }
 
-// Sync asks the peer to run a full sync against origin and returns the result.
-func (c *Client) Sync(ctx context.Context, origin string) (SyncResult, error) {
-	var out SyncResult
-	err := c.call(ctx, &rpc.Request{Method: MethodSync, Params: originParams(origin)}, &out)
+// Export asks the source service for one immutable full or delta change.
+func (c *Client) Export(ctx context.Context, request ExportRequest) (ChangeEnvelope, error) {
+	if err := request.Validate(); err != nil {
+		return ChangeEnvelope{}, err
+	}
+	params, err := structParams(request)
+	if err != nil {
+		return ChangeEnvelope{}, err
+	}
+	var out ChangeEnvelope
+	err = c.call(ctx, &rpc.Request{Method: MethodExport, Params: params}, &out)
+	if err == nil {
+		err = out.Validate(false)
+	}
 	return out, err
 }
 
-// GetState asks the peer for its registry state and returns it as opaque JSON. It
-// bypasses the typed decode so the registry's int64 CRDT stamps survive byte-exact.
-func (c *Client) GetState(ctx context.Context) (RawRegistry, error) {
-	resp, err := c.tx.Do(ctx, &rpc.Request{Method: MethodGetState})
+// Apply delivers one immutable source change and returns its exact acknowledgement.
+func (c *Client) Apply(ctx context.Context, change ChangeEnvelope) (ApplyResult, error) {
+	if err := change.Validate(true); err != nil {
+		return ApplyResult{}, err
+	}
+	params, err := structParams(change)
 	if err != nil {
-		return nil, err
+		return ApplyResult{}, err
 	}
-	if !resp.OK {
-		return nil, fmt.Errorf("%s: %s", MethodGetState, resp.Error)
-	}
-	return RawRegistry(resp.Result), nil
+	var out ApplyResult
+	err = c.call(ctx, &rpc.Request{Method: MethodApply, Params: params}, &out)
+	return out, err
 }
 
 // call issues req over the transport and, when out is non-nil and the result is a
@@ -109,4 +120,16 @@ func originParams(origin string) map[string]any {
 		return nil
 	}
 	return map[string]any{"origin": origin}
+}
+
+func structParams(value any) (map[string]any, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var params map[string]any
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return nil, err
+	}
+	return params, nil
 }

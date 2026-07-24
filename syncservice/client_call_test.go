@@ -124,7 +124,7 @@ func TestClientCall(t *testing.T) {
 				t.Errorf("request params = %#v, want %#v", tx.request.Params, tt.params)
 			}
 			if tt.wantResult != (customCallResult{}) {
-				if got := *(tt.out.(*customCallResult)); got != tt.wantResult {
+				if got := *tt.out.(*customCallResult); got != tt.wantResult {
 					t.Errorf("decoded result = %+v, want %+v", got, tt.wantResult)
 				}
 			}

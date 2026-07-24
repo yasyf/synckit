@@ -11,6 +11,8 @@ import (
 	"github.com/yasyf/synckit/codec"
 )
 
+const testServiceSchema = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func cookiesyncManifest() Manifest {
 	return Manifest{
 		Name:   "cookiesync",
@@ -20,8 +22,9 @@ func cookiesyncManifest() Manifest {
 			Debounce: codec.Duration(2 * time.Second),
 		},
 		Service: ServiceSpec{
-			Kind:   "resident",
-			Socket: "~/.config/cookiesync/rpc.sock",
+			Kind:              "resident",
+			Socket:            "~/.config/cookiesync/rpc.sock",
+			SchemaFingerprint: testServiceSchema,
 		},
 		Helper: &HelperSpec{
 			Command:     "cookiesync-helper",
@@ -37,7 +40,7 @@ func reposyncManifest() Manifest {
 		Watch: WatchSpec{
 			Debounce: codec.Duration(500 * time.Millisecond),
 		},
-		Service: ServiceSpec{Kind: "spawned"},
+		Service: ServiceSpec{Kind: "spawned", SchemaFingerprint: testServiceSchema},
 	}
 }
 

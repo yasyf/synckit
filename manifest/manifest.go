@@ -19,6 +19,7 @@ import (
 
 	"github.com/yasyf/synckit/codec"
 	"github.com/yasyf/synckit/internal/serviceidentity"
+	"github.com/yasyf/synckit/syncservice"
 )
 
 // Manifest is a consumer's registration: its binary, watch spec, and the typed
@@ -39,8 +40,9 @@ type WatchSpec struct {
 
 // ServiceSpec selects one exact local presentation of the fixed v1 service.
 type ServiceSpec struct {
-	Kind   string `json:"kind"`
-	Socket string `json:"socket,omitempty"`
+	Kind              string `json:"kind"`
+	Socket            string `json:"socket,omitempty"`
+	SchemaFingerprint string `json:"schema_fingerprint"`
 }
 
 // SessionType is a launchd session name accepted by a resident helper.
@@ -91,6 +93,8 @@ func (m Manifest) Validate() error {
 		return fmt.Errorf("manifest %q: field %q is required", m.Name, "binary")
 	case !validServiceKind(m.Service.Kind):
 		return fmt.Errorf("manifest %q: field %q must be one of resident or spawned, got %q", m.Name, "service.kind", m.Service.Kind)
+	case syncservice.ValidateServiceSchema(m.Name, m.Service.SchemaFingerprint) != nil:
+		return fmt.Errorf("manifest %q: field %q must bind the exact service schema", m.Name, "service.schema_fingerprint")
 	case m.Service.Kind == "resident" && m.Service.Socket == "":
 		return fmt.Errorf("manifest %q: field %q is required when kind is resident", m.Name, "service.socket")
 	case m.Service.Kind == "spawned" && (!filepath.IsAbs(m.Binary) || filepath.Clean(m.Binary) != m.Binary):

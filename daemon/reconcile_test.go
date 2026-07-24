@@ -1,13 +1,20 @@
 package daemon
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/yasyf/synckit/hostregistry"
+)
 
 func TestReconcileOne(t *testing.T) {
 	fake := newFakeConsumer()
 	fakeMesh(t, map[string]*fakeConsumer{"me@self": fake})
 
 	ctx := t.Context()
-	res := reconcileOne(ctx, testDaemonChildren(ctx, t), testManifest(), "me@self")
+	res := reconcileOne(
+		ctx, testDaemonChildren(ctx, t), testManifest(),
+		&hostregistry.Registry{Self: "me@self"}, newDeliveryStore(t.TempDir()),
+	)
 	if res.Err != "" {
 		t.Fatalf("reconcileOne err = %q, want none", res.Err)
 	}

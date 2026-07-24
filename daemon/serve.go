@@ -77,7 +77,7 @@ func serve(ctx context.Context, build string) error {
 	if err != nil {
 		return err
 	}
-	sup := newSupervisor(processes.workers, processes.children)
+	sup := newSupervisor(processes.workers, processes.children, newDeliveryStore(dir))
 	d := rpc.NewDispatcher()
 	d.Register("status", handleStatus)
 	// reconcile and reload mutate the engine generation, so they serialize behind
@@ -203,6 +203,7 @@ func activateServe(lifetime context.Context, sup *supervisor, sock string) error
 type supervisor struct {
 	workers  *worker.Pool
 	children *proc.Manager
+	delivery *deliveryStore
 	mu       sync.Mutex
 	cancel   context.CancelFunc
 	wg       *sync.WaitGroup
@@ -211,8 +212,8 @@ type supervisor struct {
 	settled  bool
 }
 
-func newSupervisor(workers *worker.Pool, children *proc.Manager) *supervisor {
-	return &supervisor{workers: workers, children: children}
+func newSupervisor(workers *worker.Pool, children *proc.Manager, delivery *deliveryStore) *supervisor {
+	return &supervisor{workers: workers, children: children, delivery: delivery}
 }
 
 // reload cancels the running watch generation, waits for it to drain, closes the
@@ -268,7 +269,7 @@ func (s *supervisor) reload(parent context.Context) error {
 func (s *supervisor) startEngine(ctx context.Context, wg *sync.WaitGroup, m manifest.Manifest, reg *hostregistry.Registry) {
 	local := syncservice.NewClient(dialTransport(s.children, m, reg.Self, reg.Self))
 	s.clients = append(s.clients, local)
-	eng := buildEngine(ctx, local, m, reg, s.workers, s.children)
+	eng := buildEngine(ctx, local, m, reg, s.workers, s.children, s.delivery)
 
 	// run returns how long it spent inside the backend, so a run that dies in the
 	// list phase (never reaching the backend) reports zero and never counts healthy.
@@ -379,6 +380,7 @@ func buildEngine(
 	reg *hostregistry.Registry,
 	workers *worker.Pool,
 	children *proc.Manager,
+	delivery *deliveryStore,
 ) *watch.Engine[string] {
 	hosts := append([]string{reg.Self}, reg.Hosts...)
 	debounce := time.Duration(m.Watch.Debounce)
@@ -387,7 +389,7 @@ func buildEngine(
 		manifestResolver{client: local, name: m.Name, memo: memo},
 		newBreakerNotifier(
 			ctx,
-			manifestNotifier{local: local, m: m, self: reg.Self, children: children},
+			manifestNotifier{local: local, m: m, self: reg.Self, children: children, delivery: delivery},
 			m.Name,
 			reg.Self,
 			workers,
@@ -533,19 +535,68 @@ type manifestNotifier struct {
 	m        manifest.Manifest
 	self     string
 	children *proc.Manager
+	delivery *deliveryStore
 }
 
 func (n manifestNotifier) Notify(ctx context.Context, peer, _ string) error {
 	if peer == n.self {
-		if _, err := n.local.Sync(ctx, ""); err != nil {
+		if _, err := n.local.Reconcile(ctx, ""); err != nil {
 			return fmt.Errorf("local sync for %q: %w", n.m.Name, err)
 		}
 		return nil
 	}
+	acked, pending, err := n.delivery.load(ctx, n.m.Name, peer)
+	if err != nil {
+		return err
+	}
+	if pending == nil {
+		change, err := n.local.Export(ctx, syncservice.ExportRequest{
+			ServiceID: n.m.Name, SchemaFingerprint: n.m.Service.SchemaFingerprint, SinceRevision: acked,
+		})
+		if err != nil {
+			return fmt.Errorf("export sync for %q: %w", n.m.Name, err)
+		}
+		change, err = syncservice.BindDelivery(change, n.self)
+		if err != nil {
+			return err
+		}
+		if err := n.delivery.putPending(ctx, peer, change); err != nil {
+			return err
+		}
+		pending = &change
+	}
 	c := syncservice.NewClient(dialTransport(n.children, n.m, peer, n.self))
 	defer func() { _ = c.Close() }()
-	if _, err := c.Sync(ctx, n.self); err != nil {
+	ack, err := c.Apply(ctx, *pending)
+	if err != nil {
 		return fmt.Errorf("ssh sync for %q on %s: %w", n.m.Name, peer, err)
+	}
+	if ack.NeedSnapshot {
+		change, err := n.local.Export(ctx, syncservice.ExportRequest{
+			ServiceID: n.m.Name, SchemaFingerprint: n.m.Service.SchemaFingerprint,
+			SinceRevision: syncservice.NewRevision(0),
+		})
+		if err != nil {
+			return err
+		}
+		change, err = syncservice.BindDelivery(change, n.self)
+		if err != nil {
+			return err
+		}
+		if change.Kind != syncservice.ChangeSnapshot {
+			return errors.New("syncservice: full export did not return a snapshot")
+		}
+		if err := n.delivery.putPending(ctx, peer, change); err != nil {
+			return err
+		}
+		pending = &change
+		ack, err = c.Apply(ctx, change)
+		if err != nil {
+			return err
+		}
+	}
+	if err := n.delivery.acknowledge(ctx, peer, *pending, ack); err != nil {
+		return err
 	}
 	return nil
 }

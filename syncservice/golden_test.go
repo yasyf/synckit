@@ -30,6 +30,15 @@ func TestClientRequestPayloadGolden(t *testing.T) {
 	rt := &recordingTransport{}
 	c := NewClient(rt)
 	ctx := context.Background()
+	schema := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	change, err := NewExportedChange("fake", schema, ChangeSnapshot, NewRevision(0), NewRevision(1), []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, err = BindDelivery(change, "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name string
@@ -38,9 +47,10 @@ func TestClientRequestPayloadGolden(t *testing.T) {
 	}{
 		{"capabilities", func() { _, _ = c.Capabilities(ctx) }, `{"method":"svc.capabilities","params":null}`},
 		{"list", func() { _, _ = c.List(ctx) }, `{"method":"svc.list","params":null}`},
-		{"get-state", func() { _, _ = c.GetState(ctx) }, `{"method":"svc.get_state","params":null}`},
-		{"sync empty origin is params null", func() { _, _ = c.Sync(ctx, "") }, `{"method":"svc.sync","params":null}`},
-		{"sync with origin", func() { _, _ = c.Sync(ctx, "host-a") }, `{"method":"svc.sync","params":{"origin":"host-a"}}`},
+		{"export", func() {
+			_, _ = c.Export(ctx, ExportRequest{ServiceID: "fake", SchemaFingerprint: schema, SinceRevision: NewRevision(0)})
+		}, `{"method":"synckit.syncservice.export.v1","params":{"schema_fingerprint":"` + schema + `","service_id":"fake","since_revision":"0"}}`},
+		{"apply", func() { _, _ = c.Apply(ctx, change) }, `{"method":"synckit.syncservice.apply.v1","params":{"base_revision":"0","change_id":"` + change.ChangeID + `","kind":"snapshot","origin":"host-a","payload":"e30=","payload_digest":"` + change.PayloadDigest + `","schema_fingerprint":"` + schema + `","service_id":"fake","source_revision":"1"}}`},
 		{"reconcile empty origin is params null", func() { _, _ = c.Reconcile(ctx, "") }, `{"method":"svc.reconcile","params":null}`},
 		{"reconcile with origin", func() { _, _ = c.Reconcile(ctx, "host-a") }, `{"method":"svc.reconcile","params":{"origin":"host-a"}}`},
 	}

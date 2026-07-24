@@ -122,16 +122,19 @@ func (f *fakeConsumer) Reconcile(_ context.Context, origin string) (syncservice.
 	return syncservice.ReconcileResult{Converged: 1}, nil
 }
 
-func (f *fakeConsumer) Sync(_ context.Context, origin string) (syncservice.SyncResult, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.lastSyncOrigin = origin
-	f.syncCalls++
-	return syncservice.SyncResult{Converged: 1}, nil
+func (f *fakeConsumer) Export(_ context.Context, request syncservice.ExportRequest) (syncservice.ChangeEnvelope, error) {
+	return syncservice.NewExportedChange(
+		request.ServiceID, request.SchemaFingerprint, syncservice.ChangeSnapshot,
+		syncservice.NewRevision(0), syncservice.NewRevision(1), []byte(`{}`),
+	)
 }
 
-func (f *fakeConsumer) GetState(context.Context) (syncservice.RawRegistry, error) {
-	return syncservice.RawRegistry(`{}`), nil
+func (f *fakeConsumer) Apply(_ context.Context, change syncservice.ChangeEnvelope) (syncservice.ApplyResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastSyncOrigin = change.Origin
+	f.syncCalls++
+	return syncservice.ApplyResult{AckedRevision: change.SourceRevision}, nil
 }
 
 func (f *fakeConsumer) syncOrigin() (string, int) {
@@ -199,8 +202,9 @@ func testManifest() manifest.Manifest {
 			Debounce: codec.Duration(10 * time.Millisecond),
 		},
 		Service: manifest.ServiceSpec{
-			Kind:   "resident",
-			Socket: "/tmp/stub.sock",
+			Kind:              "resident",
+			Socket:            "/tmp/stub.sock",
+			SchemaFingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		},
 	}
 }
@@ -314,7 +318,7 @@ func TestManifestNotifierLocal(t *testing.T) {
 	if err := n.Notify(context.Background(), "me@self", "site-a"); err != nil {
 		t.Fatalf("Notify local: %v", err)
 	}
-	origin, calls := fake.syncOrigin()
+	origin, calls := fake.reconcileOrigin()
 	if calls != 1 {
 		t.Fatalf("local sync calls = %d, want 1", calls)
 	}
@@ -329,7 +333,10 @@ func TestManifestNotifierPeer(t *testing.T) {
 	peer := newFakeConsumer()
 	fakeMesh(t, map[string]*fakeConsumer{"me@self": self, "peer@node": peer})
 
-	n := manifestNotifier{local: syncservice.NewClient(serveFake(t, self)), m: testManifest(), self: "me@self"}
+	n := manifestNotifier{
+		local: syncservice.NewClient(serveFake(t, self)), m: testManifest(), self: "me@self",
+		delivery: newDeliveryStore(t.TempDir()),
+	}
 	if err := n.Notify(context.Background(), "peer@node", "site-a"); err != nil {
 		t.Fatalf("Notify peer: %v", err)
 	}
@@ -360,6 +367,7 @@ func TestEngineEventDrivesLocalSync(t *testing.T) {
 		&hostregistry.Registry{Self: "me@self"},
 		workers,
 		children,
+		newDeliveryStore(t.TempDir()),
 	)
 
 	ctx := context.Background()
@@ -367,12 +375,12 @@ func TestEngineEventDrivesLocalSync(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, calls := fake.syncOrigin(); calls > 0 {
+		if _, calls := fake.reconcileOrigin(); calls > 0 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	origin, calls := fake.syncOrigin()
+	origin, calls := fake.reconcileOrigin()
 	if calls != 1 {
 		t.Fatalf("event drove %d local syncs, want 1", calls)
 	}
@@ -441,7 +449,7 @@ func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, calls := fake.syncOrigin(); calls > 0 {
+		if _, calls := fake.reconcileOrigin(); calls > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -452,7 +460,7 @@ func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if origin, _ := fake.syncOrigin(); origin != "" {
+	if origin, _ := fake.reconcileOrigin(); origin != "" {
 		t.Errorf("event-driven local sync origin = %q, want empty", origin)
 	}
 }
@@ -535,7 +543,7 @@ func TestReloadClosesEveryTransport(t *testing.T) {
 	t.Cleanup(func() { dialTransport = prev })
 
 	workers, children := testDaemonOwner(t.Context(), t)
-	sup := newSupervisor(workers, children)
+	sup := newSupervisor(workers, children, newDeliveryStore(t.TempDir()))
 	var stopOnce sync.Once
 	stop := func() { stopOnce.Do(sup.stop) }
 	t.Cleanup(stop)

@@ -53,8 +53,11 @@ func TestServiceAgentsUseFixedProgramsAndTypedPolicy(t *testing.T) {
 	t.Setenv("PATH", binDir)
 	agents, err := serviceAgents([]manifest.Manifest{{
 		Name: "cookiesync", Binary: "cookiesync", Watch: manifest.WatchSpec{Debounce: codec.Duration(0)},
-		Service: manifest.ServiceSpec{Kind: "resident", Socket: "~/.config/cookiesync/rpc.sock"},
-		Helper:  &manifest.HelperSpec{Command: "helper-serve", SessionType: manifest.SessionTypeAqua},
+		Service: manifest.ServiceSpec{
+			Kind: "resident", Socket: "~/.config/cookiesync/rpc.sock",
+			SchemaFingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		Helper: &manifest.HelperSpec{Command: "helper-serve", SessionType: manifest.SessionTypeAqua},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +93,8 @@ func TestInstallAndUninstallConvergeExactDesiredSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := `{"name":"cookiesync","binary":"cookiesync","watch":{"debounce":"1s"},` +
-		`"service":{"kind":"resident","socket":"/tmp/cookiesync.sock"},` +
+		`"service":{"kind":"resident","socket":"/tmp/cookiesync.sock",` +
+		`"schema_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},` +
 		`"helper":{"command":"helper-serve","session_type":"Aqua"}}`
 	if err := os.WriteFile(filepath.Join(directory, "cookiesync.json"), []byte(payload), 0o600); err != nil {
 		t.Fatal(err)

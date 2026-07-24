@@ -23,7 +23,8 @@ func TestRemoteRPCRejectsSpawnedServiceBeforeHello(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"name":"spawned","binary":"/bin/false","watch":{"debounce":"1s"},"service":{"kind":"spawned"}}`
+	payload := `{"name":"spawned","binary":"/bin/false","watch":{"debounce":"1s"},` +
+		`"service":{"kind":"spawned","schema_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`
 	if err := os.WriteFile(filepath.Join(directory, "spawned.json"), []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
 	}
