@@ -5,7 +5,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/yasyf/daemonkit/supervise"
+	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/worker"
 
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
@@ -18,8 +19,8 @@ func newReconcileCmd() *cobra.Command {
 		Short: "Run one convergent reconcile pass for every registered consumer.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return withCLIProcessOwner(cmd.Context(), func(pool *supervise.Pool) error {
-				results, err := reconcileAll(cmd.Context(), pool)
+			return withCLIProcessOwner(cmd.Context(), func(_ *worker.Pool, children *proc.Manager) error {
+				results, err := reconcileAll(cmd.Context(), children)
 				if err != nil {
 					return err
 				}
@@ -47,7 +48,7 @@ type reconcileResult struct {
 // reconcile over its local sync service — convergence happens in the consumer,
 // which pull-merges its peers from the mesh internally. A per-consumer failure
 // is captured in its result, never aborting the others.
-func reconcileAll(ctx context.Context, pool *supervise.Pool) ([]reconcileResult, error) {
+func reconcileAll(ctx context.Context, children *proc.Manager) ([]reconcileResult, error) {
 	reg, err := hostregistry.Mesh.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load mesh: %w", err)
@@ -58,7 +59,7 @@ func reconcileAll(ctx context.Context, pool *supervise.Pool) ([]reconcileResult,
 	}
 	results := make([]reconcileResult, 0, len(manifests))
 	for _, m := range manifests {
-		results = append(results, reconcileOne(ctx, pool, m, reg.Self))
+		results = append(results, reconcileOne(ctx, children, m, reg.Self))
 	}
 	return results, nil
 }
@@ -66,8 +67,8 @@ func reconcileAll(ctx context.Context, pool *supervise.Pool) ([]reconcileResult,
 // reconcileOne runs a full reconcile against the consumer's exact-build typed
 // service. Any failure is captured in the result's Err rather than returned, so a
 // per-consumer fault never aborts the others.
-func reconcileOne(ctx context.Context, pool *supervise.Pool, m manifest.Manifest, self string) reconcileResult {
-	c := syncservice.NewClient(dialTransport(pool, m, self, self))
+func reconcileOne(ctx context.Context, children *proc.Manager, m manifest.Manifest, self string) reconcileResult {
+	c := syncservice.NewClient(dialTransport(children, m, self, self))
 	defer func() { _ = c.Close() }()
 
 	if _, err := c.Reconcile(ctx, ""); err != nil {

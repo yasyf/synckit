@@ -1,10 +1,9 @@
 // Package manifest defines the JSON manifest a synckit consumer registers under
 // ~/.config/synckit/manifests/, plus discovery and validation.
 //
-// A consumer describes its binary, watch debounce, and a typed service block.
-// synckitd starts the consumer's RPC server with the service's serve args and
-// drives reconcile/sync/state over that typed RPC transport rather than rendering
-// argv templates, so no shell or string interpolation is ever involved.
+// A consumer describes its binary, watch debounce, and one resident or spawned
+// service. Spawned services receive only the fixed rpc-serve-v1 command; remote
+// service traffic enters through synckitd's fixed bridge.
 package manifest
 
 import (
@@ -38,14 +37,10 @@ type WatchSpec struct {
 	Debounce codec.Duration `json:"debounce"`
 }
 
-// ServiceSpec describes how synckitd starts and reaches the consumer's RPC
-// server. Transport is "socket" or "stdio", ServeArgs is the argv that starts the
-// server, and Sock is the resident unix-socket path, required only when Transport
-// is "socket".
+// ServiceSpec selects one exact local presentation of the fixed v1 service.
 type ServiceSpec struct {
-	Transport string   `json:"transport"`
-	ServeArgs []string `json:"serve_args"`
-	Sock      string   `json:"sock,omitempty"`
+	Kind   string `json:"kind"`
+	Socket string `json:"socket,omitempty"`
 }
 
 // SessionType is a launchd session name accepted by a resident helper.
@@ -70,8 +65,8 @@ type HelperSpec struct {
 	SessionType SessionType `json:"session_type,omitempty"`
 }
 
-func validTransport(t string) bool {
-	return t == "socket" || t == "stdio"
+func validServiceKind(kind string) bool {
+	return kind == "resident" || kind == "spawned"
 }
 
 func validName(name string) bool {
@@ -94,12 +89,14 @@ func (m Manifest) Validate() error {
 		return fmt.Errorf("manifest: field %q must be a canonical lowercase service name, got %q", "name", m.Name)
 	case m.Binary == "":
 		return fmt.Errorf("manifest %q: field %q is required", m.Name, "binary")
-	case !validTransport(m.Service.Transport):
-		return fmt.Errorf("manifest %q: field %q must be one of socket or stdio, got %q", m.Name, "service.transport", m.Service.Transport)
-	case len(m.Service.ServeArgs) == 0:
-		return fmt.Errorf("manifest %q: field %q is required", m.Name, "service.serve_args")
-	case m.Service.Transport == "socket" && m.Service.Sock == "":
-		return fmt.Errorf("manifest %q: field %q is required when transport is socket", m.Name, "service.sock")
+	case !validServiceKind(m.Service.Kind):
+		return fmt.Errorf("manifest %q: field %q must be one of resident or spawned, got %q", m.Name, "service.kind", m.Service.Kind)
+	case m.Service.Kind == "resident" && m.Service.Socket == "":
+		return fmt.Errorf("manifest %q: field %q is required when kind is resident", m.Name, "service.socket")
+	case m.Service.Kind == "spawned" && (!filepath.IsAbs(m.Binary) || filepath.Clean(m.Binary) != m.Binary):
+		return fmt.Errorf("manifest %q: field %q must be exact and absolute when kind is spawned", m.Name, "binary")
+	case m.Service.Kind == "spawned" && m.Service.Socket != "":
+		return fmt.Errorf("manifest %q: field %q must be empty when kind is spawned", m.Name, "service.socket")
 	case m.Helper != nil && m.Helper.Command == "":
 		return fmt.Errorf("manifest %q: field %q is required", m.Name, "helper.command")
 	case m.Helper != nil && !validSessionType(m.Helper.SessionType):

@@ -1,30 +1,31 @@
-// Package synctransport implements module-private process-backed transports.
+// Package synctransport implements Synckit's fixed local and remote service transports.
 package synctransport
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/supervise"
 	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/rpc"
 )
 
-const closeGrace = 2 * time.Second
-
-var (
-	backoffBase = 500 * time.Millisecond
-	backoffMax  = 30 * time.Second
-	errBackoff  = errors.New("syncservice: transport backing off")
+const (
+	closeGrace      = 3 * time.Second
+	maxStderrBytes  = 64 << 10
+	spawnPolicyName = "synckit.spawn-policy.v1\x00"
 )
 
 // Response is the exact raw-result sync-service response envelope.
@@ -40,277 +41,392 @@ type Transport interface {
 	Close() error
 }
 
-// Socket returns a persistent transport to a resident Unix socket.
-func Socket(sock string) Transport {
+type failedTransport struct{ err error }
+
+// Failed returns a transport that reports one construction failure.
+func Failed(err error) Transport { return failedTransport{err: err} }
+
+func (t failedTransport) Do(context.Context, *rpc.Request) (*Response, error) { return nil, t.err }
+func (failedTransport) Close() error                                          { return nil }
+
+// Socket returns a persistent transport to one resident Unix socket.
+func Socket(socket string) Transport {
 	return &socketTransport{client: rpc.NewClient(rpc.ClientConfig{
-		Dial: wire.UnixDialer(sock), WireBuild: rpc.WireBuild,
+		Dial: wire.UnixDialer(socket), WireBuild: rpc.WireBuild,
 	})}
 }
 
 type socketTransport struct{ client *rpc.Client }
 
-func (t *socketTransport) Do(ctx context.Context, req *rpc.Request) (*Response, error) {
-	return call(ctx, t.client, req)
+func (t *socketTransport) Do(ctx context.Context, request *rpc.Request) (*Response, error) {
+	response, err := t.client.Call(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &Response{OK: response.OK, Result: response.Result, Error: response.Error}, nil
 }
 
 func (t *socketTransport) Close() error { return t.client.Close() }
 
-// NewStdio returns a module-private persistent transport over a spawned bridge.
-func NewStdio(pool *supervise.Pool, name string, args ...string) Transport {
-	return &CommandTransport{pool: pool, candidates: [][]string{append([]string{name}, args...)}}
+// NewSpawned returns the fixed local spawned-service transport.
+func NewSpawned(manager *proc.Manager, executable, serviceID string) Transport {
+	return &spawnedTransport{manager: manager, executable: executable, serviceID: serviceID}
 }
 
-// NewSSHStdio returns a module-private persistent transport through a peer.
-func NewSSHStdio(pool *supervise.Pool, peer, remoteCmd string) Transport {
-	return &CommandTransport{pool: pool, resolve: func() ([][]string, error) {
-		addrs, err := hostregistry.DialAddrs(peer)
-		if err != nil {
-			return nil, fmt.Errorf("dial addresses for %s: %w", peer, err)
-		}
-		candidates := make([][]string, len(addrs))
-		for i, addr := range addrs {
-			candidates[i] = hostregistry.SSHArgv(addr, remoteCmd)
-		}
-		return candidates, nil
-	}}
-}
-
-// NewCandidates returns a module-private transport over exact test candidates.
-func NewCandidates(pool *supervise.Pool, candidates [][]string) *CommandTransport {
-	return &CommandTransport{pool: pool, candidates: candidates}
-}
-
-// CommandTransport owns one persistent daemonkit session and bridge process.
-type CommandTransport struct {
-	pool       *supervise.Pool
-	resolve    func() ([][]string, error)
-	candidates [][]string
+type spawnedTransport struct {
+	manager    *proc.Manager
+	executable string
+	serviceID  string
 
 	mu      sync.Mutex
-	client  *rpc.Client
-	session *supervise.SessionProcess
+	client  *rpc.SpawnedClient
+	session *spawnedProcess
 	closed  bool
-
-	idx        int
-	resetCount int
-	resetAt    time.Time
 }
 
-// Do sends one typed request over the persistent bridge.
-func (t *CommandTransport) Do(ctx context.Context, req *rpc.Request) (*Response, error) {
+func (t *spawnedTransport) Do(ctx context.Context, request *rpc.Request) (*Response, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
-		return nil, errors.New("syncservice: transport closed")
+		return nil, errors.New("syncservice: spawned transport closed")
 	}
 	if t.client == nil {
-		t.client = rpc.NewClient(rpc.ClientConfig{Dial: t.dialLocked, WireBuild: rpc.WireBuild})
-	}
-	resp, err := call(ctx, t.client, req)
-	if err == nil {
-		t.resetCount = 0
-		return resp, nil
-	}
-	if errors.Is(err, errBackoff) {
-		return nil, err
-	}
-	if ctxErr := terminalContextError(ctx); ctxErr != nil {
-		t.reset(ctx)
-		t.armBackoff()
-		return nil, ctxErr
-	}
-	var transportErr *rpc.TransportError
-	if errors.As(err, &transportErr) && transportErr.Outcome == wire.PreSendFailure && t.idx+1 < len(t.candidates) {
-		t.idx++
-	}
-	t.reset(ctx)
-	t.armBackoff()
-	return nil, err
-}
-
-func terminalContextError(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	deadline, ok := ctx.Deadline()
-	if ok && !time.Now().Before(deadline) {
-		return context.DeadlineExceeded
-	}
-	return nil
-}
-
-func call(ctx context.Context, client *rpc.Client, req *rpc.Request) (*Response, error) {
-	resp, err := client.Call(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	return &Response{OK: resp.OK, Result: resp.Result, Error: resp.Error}, nil
-}
-
-func (t *CommandTransport) dialLocked(ctx context.Context) (net.Conn, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if t.closed {
-		return nil, errors.New("syncservice: transport closed")
-	}
-	if wait := t.backoffRemaining(); wait > 0 {
-		return nil, fmt.Errorf("%w %s after %d consecutive failures", errBackoff, wait.Round(time.Millisecond), t.resetCount)
-	}
-	if err := t.ensureCandidates(); err != nil {
-		return nil, err
-	}
-	if t.session != nil {
-		t.reset(ctx)
-	}
-	return t.spawn(ctx)
-}
-
-func (t *CommandTransport) spawn(ctx context.Context) (net.Conn, error) {
-	argv := t.candidates[t.idx]
-	session, err := t.pool.StartSession(ctx, supervise.SessionProcessSpec{
-		RecoveryClass: proc.RecoveryTask, Path: argv[0], Args: argv[1:], Stderr: os.Stderr,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("start %s: %w", argv[0], err)
-	}
-	t.session = session
-	return session.Conn(), nil
-}
-
-func (t *CommandTransport) ensureCandidates() error {
-	if t.candidates != nil {
-		return nil
-	}
-	candidates, err := t.resolve()
-	if err != nil {
-		return err
-	}
-	if len(candidates) == 0 {
-		return errors.New("syncservice: no dial candidates")
-	}
-	t.candidates = candidates
-	return nil
-}
-
-func (t *CommandTransport) backoffRemaining() time.Duration {
-	if t.resetCount < 2 || backoffBase <= 0 {
-		return 0
-	}
-	delay := backoffBase
-	for range t.resetCount - 2 {
-		delay *= 2
-		if delay >= backoffMax {
-			delay = backoffMax
-			break
+		if err := t.start(ctx); err != nil {
+			return nil, err
 		}
 	}
-	if elapsed := time.Since(t.resetAt); elapsed < delay {
-		return delay - elapsed
+	response, err := t.client.Call(ctx, request)
+	if err != nil {
+		_ = t.reset(ctx)
+		return nil, err
 	}
-	return 0
+	return &Response{OK: response.OK, Result: response.Result, Error: response.Error}, nil
 }
 
-func (t *CommandTransport) armBackoff() {
-	t.resetCount++
-	t.resetAt = time.Now()
-}
-
-func (t *CommandTransport) reset(ctx context.Context) {
-	if t.session == nil {
-		return
+func (t *spawnedTransport) start(ctx context.Context) error {
+	request, err := spawnedRequest(t.executable, []string{rpc.RemoteServeCommand, t.serviceID}, true)
+	if err != nil {
+		return err
 	}
-	_ = t.session.Stop(context.WithoutCancel(ctx))
-	t.session = nil
-}
-
-func (t *CommandTransport) activeCandidate() string {
-	argv := t.candidates[t.idx]
-	if t.resolve != nil {
-		return argv[len(argv)-2]
+	child, receipt, err := t.manager.Prepare(ctx, request)
+	if err != nil {
+		return fmt.Errorf("syncservice: prepare local service: %w", err)
 	}
-	return argv[0]
+	stderr, err := child.TakeStderr()
+	if err != nil {
+		_ = child.Stop(context.WithoutCancel(ctx))
+		return err
+	}
+	session := newSpawnedProcess(child, stderr)
+	if err := child.Start(ctx); err != nil {
+		_ = session.close(ctx)
+		return err
+	}
+	endpoint, err := child.ClaimSpawnedSession(ctx, receipt)
+	if err != nil {
+		_ = session.close(ctx)
+		return err
+	}
+	client, err := rpc.NewSpawnedClient(ctx, endpoint)
+	if err != nil {
+		_ = session.close(ctx)
+		return err
+	}
+	t.session = session
+	t.client = client
+	return nil
 }
 
-// Close settles the active bridge and permanently closes the transport.
-func (t *CommandTransport) Close() error {
+func (t *spawnedTransport) reset(ctx context.Context) error {
+	var err error
+	if t.client != nil {
+		err = errors.Join(err, t.client.Close())
+		t.client = nil
+	}
+	if t.session != nil {
+		err = errors.Join(err, t.session.close(ctx))
+		t.session = nil
+	}
+	return err
+}
+
+func (t *spawnedTransport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
 		return nil
 	}
 	t.closed = true
-	if t.client != nil {
-		_ = t.client.Close()
+	return t.reset(context.Background())
+}
+
+// NewRemote returns the sole strict SSH transport for one registered host fact.
+func NewRemote(manager *proc.Manager, fact hostregistry.SSHHostFact, knownHostsPath, serviceID string) Transport {
+	return &remoteTransport{
+		manager: manager, fact: fact, knownHostsPath: knownHostsPath, serviceID: serviceID,
 	}
-	if t.session == nil {
+}
+
+type remoteTransport struct {
+	manager        *proc.Manager
+	fact           hostregistry.SSHHostFact
+	knownHostsPath string
+	serviceID      string
+
+	mu     sync.Mutex
+	client *rpc.Client
+	pipe   *managedPipe
+	index  int
+	closed bool
+}
+
+func (t *remoteTransport) Do(ctx context.Context, request *rpc.Request) (*Response, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return nil, errors.New("syncservice: remote transport closed")
+	}
+	if t.client == nil {
+		t.client = rpc.NewClient(rpc.ClientConfig{Dial: t.dial, WireBuild: rpc.WireBuild})
+	}
+	response, err := t.client.Call(ctx, request)
+	if err != nil {
+		var transportErr *rpc.TransportError
+		if errors.As(err, &transportErr) && transportErr.Outcome == wire.PreSendFailure && t.index+1 < len(t.fact.Addresses) {
+			t.index++
+		}
+		_ = t.reset(ctx)
+		return nil, err
+	}
+	return &Response{OK: response.OK, Result: response.Result, Error: response.Error}, nil
+}
+
+func (t *remoteTransport) dial(ctx context.Context) (net.Conn, error) {
+	if t.index >= len(t.fact.Addresses) {
+		return nil, errors.New("syncservice: remote host has no dial address")
+	}
+	argv, err := hostregistry.RemoteSSHArgv(t.fact, t.fact.Addresses[t.index], t.knownHostsPath, t.serviceID)
+	if err != nil {
+		return nil, err
+	}
+	pipe, err := startManagedPipe(ctx, t.manager, argv)
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := rpc.NewRemoteNonce()
+	if err == nil {
+		err = rpc.VerifyRemoteHello(ctx, pipe, nonce)
+	}
+	if err != nil {
+		closeErr := pipe.close(ctx)
+		return nil, errors.Join(err, closeErr, pipe.stderrError())
+	}
+	t.pipe = pipe
+	return pipe, nil
+}
+
+func (t *remoteTransport) reset(ctx context.Context) error {
+	var err error
+	if t.client != nil {
+		err = errors.Join(err, t.client.Close())
+		t.client = nil
+	}
+	if t.pipe != nil {
+		err = errors.Join(err, t.pipe.close(ctx))
+		t.pipe = nil
+	}
+	return err
+}
+
+func (t *remoteTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
 		return nil
 	}
-	active := t.activeCandidate()
-	waitCtx, cancel := context.WithTimeout(context.Background(), closeGrace)
-	waitErr := t.session.Wait(waitCtx)
-	cancel()
-	var stopErr error
-	if waitErr != nil {
-		stopErr = t.session.Stop(context.Background())
+	t.closed = true
+	return t.reset(context.Background())
+}
+
+type spawnedProcess struct {
+	child  *proc.PreparedChild
+	stderr *boundedCapture
+	once   sync.Once
+	err    error
+}
+
+func newSpawnedProcess(child *proc.PreparedChild, stderr *os.File) *spawnedProcess {
+	return &spawnedProcess{child: child, stderr: newBoundedCapture(stderr)}
+}
+
+func (p *spawnedProcess) close(parent context.Context) error {
+	p.once.Do(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), closeGrace)
+		defer cancel()
+		p.err = errors.Join(p.child.Stop(ctx), p.stderr.wait(ctx))
+	})
+	return p.err
+}
+
+type managedPipe struct {
+	reader *os.File
+	writer *os.File
+	spawnedProcess
+}
+
+func startManagedPipe(ctx context.Context, manager *proc.Manager, argv []string) (*managedPipe, error) {
+	if len(argv) == 0 {
+		return nil, errors.New("syncservice: empty process argv")
 	}
-	t.session = nil
-	if err := errors.Join(waitErr, stopErr); err != nil {
-		return fmt.Errorf("wait for %s to exit: %w", active, err)
+	request, err := spawnedRequest(argv[0], argv[1:], false)
+	if err != nil {
+		return nil, err
 	}
-	return nil
-}
-
-// EnsureCandidates resolves deferred peer addresses for module tests.
-func (t *CommandTransport) EnsureCandidates() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.ensureCandidates()
-}
-
-// Candidates returns a defensive copy of the resolved argv candidates.
-func (t *CommandTransport) Candidates() [][]string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	result := make([][]string, len(t.candidates))
-	for i := range t.candidates {
-		result[i] = append([]string(nil), t.candidates[i]...)
+	child, _, err := manager.Prepare(ctx, request)
+	if err != nil {
+		return nil, fmt.Errorf("syncservice: prepare %s: %w", argv[0], err)
 	}
-	return result
+	stdin, err := child.TakeStdin()
+	if err != nil {
+		_ = child.Stop(context.WithoutCancel(ctx))
+		return nil, err
+	}
+	stdout, err := child.TakeStdout()
+	if err != nil {
+		_ = stdin.Close()
+		_ = child.Stop(context.WithoutCancel(ctx))
+		return nil, err
+	}
+	stderr, err := child.TakeStderr()
+	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = child.Stop(context.WithoutCancel(ctx))
+		return nil, err
+	}
+	pipe := &managedPipe{
+		reader: stdout, writer: stdin,
+		spawnedProcess: spawnedProcess{child: child, stderr: newBoundedCapture(stderr)},
+	}
+	if err := child.Start(ctx); err != nil {
+		_ = pipe.close(ctx)
+		return nil, err
+	}
+	return pipe, nil
 }
 
-// State returns the selected candidate and whether a session is active.
-func (t *CommandTransport) State() (int, bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.idx, t.session != nil
+func spawnedRequest(executable string, args []string, sealed bool) (proc.SpawnRequest, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return proc.SpawnRequest{}, fmt.Errorf("syncservice: resolve home: %w", err)
+	}
+	signature, err := proc.NewSignatureDigest(sha256.Sum256([]byte(spawnPolicyName + executable)))
+	if err != nil {
+		return proc.SpawnRequest{}, err
+	}
+	stdin, stdout := proc.StdioPipe, proc.StdioPipe
+	if sealed {
+		stdin, stdout = proc.StdioNull, proc.StdioNull
+	}
+	return proc.NewSpawnRequest(proc.SpawnConfig{
+		RecoveryClass: proc.RecoveryTask, Executable: executable, Args: args,
+		Dir: filepath.Dir(executable), Env: []string{"HOME=" + home},
+		Stdin: stdin, Stdout: stdout, Stderr: proc.StdioPipe,
+		SpawnedSession: sealed, ExpectedSignature: &signature,
+	})
 }
 
-// FailureState returns the consecutive reset count and current backoff wait.
-func (t *CommandTransport) FailureState() (int, time.Duration) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.resetCount, t.backoffRemaining()
+func (p *managedPipe) Read(buffer []byte) (int, error)  { return p.reader.Read(buffer) }
+func (p *managedPipe) Write(buffer []byte) (int, error) { return p.writer.Write(buffer) }
+
+func (p *managedPipe) Close() error {
+	return p.close(context.Background())
 }
 
-// ReplaceCandidates changes the exact argv set for module tests.
-func (t *CommandTransport) ReplaceCandidates(candidates [][]string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.candidates = candidates
-	t.idx = 0
+func (p *managedPipe) close(parent context.Context) error {
+	p.once.Do(func() {
+		p.err = errors.Join(p.writer.Close(), p.reader.Close())
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), closeGrace)
+		defer cancel()
+		p.err = errors.Join(p.err, p.child.Stop(ctx), p.stderr.wait(ctx))
+	})
+	return p.err
 }
 
-// BackdateReset moves the latest failure time backwards for module tests.
-func (t *CommandTransport) BackdateReset(age time.Duration) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.resetAt = time.Now().Add(-age)
+func (p *managedPipe) LocalAddr() net.Addr  { return pipeAddress("local") }
+func (p *managedPipe) RemoteAddr() net.Addr { return pipeAddress("child") }
+func (p *managedPipe) SetDeadline(deadline time.Time) error {
+	return errors.Join(p.reader.SetDeadline(deadline), p.writer.SetDeadline(deadline))
 }
 
-// SetBackoff replaces command backoff timing for module tests.
-func SetBackoff(base, maximum time.Duration) func() {
-	previousBase, previousMax := backoffBase, backoffMax
-	backoffBase, backoffMax = base, maximum
-	return func() { backoffBase, backoffMax = previousBase, previousMax }
+func (p *managedPipe) SetReadDeadline(deadline time.Time) error {
+	return p.reader.SetReadDeadline(deadline)
+}
+
+func (p *managedPipe) SetWriteDeadline(deadline time.Time) error {
+	return p.writer.SetWriteDeadline(deadline)
+}
+
+func (p *managedPipe) stderrError() error {
+	data, truncated := p.stderr.snapshot()
+	if len(data) == 0 {
+		return nil
+	}
+	suffix := ""
+	if truncated {
+		suffix = " (truncated)"
+	}
+	return fmt.Errorf("ssh stderr%s: %s", suffix, bytes.TrimSpace(data))
+}
+
+type pipeAddress string
+
+func (pipeAddress) Network() string  { return "pipe" }
+func (a pipeAddress) String() string { return string(a) }
+
+type boundedCapture struct {
+	mu        sync.Mutex
+	buffer    bytes.Buffer
+	truncated bool
+	reader    io.ReadCloser
+	closeOnce sync.Once
+	closeErr  error
+	done      chan error
+}
+
+func newBoundedCapture(reader io.ReadCloser) *boundedCapture {
+	capture := &boundedCapture{reader: reader, done: make(chan error, 1)}
+	go func() {
+		limited := &io.LimitedReader{R: reader, N: maxStderrBytes + 1}
+		capture.mu.Lock()
+		_, firstErr := io.Copy(&capture.buffer, limited)
+		if capture.buffer.Len() > maxStderrBytes {
+			capture.buffer.Truncate(maxStderrBytes)
+			capture.truncated = true
+		}
+		capture.mu.Unlock()
+		_, drainErr := io.Copy(io.Discard, reader)
+		capture.done <- errors.Join(firstErr, drainErr, capture.closeReader())
+	}()
+	return capture
+}
+
+func (c *boundedCapture) wait(ctx context.Context) error {
+	select {
+	case err := <-c.done:
+		return err
+	case <-ctx.Done():
+		return errors.Join(ctx.Err(), c.closeReader(), <-c.done)
+	}
+}
+
+func (c *boundedCapture) closeReader() error {
+	c.closeOnce.Do(func() { c.closeErr = c.reader.Close() })
+	return c.closeErr
+}
+
+func (c *boundedCapture) snapshot() ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return bytes.Clone(c.buffer.Bytes()), c.truncated
 }

@@ -13,7 +13,7 @@ import (
 // Observation exposes product runtime health on Synckit's fixed wire route.
 func Observation(health func(context.Context) (dkdaemon.Health, error)) wire.ObservationRoute {
 	return wire.ObservationRoute{
-		Op: rpc.RuntimeHealthOp, AvailableBeforeReady: true,
+		Op: rpc.RuntimeHealthOp,
 		Handler: func(ctx context.Context, _ wire.ObservationRequest) (wire.ObservationResponse, error) {
 			value, err := health(ctx)
 			if err != nil {

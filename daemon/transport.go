@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/yasyf/daemonkit/supervise"
+	"github.com/yasyf/daemonkit/proc"
 	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/hostregistry"
@@ -24,33 +24,28 @@ func daemonClient(sock string) *rpc.Client {
 var dialTransport = resolveTransport
 
 // resolveTransport returns the typed transport to reach manifest m's consumer on
-// peer. When peer is self, it returns the manifest's local transport — a unix
-// socket to the resident helper (transport "socket") or the spawned consumer
-// binary's stdio (transport "stdio"). When peer is a remote host, it returns an
-// ssh transport that runs the consumer's rpc-serve command on that peer.
-func resolveTransport(pool *supervise.Pool, m manifest.Manifest, peer, self string) syncservice.Transport {
+// peer. Local resident services use their socket and local spawned services use
+// daemonkit's sealed spawned-session endpoint. Remote traffic uses the exact SSH
+// host fact and fixed rpc-serve-v1 command.
+func resolveTransport(manager *proc.Manager, m manifest.Manifest, peer, self string) syncservice.Transport {
 	if peer == self {
-		switch m.Service.Transport {
-		case "socket":
-			return syncservice.Socket(expandHome(m.Service.Sock))
-		case "stdio":
-			return synctransport.NewStdio(pool, m.Binary, m.Service.ServeArgs...)
+		switch m.Service.Kind {
+		case "resident":
+			return syncservice.Socket(expandHome(m.Service.Socket))
+		case "spawned":
+			return synctransport.NewSpawned(manager, m.Binary, m.Name)
 		}
-		panic("daemon: manifest " + m.Name + " has invalid local transport " + m.Service.Transport)
+		panic("daemon: manifest " + m.Name + " has invalid local service kind " + m.Service.Kind)
 	}
-	return synctransport.NewSSHStdio(pool, peer, remoteServeCmd(m))
-}
-
-// remoteServeCmd joins the consumer's rpc-serve invocation into a single shell
-// command line for ssh: the binary unquoted followed by each serve arg
-// shell-quoted, so argv boundaries survive the remote shell intact.
-func remoteServeCmd(m manifest.Manifest) string {
-	parts := make([]string, 0, len(m.Service.ServeArgs)+1)
-	parts = append(parts, m.Binary)
-	for _, a := range m.Service.ServeArgs {
-		parts = append(parts, hostregistry.ShellQuote(a))
+	fact, err := hostregistry.Mesh.Host(peer)
+	if err != nil {
+		return synctransport.Failed(err)
 	}
-	return strings.Join(parts, " ")
+	knownHosts, err := hostregistry.Mesh.KnownHostsPath()
+	if err != nil {
+		return synctransport.Failed(err)
+	}
+	return synctransport.NewRemote(manager, fact, knownHosts, m.Name)
 }
 
 // expandHome expands a leading "~/" in p against the current user's home

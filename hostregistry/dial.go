@@ -1,16 +1,14 @@
 package hostregistry
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/supervise"
+	"github.com/yasyf/daemonkit/worker"
 )
 
 // sshConnFailureExit is the exit status ssh returns for its own connection failures;
@@ -19,7 +17,7 @@ import (
 const sshConnFailureExit = 255
 
 // sshBin is the ssh binary ExecSSH shells; a var so tests point it at a fake.
-var sshBin = "ssh"
+var sshBin = "/usr/bin/ssh"
 
 // sshDialBudget caps total failover time across dial addresses: once spent, the next
 // 255 skips straight to the final canonical target, so many dead recorded addresses
@@ -82,12 +80,21 @@ func brewWrap(remoteCmd string) string {
 // to the caller's ctx deadline — only the caller knows how long its command should take.
 // Every failing attempt surfaces as a [*SSHError] naming the dial address, its captured
 // stderr, and the unwrappable typed exit cause.
-func ExecSSH(ctx context.Context, runner supervise.TaskRunner, target, remoteCmd string, stdin []byte) (string, error) {
+func ExecSSH(ctx context.Context, runner *worker.Pool, target, remoteCmd string, stdin []byte) (string, error) {
 	addrs, err := DialAddrs(target)
 	if err != nil {
 		return "", err
 	}
 	return execSSHAddrs(ctx, runner, addrs, remoteCmd, stdin)
+}
+
+// ExecBootstrapSSH runs one explicit user@host provisioning command before a
+// host fact exists. It never participates in runtime service transport.
+func ExecBootstrapSSH(ctx context.Context, runner *worker.Pool, target, remoteCmd string, stdin []byte) (string, error) {
+	if _, _, err := splitSSHIdentity(target); err != nil {
+		return "", err
+	}
+	return execSSHOnce(ctx, runner, target, remoteCmd, stdin)
 }
 
 // execSSHAddrs dials each address in order, returning the first success and advancing
@@ -98,7 +105,7 @@ func ExecSSH(ctx context.Context, runner supervise.TaskRunner, target, remoteCmd
 // remoteBrewInstall can read brew's "no available formula" message off stdout.
 func execSSHAddrs(
 	ctx context.Context,
-	runner supervise.TaskRunner,
+	runner *worker.Pool,
 	addrs []string,
 	remoteCmd string,
 	stdin []byte,
@@ -126,60 +133,27 @@ func execSSHAddrs(
 // [*SSHError].
 func execSSHOnce(
 	ctx context.Context,
-	runner supervise.TaskRunner,
+	runner *worker.Pool,
 	addr, remoteCmd string,
 	stdin []byte,
 ) (string, error) {
 	args := append(append([]string{}, dialOpts...), addr, brewWrap(remoteCmd))
-	input, err := taskInput(stdin)
-	if err != nil {
-		return "", &SSHError{Addr: addr, Err: err}
-	}
-	var stdout, stderr bytes.Buffer
-	err = runner.Run(ctx, supervise.Task{
-		RecoveryClass: proc.RecoveryTask,
-		Path:          sshBin,
-		Args:          args,
-		Stdin:         input,
-		Stdout:        &stdout,
-		Stderr:        &stderr,
+	result, err := runner.Run(ctx, worker.CommandRequest{
+		Path: sshBin, Args: args, Dir: filepath.Dir(sshBin), Stdin: stdin, TotalTimeout: 12 * time.Minute,
 	})
-	if err == nil {
-		err = ctx.Err()
-	}
 	if err != nil {
-		return stdout.String(), &SSHError{Addr: addr, Stderr: stderr.String(), Err: err}
+		return string(result.Stdout), &SSHError{Addr: addr, Stderr: string(result.Stderr), Err: err}
 	}
-	return stdout.String(), nil
-}
-
-func taskInput(payload []byte) (*os.File, error) {
-	if payload == nil {
-		return nil, nil
-	}
-	input, err := os.CreateTemp("", "synckit-task-input-*")
-	if err != nil {
-		return nil, fmt.Errorf("create task input: %w", err)
-	}
-	_ = os.Remove(input.Name())
-	if _, err := input.Write(payload); err != nil {
-		_ = input.Close()
-		return nil, fmt.Errorf("write task input: %w", err)
-	}
-	if _, err := input.Seek(0, 0); err != nil {
-		_ = input.Close()
-		return nil, fmt.Errorf("rewind task input: %w", err)
-	}
-	return input, nil
+	return string(result.Stdout), nil
 }
 
 // isConnFailure reports whether err is ssh's own connection failure (exit 255), the
 // only failure ExecSSH fails over on. A remote command's exit code (0-254) or a signal
 // kill is not a connection failure.
 func isConnFailure(err error) bool {
-	var ee interface{ ExitCode() int }
-	if errors.As(err, &ee) {
-		return ee.ExitCode() == sshConnFailureExit
+	var exit *worker.ExitError
+	if errors.As(err, &exit) {
+		return exit.ExitCode == sshConnFailureExit
 	}
 	return false
 }

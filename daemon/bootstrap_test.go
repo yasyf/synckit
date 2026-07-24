@@ -15,10 +15,15 @@ import (
 func stubLocalNodes(t *testing.T, nodes ...string) {
 	t.Helper()
 	prev := localNodeDiscovery
+	previousRefresh := refreshKnownHosts
 	localNodeDiscovery = func(context.Context, string) ([]string, []hostregistry.SkipNote) {
 		return nodes, nil
 	}
-	t.Cleanup(func() { localNodeDiscovery = prev })
+	refreshKnownHosts = func() error { return nil }
+	t.Cleanup(func() {
+		localNodeDiscovery = prev
+		refreshKnownHosts = previousRefresh
+	})
 }
 
 func TestAddHostStepSequence(t *testing.T) {

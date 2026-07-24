@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/yasyf/daemonkit/trust"
 	"github.com/yasyf/daemonkit/wire"
 )
 
@@ -113,6 +114,7 @@ func (c *Client) current(ctx context.Context) (*wire.Client, error) {
 	session, err := wire.NewClient(ctx, wire.ClientConfig{
 		Dial:      c.config.Dial,
 		WireBuild: c.config.WireBuild,
+		Role:      trust.UnprotectedRole,
 		MaxFrame:  MaxFrame,
 	})
 	if err != nil {

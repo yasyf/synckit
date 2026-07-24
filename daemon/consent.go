@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/yasyf/daemonkit/supervise"
+	"github.com/yasyf/daemonkit/worker"
 
 	"github.com/yasyf/synckit/authkit"
 	"github.com/yasyf/synckit/consent"
@@ -32,7 +32,7 @@ const consentProbeTimeout = 10 * time.Second
 // execSSHRunner adapts hostregistry.ExecSSH to consent.Runner: the routed relay
 // leg and the peer liveness probe both cross the mesh over ssh, with brew's
 // shellenv sourced remotely so synckitd resolves on a non-interactive peer.
-type execSSHRunner struct{ runner supervise.TaskRunner }
+type execSSHRunner struct{ runner *worker.Pool }
 
 func (r execSSHRunner) Run(ctx context.Context, target, remoteCmd string, stdin []byte) (string, error) {
 	return hostregistry.ExecSSH(ctx, r.runner, target, remoteCmd, stdin)
@@ -45,7 +45,7 @@ func (r execSSHRunner) Run(ctx context.Context, target, remoteCmd string, stdin 
 // swaps in fake collaborators without an installed helper or a real console.
 var buildConsentEngine = defaultConsentEngine
 
-func defaultConsentEngine(runner supervise.TaskRunner) *consent.Engine {
+func defaultConsentEngine(runner *worker.Pool) *consent.Engine {
 	router := consent.NewRouter(execSSHRunner{runner: runner}, consent.PresenceCommand)
 	return consent.NewEngine(selfIdentity, authkit.Gate{}, presence.Session, router, resolvePeers)
 }
@@ -76,7 +76,7 @@ func resolvePeers(context.Context) ([]string, error) {
 // built engine, via plain consent.Register — NEVER RegisterExclusive, since a
 // 10-minute Touch ID prompt behind the exclusive mutex would wedge the reconcile
 // and reload handlers that share it.
-func registerConsent(d *rpc.Dispatcher, runner supervise.TaskRunner) {
+func registerConsent(d *rpc.Dispatcher, runner *worker.Pool) {
 	consent.Register(d, buildConsentEngine(runner))
 }
 

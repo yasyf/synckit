@@ -244,3 +244,41 @@ func TestDirHonorsDirEnvOverride(t *testing.T) {
 		})
 	}
 }
+
+func TestRefreshKnownHostsCreatesSolePrivateTrustFile(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	configHome, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("home.example ssh-ed25519 key\n")
+	if err := os.WriteFile(filepath.Join(sshDir, "known_hosts"), want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := testCfg.RefreshKnownHosts(); err != nil {
+		t.Fatal(err)
+	}
+	path, err := testCfg.KnownHostsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateKnownHosts(path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path) //nolint:gosec // fixed test-owned path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("known_hosts = %q, want %q", got, want)
+	}
+}

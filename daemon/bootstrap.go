@@ -14,7 +14,10 @@ const synckitdBrew = "yasyf/tap/synckitd"
 
 // localNodeDiscovery browses bonjour for the .local node labels on the LAN; a var so
 // tests inject a deterministic result instead of a live mDNS browse.
-var localNodeDiscovery = hostregistry.LocalNodes
+var (
+	localNodeDiscovery = hostregistry.LocalNodes
+	refreshKnownHosts  = hostregistry.Mesh.RefreshKnownHosts
+)
 
 // AddHost registers target as a peer in the shared mesh and, unless noRecurse,
 // SSH-bootstraps the mesh on it: ensure synckitd is installed, install every
@@ -71,6 +74,9 @@ func AddHost(ctx context.Context, r hostregistry.Runner, manifests []manifest.Ma
 	fact, err := hostregistry.NewSSHHostFact(target, daemonPath, addresses)
 	if err != nil {
 		return err
+	}
+	if err := refreshKnownHosts(); err != nil {
+		return fmt.Errorf("pin SSH host trust: %w", err)
 	}
 	if err := hostregistry.Mesh.RegisterHost(ctx, fact); err != nil {
 		return fmt.Errorf("register exact SSH fact for %s: %w", target, err)

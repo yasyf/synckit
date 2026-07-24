@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 
 	"github.com/yasyf/daemonkit/wire"
@@ -46,29 +45,8 @@ func NewServer(dispatcher *Dispatcher) *Server {
 	}
 	server := &Server{Dispatcher: dispatcher}
 	server.Wire = &wire.Server{WireBuild: WireBuild, MaxFrame: MaxFrame}
-	server.Wire.RegisterConcurrent(callOp, server.dispatch)
+	server.Wire.Register(wire.HandlerSpec{Op: callOp, Handler: server.dispatch, Concurrent: true})
 	return server
-}
-
-// Serve accepts authenticated v1 sessions until ctx is canceled and publishes
-// readiness only after the listener and worker pool are live.
-func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
-	return s.Wire.Serve(ctx, listener, func() error { return nil }, allow, allow)
-}
-
-// ServeSession serves one spawned-parent session over independent streams.
-// Daemonkit owns framing, identity proof, deadlines, cancellation, and closure.
-func (s *Server) ServeSession(ctx context.Context, reader io.ReadCloser, writer io.WriteCloser) error {
-	conn, err := wire.NewDuplexConn(reader, writer)
-	if err != nil {
-		return err
-	}
-	identity, err := wire.SpawnedParentSessionIdentity()
-	if err != nil {
-		_ = conn.Close()
-		return err
-	}
-	return s.Wire.ServeSession(ctx, conn, identity, func() error { return nil }, allow, allow)
 }
 
 func (s *Server) dispatch(ctx context.Context, request wire.Request) (any, error) {
@@ -77,7 +55,7 @@ func (s *Server) dispatch(ctx context.Context, request wire.Request) (any, error
 		payload, encodeErr := EncodeResponse(&Response{OK: false, Error: err.Error()})
 		return json.RawMessage(payload), encodeErr
 	}
-	peer := request.Session.Peer()
+	peer := request.Peer
 	ctx = context.WithValue(ctx, peerPIDKey{}, peer.PID)
 	if sid, err := sidOf(peer.PID); err == nil {
 		ctx = context.WithValue(ctx, peerSIDKey{}, sid)
@@ -88,5 +66,3 @@ func (s *Server) dispatch(ctx context.Context, request wire.Request) (any, error
 	}
 	return json.RawMessage(payload), nil
 }
-
-func allow() (func(), error) { return func() {}, nil }

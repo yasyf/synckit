@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/supervise"
+	"github.com/yasyf/daemonkit/worker"
 )
 
 const (
@@ -20,14 +20,25 @@ const (
 	lockWait    = 30 * time.Second
 )
 
-// WithPool owns the single crash-recoverable CLI process pool for directory
-// while run executes. The pool never escapes this internal ownership boundary.
-func WithPool(ctx context.Context, directory string, run func(*supervise.Pool) error) (err error) {
-	if ctx == nil {
-		return errors.New("cli process owner: context is required")
-	}
-	if run == nil {
-		return errors.New("cli process owner: callback is required")
+var workerConfig = worker.Config{
+	Capacity: workerLimit, QueueCapacity: workerLimit,
+	MaxTotalRun: 12 * time.Minute, MaxStdinBytes: 16 << 20,
+	MaxStdoutBytes: 16 << 20, MaxStderrBytes: 1 << 20,
+}
+
+// WithPool owns one bounded disposable-command pool while run executes.
+func WithPool(ctx context.Context, directory string, run func(*worker.Pool) error) error {
+	return withOwner(ctx, directory, false, func(workers *worker.Pool, _ *proc.Manager) error { return run(workers) })
+}
+
+// WithRuntime owns bounded workers and long-lived children while run executes.
+func WithRuntime(ctx context.Context, directory string, run func(*worker.Pool, *proc.Manager) error) error {
+	return withOwner(ctx, directory, true, run)
+}
+
+func withOwner(ctx context.Context, directory string, includeChildren bool, run func(*worker.Pool, *proc.Manager) error) (err error) {
+	if ctx == nil || run == nil {
+		return errors.New("cli process owner: context and callback are required")
 	}
 	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || directory == string(filepath.Separator) {
 		return fmt.Errorf("cli process owner: directory %q must be absolute, clean, and non-root", directory)
@@ -36,39 +47,65 @@ func WithPool(ctx context.Context, directory string, run func(*supervise.Pool) e
 		return fmt.Errorf("create CLI process directory: %w", err)
 	}
 	lock, err := (proc.FileLockSpec{
-		Path:     filepath.Join(directory, "cli-processes.lock"),
-		Mode:     proc.FileLockExclusive,
-		Deadline: lockWait,
+		Path: filepath.Join(directory, "cli-processes.lock"), Mode: proc.FileLockExclusive, Deadline: lockWait,
 	}).Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire CLI process owner: %w", err)
 	}
 	defer func() { err = errors.Join(err, lock.Close()) }()
 
-	var generation [16]byte
-	if _, err := rand.Read(generation[:]); err != nil {
-		return fmt.Errorf("generate CLI process owner identity: %w", err)
-	}
-	reaper := &proc.Reaper{
-		Store:      &proc.FileStore{Path: filepath.Join(directory, "cli-processes.db")},
-		Generation: hex.EncodeToString(generation[:]),
-	}
-	pool, err := supervise.NewPool(workerLimit, reaper)
+	generation, err := newGeneration()
 	if err != nil {
 		return err
 	}
-	defer func() {
-		pool.Close()
-		pool.Cancel()
-		err = errors.Join(err, pool.Wait(context.WithoutCancel(ctx)))
-	}()
-	if err := pool.Recover(ctx); err != nil {
-		return fmt.Errorf("recover CLI processes: %w", err)
+	workers, err := worker.NewPool(workerConfig, reaper(filepath.Join(directory, "cli-workers.db"), generation))
+	if err != nil {
+		return err
 	}
-	if _, err := reaper.RecoverReapReceipts(ctx, proc.RecoveryTask, func(context.Context, proc.ReapReceipt) error {
-		return nil
-	}); err != nil {
-		return fmt.Errorf("recover CLI process receipts: %w", err)
+	claim, err := workers.ClaimRuntime()
+	if err != nil {
+		return err
 	}
-	return run(pool)
+	var children *proc.Manager
+	if includeChildren {
+		children, err = proc.NewManager(workerLimit, reaper(filepath.Join(directory, "cli-children.db"), generation))
+		if err != nil {
+			return errors.Join(err, claim.Close(context.WithoutCancel(ctx)))
+		}
+		if err := children.ClaimRuntime(); err != nil {
+			return errors.Join(err, claim.Close(context.WithoutCancel(ctx)))
+		}
+	}
+	defer func(closeBase context.Context) {
+		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(closeBase), 30*time.Second)
+		defer cancel()
+		if children != nil {
+			err = errors.Join(err, children.Shutdown(settleCtx))
+		}
+		err = errors.Join(err, claim.Close(settleCtx))
+	}(ctx)
+	if children != nil {
+		if err := children.Recover(ctx); err != nil {
+			return err
+		}
+	}
+	if err := claim.Recover(ctx); err != nil {
+		return err
+	}
+	if err := claim.Activate(); err != nil {
+		return err
+	}
+	return run(claim.Product(), children)
+}
+
+func newGeneration() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("generate CLI process owner identity: %w", err)
+	}
+	return hex.EncodeToString(value[:]), nil
+}
+
+func reaper(path, generation string) *proc.Reaper {
+	return &proc.Reaper{Store: &proc.FileStore{Path: path}, Generation: generation}
 }

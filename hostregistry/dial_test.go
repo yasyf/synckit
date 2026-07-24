@@ -12,27 +12,38 @@ import (
 	"time"
 
 	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/supervise"
+	"github.com/yasyf/daemonkit/worker"
 )
 
-func testTaskPool(t *testing.T) *supervise.Pool {
+func testTaskPool(t *testing.T) *worker.Pool {
 	t.Helper()
 	reaper := &proc.Reaper{
 		Store:      &proc.FileStore{Path: filepath.Join(t.TempDir(), "processes.db")},
 		Generation: t.Name(),
 	}
-	pool, err := supervise.NewPool(4, reaper)
+	pool, err := worker.NewPool(worker.Config{
+		Capacity: 4, QueueCapacity: 4, MaxTotalRun: 12 * time.Minute,
+		MaxStdinBytes: 16 << 20, MaxStdoutBytes: 16 << 20, MaxStderrBytes: 1 << 20,
+	}, reaper)
 	if err != nil {
 		t.Fatalf("new process pool: %v", err)
 	}
+	claim, err := pool.ClaimRuntime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := claim.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := claim.Activate(); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
-		pool.Close()
-		pool.Cancel()
-		if err := pool.Wait(context.Background()); err != nil {
-			t.Errorf("wait for process pool: %v", err)
+		if err := claim.Close(context.Background()); err != nil {
+			t.Errorf("close process pool: %v", err)
 		}
 	})
-	return pool
+	return claim.Product()
 }
 
 // fakeSSH writes an executable ssh stand-in that logs the address it was invoked with
@@ -408,9 +419,9 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 		if !strings.Contains(sshErr.Stderr, "remote boom") {
 			t.Fatalf("SSHError.Stderr = %q, want it to carry the remote stderr", sshErr.Stderr)
 		}
-		var ee *supervise.ExitError
+		var ee *worker.ExitError
 		if !errors.As(err, &ee) {
-			t.Fatalf("error %v does not unwrap to *supervise.ExitError; isConnFailure would misjudge failover", err)
+			t.Fatalf("error %v does not unwrap to *worker.ExitError; isConnFailure would misjudge failover", err)
 		}
 	})
 

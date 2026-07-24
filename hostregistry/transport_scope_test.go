@@ -6,12 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/worker"
 )
 
 func TestWithExecRunnerOwnsOnlyMeshCLIProcessFiles(t *testing.T) {
@@ -30,12 +30,12 @@ func TestWithExecRunnerOwnsOnlyMeshCLIProcessFiles(t *testing.T) {
 	}
 	seen := make(map[string]bool)
 	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), "cli-processes.") {
+		if entry.Name() != "cli-processes.lock" && entry.Name() != "cli-workers.db" {
 			t.Fatalf("unexpected CLI owner file %q", entry.Name())
 		}
 		seen[entry.Name()] = true
 	}
-	if !seen["cli-processes.lock"] || !seen["cli-processes.db"] {
+	if !seen["cli-processes.lock"] || !seen["cli-workers.db"] {
 		t.Fatalf("CLI owner files = %v", seen)
 	}
 	rootEntries, err := os.ReadDir(root)
@@ -114,8 +114,8 @@ func TestWithExecRunnerCleansEveryCallbackExit(t *testing.T) {
 	if err := WithExecRunner(ctx, func(runner Runner) error {
 		_, err := runner.Local(ctx, "sleep", "9999")
 		return err
-	}); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("context exit = %v, want deadline", err)
+	}); !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, worker.ErrBudgetTooSmall) {
+		t.Fatalf("context exit = %v, want deadline or bounded-budget rejection", err)
 	}
 	if err := WithExecRunner(context.Background(), func(Runner) error { return nil }); err != nil {
 		t.Fatalf("owner remained locked after exits: %v", err)
@@ -150,7 +150,7 @@ func TestWithExecRunnerRecoversPriorTrackedProcess(t *testing.T) {
 		}
 	})
 	reaper := &proc.Reaper{
-		Store:      &proc.FileStore{Path: filepath.Join(directory, "cli-processes.db")},
+		Store:      &proc.FileStore{Path: filepath.Join(directory, "cli-workers.db")},
 		Generation: "prior-generation",
 	}
 	if _, err := reaper.TrackGroup(context.Background(), cmd.Process.Pid, proc.RecoveryTask); err != nil {

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"time"
 
+	dkdaemon "github.com/yasyf/daemonkit/daemon"
 	"github.com/yasyf/daemonkit/proc"
 )
 
@@ -102,6 +103,31 @@ func (c Config) KnownHostsPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "known_hosts"), nil
+}
+
+// RefreshKnownHosts snapshots OpenSSH's authenticated user trust store into
+// Synckit's sole private runtime trust file.
+func (c Config) RefreshKnownHosts() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve SSH home: %w", err)
+	}
+	source := filepath.Join(home, ".ssh", "known_hosts")
+	data, err := os.ReadFile(source) //nolint:gosec // source is the current user's fixed OpenSSH trust path
+	if err != nil {
+		return fmt.Errorf("read SSH known_hosts: %w", err)
+	}
+	destination, err := c.KnownHostsPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		return fmt.Errorf("create Synckit state directory: %w", err)
+	}
+	if err := dkdaemon.WriteFileDurable(destination, data, 0o600); err != nil {
+		return fmt.Errorf("write Synckit known_hosts: %w", err)
+	}
+	return ValidateKnownHosts(destination)
 }
 
 // WithLock runs fn while holding an exclusive flock on the reconcile lock file,

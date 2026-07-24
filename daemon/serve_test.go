@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,40 +11,24 @@ import (
 
 	dkdaemon "github.com/yasyf/daemonkit/daemon"
 	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/supervise"
 	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/codec"
 	"github.com/yasyf/synckit/hostregistry"
-	"github.com/yasyf/synckit/internal/runtimeowner"
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 )
 
-func TestRuntimeOwnershipUsesExactSuiteAndStopRole(t *testing.T) {
-	shortConfigHome(t)
-	executable := testDaemonRoleAlias(t)
+func TestRuntimeOwnershipUsesExactSuite(t *testing.T) {
 	server := rpc.NewServer(rpc.NewDispatcher())
-	role, verifier, err := runtimeowner.StopAuthority()
-	if err != nil {
-		t.Fatalf("StopAuthority: %v", err)
-	}
 	if server.Wire.WireBuild != rpc.WireBuild {
 		t.Fatalf("wire build = %q, want %q", server.Wire.WireBuild, rpc.WireBuild)
-	}
-	if role.RoleID != labelPrefix+".stop" || role.RolePath != executable {
-		t.Fatalf("role = %+v", role)
-	}
-	store, ok := verifier.Store.(*proc.FileStore)
-	if !ok || filepath.Base(store.Path) != "service-processes.db" {
-		t.Fatalf("stop store = %#v", verifier.Store)
 	}
 }
 
 func TestServePublishesReleaseBuildAfterActivation(t *testing.T) {
 	shortConfigHome(t)
-	testDaemonRoleAlias(t)
 	sock, err := hostregistry.Mesh.SockPath()
 	if err != nil {
 		t.Fatalf("socket path: %v", err)
@@ -94,21 +77,6 @@ func TestServePublishesReleaseBuildAfterActivation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not settle after cancellation")
 	}
-}
-
-func testDaemonRoleAlias(t *testing.T) string {
-	t.Helper()
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
-	}
-	dir := t.TempDir()
-	alias := filepath.Join(dir, daemonBinary)
-	if err := os.Symlink(executable, alias); err != nil {
-		t.Fatalf("link daemon role: %v", err)
-	}
-	t.Setenv("PATH", dir)
-	return alias
 }
 
 // fakeConsumer is an in-process SyncConsumer that records what it is asked so a
@@ -190,47 +158,21 @@ func (e errString) Error() string { return string(e) }
 
 const errFakeDown = errString("fake consumer down")
 
-type servedTransport struct {
-	syncservice.Transport
-	cancel context.CancelFunc
-	done   <-chan error
-	once   sync.Once
+type directSyncTransport struct{ dispatcher *rpc.Dispatcher }
+
+func (t directSyncTransport) Do(ctx context.Context, request *rpc.Request) (*syncservice.Response, error) {
+	response := t.dispatcher.Dispatch(ctx, request)
+	return &syncservice.Response{OK: response.OK, Result: response.Result, Error: response.Error}, nil
 }
 
-func (t *servedTransport) Close() error {
-	var err error
-	t.once.Do(func() {
-		err = t.Transport.Close()
-		t.cancel()
-		if serveErr := <-t.done; serveErr != nil {
-			err = errors.Join(err, serveErr)
-		}
-	})
-	return err
-}
+func (directSyncTransport) Close() error { return nil }
 
-// serveFake wires fake behind an exact persistent Unix session.
+// serveFake wires fake through the typed dispatcher without owning a listener.
 func serveFake(t *testing.T, fake *fakeConsumer) syncservice.Transport {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "syncfake")
-	if err != nil {
-		t.Fatalf("mkdir temp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "rpc.sock")
-	listener, err := rpc.Listen(context.Background(), sock)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
 	d := rpc.NewDispatcher()
 	syncservice.RegisterConsumer(d, fake)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- rpc.NewServer(d).Serve(ctx, listener) }()
-	transport := &servedTransport{Transport: syncservice.Socket(sock), cancel: cancel, done: done}
-	t.Cleanup(func() { _ = transport.Close() })
-	return transport
+	return directSyncTransport{dispatcher: d}
 }
 
 // fakeMesh routes a manifest+peer to a fakeConsumer's transport, so a test can give
@@ -239,7 +181,7 @@ func serveFake(t *testing.T, fake *fakeConsumer) syncservice.Transport {
 func fakeMesh(t *testing.T, byPeer map[string]*fakeConsumer) {
 	t.Helper()
 	prev := dialTransport
-	dialTransport = func(_ *supervise.Pool, _ manifest.Manifest, peer, _ string) syncservice.Transport {
+	dialTransport = func(_ *proc.Manager, _ manifest.Manifest, peer, _ string) syncservice.Transport {
 		fake, ok := byPeer[peer]
 		if !ok {
 			t.Fatalf("dialTransport: no fake consumer for peer %q", peer)
@@ -257,8 +199,8 @@ func testManifest() manifest.Manifest {
 			Debounce: codec.Duration(10 * time.Millisecond),
 		},
 		Service: manifest.ServiceSpec{
-			Transport: "stdio",
-			ServeArgs: []string{"rpc-serve"},
+			Kind:   "resident",
+			Socket: "/tmp/stub.sock",
 		},
 	}
 }
@@ -410,12 +352,14 @@ func TestEngineEventDrivesLocalSync(t *testing.T) {
 	fakeMesh(t, map[string]*fakeConsumer{"me@self": fake})
 
 	local := syncservice.NewClient(serveFake(t, fake))
+	workers, children := testDaemonOwner(t.Context(), t)
 	eng := buildEngine(
 		context.Background(),
 		local,
 		testManifest(),
 		&hostregistry.Registry{Self: "me@self"},
-		testDaemonPool(t.Context(), t),
+		workers,
+		children,
 	)
 
 	ctx := context.Background()
@@ -438,7 +382,6 @@ func TestEngineEventDrivesLocalSync(t *testing.T) {
 }
 
 func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
-	testDaemonRoleAlias(t)
 	cfgHome, err := os.MkdirTemp("", "skd")
 	if err != nil {
 		t.Fatalf("mkdir config home: %v", err)
@@ -577,7 +520,7 @@ func TestReloadClosesEveryTransport(t *testing.T) {
 		transports []*countingTransport
 	)
 	prev := dialTransport
-	dialTransport = func(*supervise.Pool, manifest.Manifest, string, string) syncservice.Transport {
+	dialTransport = func(*proc.Manager, manifest.Manifest, string, string) syncservice.Transport {
 		transport := &countingTransport{onClose: func() {
 			mu.Lock()
 			closed++
@@ -591,7 +534,8 @@ func TestReloadClosesEveryTransport(t *testing.T) {
 	}
 	t.Cleanup(func() { dialTransport = prev })
 
-	sup := newSupervisor(testDaemonPool(t.Context(), t))
+	workers, children := testDaemonOwner(t.Context(), t)
+	sup := newSupervisor(workers, children)
 	var stopOnce sync.Once
 	stop := func() { stopOnce.Do(sup.stop) }
 	t.Cleanup(stop)

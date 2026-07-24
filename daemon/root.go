@@ -53,8 +53,8 @@ func newRoot(build string) *cobra.Command {
 		newStatusCmd(),
 		newInstallCmd(build),
 		newUninstallCmd(build),
-		newStopControlCmd(),
 		newConsentCmd(),
+		newRPCServeV1Cmd(),
 	)
 	return root
 }

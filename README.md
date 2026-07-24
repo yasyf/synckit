@@ -12,65 +12,36 @@
 go get github.com/yasyf/synckit
 ```
 
-A persistent unix-socket RPC server with exact build admission, same-UID trust,
-multiplexing, and bounded 16 MiB frames already wired:
+A persistent RPC suite with exact build admission, same-UID trust, multiplexing,
+and bounded 16 MiB frames is already wired. Register product methods, then pass
+the server and exact daemonkit process owners to `helperruntime.New`:
 
 ```go
 package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
 
-	"github.com/yasyf/daemonkit/wire"
 	"github.com/yasyf/synckit/rpc"
 )
 
-func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func rpcServer() *rpc.Server {
 	d := rpc.NewDispatcher()
 	d.Register("ping", func(ctx context.Context, p map[string]any) (any, error) {
 		return map[string]any{"pong": p["msg"]}, nil
 	})
-
-	sock := filepath.Join(os.TempDir(), "synckit-rpc-demo.sock")
-	_ = os.Remove(sock)
-	defer os.Remove(sock)
-	ln, _ := rpc.Listen(ctx, sock)
-	go rpc.NewServer(d).Serve(ctx, ln)
-
-	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), WireBuild: rpc.WireBuild})
-	defer client.Close()
-	resp, _ := client.Call(ctx, &rpc.Request{
-		Method: "ping",
-		Params: map[string]any{"msg": "hi"},
-	})
-	var result map[string]string
-	_ = json.Unmarshal(resp.Result, &result)
-	fmt.Printf("resp.Result = %v\n", result)
+	return rpc.NewServer(d)
 }
 ```
-
-```console
-$ go run .
-resp.Result = map[pong:hi]
-```
-
-(Real output; [`docs/scripts/demo.sh`](docs/scripts/demo.sh) regenerates it.)
 
 Driving with an agent? Paste this:
 
 ```text
 Run `go get github.com/yasyf/synckit`, then use its rpc package to stand up a
-unix-socket server: register a ping handler on rpc.NewDispatcher, bind with
-rpc.Listen, serve with rpc.NewServer, and call it through a persistent
-rpc.NewClient using rpc.WireBuild. Keep the exact-build handshake, same-UID trust,
-and bounded framing as shipped.
+unix-socket server: register handlers on `rpc.NewDispatcher`, compose
+`rpc.NewServer(...).Wire` into daemonkit Runtime, and call it through a persistent
+`rpc.NewClient` using `rpc.WireBuild`. Listener ownership, readiness, trust, and
+bounded framing stay in daemonkit.
 ```
 
 ---
@@ -86,13 +57,11 @@ brew install yasyf/tap/synckitd
 synckitd register manifest.json
 ```
 
-`synckitd` installs the manifest under `~/.config/synckit/manifests` and drives your tool's typed sync service — list, reconcile, sync — over the transport the manifest declares: a unix socket, a spawned child's stdio, or ssh to a peer. The daemon never imports your code.
+`synckitd` installs the manifest under `~/.config/synckit/manifests` and drives your tool's typed sync service — list, reconcile, sync — through either a resident Unix socket or a receipt-authenticated local spawned session. Remote calls use Synckit's fixed `rpc-serve-v1` command over strict host-key-pinned SSH. The daemon never imports your code.
 
-Consumer CLIs share one crash-recoverable process owner across an entire
-concurrent pass with `syncservice.WithTransportRunner`; its opaque runner creates
-local `Stdio` and remote `SSHStdio` transports and settles every session when the
-callback ends. Resident socket helpers use `helperruntime.New`, supplying only
-their product workers, state, resources, activation, and pre-settlement drain.
+Process-backed transports are private to `synckitd` and owned by one daemonkit
+process manager. Resident socket helpers use `helperruntime.New`, supplying exact
+worker and child owners plus one product preparation callback.
 
 ### Watch files without chasing your own writes
 
@@ -120,7 +89,7 @@ A pass fetches every peer's registry read-only, folds them in with the CRDT merg
 | Package | What it holds |
 |---|---|
 | `rpc` | Exact persistent daemonkit sessions carrying typed `{method,params}` calls with same-UID trust and bounded frames |
-| `syncservice` | The typed sync contract over `rpc` plus socket transport and callback-scoped local/SSH process transports |
+| `syncservice` | The typed sync contract over `rpc` plus the resident socket transport |
 | `watch` | The generic anti-echo watch engine: debounce, fingerprint dedupe, record-before-notify, concurrent peer fan-out, busy gating |
 | `watchbackend` | Filesystem events mapped to watch ids over recursive fsnotify (inotify/kqueue) |
 | `hostregistry` | The host mesh: reachability detection, Tailscale and Bonjour discovery, an ssh runner, flock-guarded `state.json` |

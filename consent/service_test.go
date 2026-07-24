@@ -15,6 +15,7 @@ import (
 
 	"github.com/yasyf/daemonkit/wire"
 
+	"github.com/yasyf/synckit/internal/rpctest"
 	"github.com/yasyf/synckit/presence"
 	"github.com/yasyf/synckit/rpc"
 	"golang.org/x/sys/unix"
@@ -43,20 +44,14 @@ func TestRequestDerivesRequestorFromPeerSID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "s.sock")
-	ln, err := rpc.Listen(context.Background(), sock)
+	server, err := rpctest.Start(t.Context(), sock, dir, d)
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		t.Fatalf("start server: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = rpc.NewServer(d).Serve(ctx, ln)
-	}()
 	t.Cleanup(func() {
-		cancel()
-		_ = ln.Close()
-		<-done
+		if err := server.Close(); err != nil {
+			t.Errorf("close server: %v", err)
+		}
 	})
 
 	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), WireBuild: rpc.WireBuild})

@@ -7,7 +7,7 @@ func TestReconcileOne(t *testing.T) {
 	fakeMesh(t, map[string]*fakeConsumer{"me@self": fake})
 
 	ctx := t.Context()
-	res := reconcileOne(ctx, testDaemonPool(ctx, t), testManifest(), "me@self")
+	res := reconcileOne(ctx, testDaemonChildren(ctx, t), testManifest(), "me@self")
 	if res.Err != "" {
 		t.Fatalf("reconcileOne err = %q, want none", res.Err)
 	}

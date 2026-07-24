@@ -1,15 +1,16 @@
 package hostregistry
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 
-	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/supervise"
+	"github.com/yasyf/daemonkit/worker"
 
 	"github.com/yasyf/synckit/internal/clirunner"
 )
@@ -27,10 +28,10 @@ type Runner interface {
 
 // execRunner is the production Runner: Local and SSH execute through one
 // daemonkit task owner; SSH also sources brew's shellenv remotely.
-type execRunner struct{ runner supervise.TaskRunner }
+type execRunner struct{ runner *worker.Pool }
 
 // NewExecRunner returns the default Runner that executes commands locally and over ssh.
-func NewExecRunner(runner supervise.TaskRunner) Runner {
+func NewExecRunner(runner *worker.Pool) Runner {
 	return execRunner{runner: runner}
 }
 
@@ -44,7 +45,7 @@ func WithExecRunner(ctx context.Context, callback func(Runner) error) error {
 	if err != nil {
 		return fmt.Errorf("resolve synckit state directory: %w", err)
 	}
-	return clirunner.WithPool(ctx, directory, func(pool *supervise.Pool) error {
+	return clirunner.WithPool(ctx, directory, func(pool *worker.Pool) error {
 		runner := &scopedRunner{runner: execRunner{runner: pool}}
 		runner.active.Store(true)
 		defer runner.active.Store(false)
@@ -76,33 +77,25 @@ func (r execRunner) Local(ctx context.Context, name string, args ...string) (str
 }
 
 func (r execRunner) SSH(ctx context.Context, target, remoteCmd string) (string, error) {
-	return ExecSSH(ctx, r.runner, target, remoteCmd, nil)
+	return ExecBootstrapSSH(ctx, r.runner, target, remoteCmd, nil)
 }
 
-// SSHArgv returns the full ssh argv that runs remoteCmd on target: the dial options
-// (BatchMode, a short ConnectTimeout, keepalives), the target, then remoteCmd wrapped
-// to source brew's shellenv. argv[0] is "ssh"; argv[1:] are its arguments. It is the
-// argv a stdio tunnel spawns; a one-shot command goes through ExecSSH instead.
-func SSHArgv(target, remoteCmd string) []string {
-	return append(append([]string{sshBin}, dialOpts...), target, brewWrap(remoteCmd))
-}
-
-func runCmd(ctx context.Context, runner supervise.TaskRunner, name string, args ...string) (string, error) {
-	var stdout, stderr bytes.Buffer
-	err := runner.Run(ctx, supervise.Task{
-		RecoveryClass: proc.RecoveryTask,
-		Path:          name,
-		Args:          args,
-		Stdout:        &stdout,
-		Stderr:        &stderr,
-	})
-	if err == nil {
-		err = ctx.Err()
-	}
+func runCmd(ctx context.Context, runner *worker.Pool, name string, args ...string) (string, error) {
+	executable, err := exec.LookPath(name)
 	if err != nil {
-		return stdout.String(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("resolve %s: %w", name, err)
 	}
-	return stdout.String(), nil
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute %s: %w", name, err)
+	}
+	result, runErr := runner.Run(ctx, worker.CommandRequest{
+		Path: filepath.Clean(executable), Args: args, Dir: filepath.Dir(executable), TotalTimeout: 12 * time.Minute,
+	})
+	if runErr != nil {
+		return string(result.Stdout), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), runErr, strings.TrimSpace(string(result.Stderr)))
+	}
+	return string(result.Stdout), nil
 }
 
 // ShellQuote single-quotes s so it survives intact as one argument to a remote

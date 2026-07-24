@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
+	"time"
 
 	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/supervise"
+	"github.com/yasyf/daemonkit/worker"
 
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/internal/clirunner"
@@ -16,48 +18,41 @@ import (
 const processWorkerLimit = 64
 
 type processOwner struct {
-	reaper *proc.Reaper
-	pool   *supervise.Pool
+	workers  *worker.Pool
+	children *proc.Manager
 }
 
-func newProcessOwner(path string) (*processOwner, error) {
+func newProcessOwner(directory string) (*processOwner, error) {
 	var generation [16]byte
 	if _, err := rand.Read(generation[:]); err != nil {
 		return nil, fmt.Errorf("generate process owner identity: %w", err)
 	}
-	reaper := &proc.Reaper{
-		Store:      &proc.FileStore{Path: path},
-		Generation: hex.EncodeToString(generation[:]),
-	}
-	pool, err := supervise.NewPool(processWorkerLimit, reaper)
+	generationID := hex.EncodeToString(generation[:])
+	workers, err := worker.NewPool(worker.Config{
+		Capacity: processWorkerLimit, QueueCapacity: processWorkerLimit,
+		MaxTotalRun: 12 * time.Minute, MaxStdinBytes: 16 << 20,
+		MaxStdoutBytes: 16 << 20, MaxStderrBytes: 1 << 20,
+	}, &proc.Reaper{
+		Store: &proc.FileStore{Path: filepath.Join(directory, "process-workers.db")}, Generation: generationID,
+	})
 	if err != nil {
 		return nil, err
 	}
-	return &processOwner{reaper: reaper, pool: pool}, nil
-}
-
-func (o *processOwner) recover(ctx context.Context) error {
-	if err := o.pool.Recover(ctx); err != nil {
-		return err
-	}
-	_, err := o.reaper.RecoverReapReceipts(ctx, proc.RecoveryTask, func(context.Context, proc.ReapReceipt) error {
-		return nil
+	children, err := proc.NewManager(processWorkerLimit, &proc.Reaper{
+		Store: &proc.FileStore{Path: filepath.Join(directory, "process-children.db")}, Generation: generationID,
 	})
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return &processOwner{workers: workers, children: children}, nil
 }
 
-func (o *processOwner) Close() { o.pool.Close() }
-
-func (o *processOwner) Cancel() { o.pool.Cancel() }
-
-func (o *processOwner) Wait(ctx context.Context) error { return o.pool.Wait(ctx) }
-
-func withCLIProcessOwner(ctx context.Context, run func(*supervise.Pool) error) error {
+func withCLIProcessOwner(ctx context.Context, run func(*worker.Pool, *proc.Manager) error) error {
 	dir, err := hostregistryDir()
 	if err != nil {
 		return err
 	}
-	return clirunner.WithPool(ctx, dir, run)
+	return clirunner.WithRuntime(ctx, dir, run)
 }
 
 func withCLIExecRunner(ctx context.Context, run func(hostregistry.Runner) error) error {

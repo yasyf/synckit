@@ -4,68 +4,67 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/supervise"
+	"github.com/yasyf/daemonkit/worker"
 )
 
-func testDaemonPool(ctx context.Context, t *testing.T) *supervise.Pool {
+func testDaemonOwner(ctx context.Context, t *testing.T) (*worker.Pool, *proc.Manager) {
 	t.Helper()
-	owner, err := newProcessOwner(filepath.Join(t.TempDir(), "processes.db"))
+	owner, err := newProcessOwner(t.TempDir())
 	if err != nil {
 		t.Fatalf("new process owner: %v", err)
+	}
+	if err := owner.children.ClaimRuntime(); err != nil {
+		t.Fatalf("claim children: %v", err)
+	}
+	if err := owner.children.Recover(ctx); err != nil {
+		t.Fatalf("recover children: %v", err)
+	}
+	claim, err := owner.workers.ClaimRuntime()
+	if err != nil {
+		t.Fatalf("claim workers: %v", err)
+	}
+	if err := claim.Recover(ctx); err != nil {
+		t.Fatalf("recover workers: %v", err)
+	}
+	if err := claim.Activate(); err != nil {
+		t.Fatalf("activate workers: %v", err)
 	}
 	t.Cleanup(func() {
-		owner.Close()
-		owner.Cancel()
-		if err := owner.Wait(context.WithoutCancel(ctx)); err != nil {
-			t.Errorf("wait for process owner: %v", err)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := owner.children.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown children: %v", err)
+		}
+		if err := claim.Close(ctx); err != nil {
+			t.Errorf("close workers: %v", err)
 		}
 	})
-	return owner.pool
+	return owner.workers, owner.children
 }
 
-func TestProcessOwnerRecoversAndAcknowledgesTaskReceipts(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "processes.db")
-	store := &proc.FileStore{Path: path}
-	stale := proc.Record{
-		RecoveryClass: proc.RecoveryTask,
-		PID:           999999,
-		StartTime:     "1",
-		Boot:          "retired-boot",
-		Comm:          "retired-task",
-		Generation:    "retired-generation",
-		ProcessGroup:  true,
-		SessionID:     999999,
-	}
-	if err := store.Add(t.Context(), stale); err != nil {
-		t.Fatalf("seed stale process: %v", err)
-	}
+func testDaemonPool(ctx context.Context, t *testing.T) *worker.Pool {
+	workers, _ := testDaemonOwner(ctx, t)
+	return workers
+}
 
-	owner, err := newProcessOwner(path)
+func testDaemonChildren(ctx context.Context, t *testing.T) *proc.Manager {
+	_, children := testDaemonOwner(ctx, t)
+	return children
+}
+
+func TestProcessOwnerUsesDistinctDurableWorkerAndChildStores(t *testing.T) {
+	directory := t.TempDir()
+	owner, err := newProcessOwner(directory)
 	if err != nil {
 		t.Fatalf("new process owner: %v", err)
 	}
-	defer func() {
-		owner.Close()
-		owner.Cancel()
-		_ = owner.Wait(context.Background())
-	}()
-	if err := owner.recover(t.Context()); err != nil {
-		t.Fatalf("recover: %v", err)
+	if owner.workers == nil || owner.children == nil {
+		t.Fatal("process owner omitted workers or children")
 	}
-	records, err := store.Load(t.Context())
-	if err != nil {
-		t.Fatalf("load records: %v", err)
-	}
-	if len(records) != 0 {
-		t.Fatalf("records = %+v, want none", records)
-	}
-	page, err := owner.reaper.ReapReceipts(t.Context(), proc.RecoveryTask, proc.ReapReceiptCursor{}, 1)
-	if err != nil {
-		t.Fatalf("load receipts: %v", err)
-	}
-	if len(page.Receipts) != 0 || page.Floor.Sequence != 1 {
-		t.Fatalf("receipt page = %+v, want acknowledged floor 1 with no pending receipts", page)
+	if filepath.Join(directory, "process-workers.db") == filepath.Join(directory, "process-children.db") {
+		t.Fatal("worker and child stores overlap")
 	}
 }

@@ -10,11 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 	dkservice "github.com/yasyf/daemonkit/service"
-	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/internal/runtimeowner"
-	"github.com/yasyf/synckit/rpc"
 )
 
 const (
@@ -24,15 +22,7 @@ const (
 
 type serviceController interface {
 	Converge(context.Context, []dkservice.Agent) error
-	Status(context.Context, string) (dkservice.Status, error)
-	StopRuntime(context.Context, dkservice.StopControlSpec) (wire.StopResult, error)
 	Close(context.Context) error
-}
-
-var observeRuntimeHealth = func(ctx context.Context, sock string) (rpc.RuntimeHealth, error) {
-	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), WireBuild: rpc.WireBuild})
-	defer func() { _ = client.Close() }()
-	return client.RuntimeHealth(ctx)
 }
 
 var openServiceController = func(ctx context.Context) (serviceController, error) {
@@ -92,19 +82,7 @@ func newUninstallCmd(build string) *cobra.Command {
 	}
 }
 
-func newStopControlCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:    "stop-control <socket>",
-		Hidden: true,
-		Args:   cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			_, err := dkservice.RunStopControlChild(cmd.Context(), runtimeowner.StopControlClientConfig(args[0]))
-			return err
-		},
-	}
-}
-
-func install(ctx context.Context, build string) error {
+func install(ctx context.Context, _ string) error {
 	if err := hostregistry.Mesh.InitializeState(ctx); err != nil {
 		return fmt.Errorf("initialize host mesh state: %w", err)
 	}
@@ -117,53 +95,14 @@ func install(ctx context.Context, build string) error {
 		if err != nil {
 			return err
 		}
-		if err := stopLoadedRuntime(ctx, controller, build, wire.StopIntentUpgrade); err != nil {
-			return err
-		}
 		return controller.Converge(ctx, agents)
 	})
 }
 
-func uninstall(ctx context.Context, build string) error {
+func uninstall(ctx context.Context, _ string) error {
 	return withServiceController(ctx, func(controller serviceController) error {
-		if err := stopLoadedRuntime(ctx, controller, build, wire.StopIntentUninstall); err != nil {
-			return err
-		}
 		return controller.Converge(ctx, nil)
 	})
-}
-
-func stopLoadedRuntime(ctx context.Context, controller serviceController, build string, intent wire.StopIntent) error {
-	status, err := controller.Status(ctx, labelPrefix+".serve")
-	if err != nil {
-		return fmt.Errorf("inspect synckitd runtime service: %w", err)
-	}
-	if !status.Loaded {
-		return nil
-	}
-	sock, err := hostregistry.Mesh.SockPath()
-	if err != nil {
-		return err
-	}
-	health, err := observeRuntimeHealth(ctx, sock)
-	if err != nil {
-		return fmt.Errorf("observe loaded synckitd runtime: %w", err)
-	}
-	if health.RuntimeBuild == "" || health.RuntimeProtocol != int(rpc.Version) || health.ProcessGeneration == "" || health.PID <= 1 {
-		return errors.New("loaded synckitd runtime returned an incomplete identity")
-	}
-	if intent == wire.StopIntentUpgrade && health.RuntimeBuild == build {
-		intent = wire.StopIntentRestart
-	}
-	spec, err := runtimeowner.StopControlSpec(sock, build, health.ProcessGeneration, intent)
-	if err != nil {
-		return err
-	}
-	_, err = controller.StopRuntime(ctx, spec)
-	if err != nil {
-		return fmt.Errorf("stop loaded synckitd runtime: %w", err)
-	}
-	return nil
 }
 
 func withServiceController(ctx context.Context, run func(serviceController) error) (err error) {

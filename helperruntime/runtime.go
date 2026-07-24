@@ -1,17 +1,16 @@
-// Package helperruntime composes Synckit's fixed wire and stop-control
-// ownership around one consumer helper's product resources.
+// Package helperruntime composes one resident consumer helper with daemonkit.
 package helperruntime
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"sync"
+	"time"
 
 	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/drain"
+	"github.com/yasyf/daemonkit/proc"
 	"github.com/yasyf/daemonkit/wire"
+	"github.com/yasyf/daemonkit/worker"
 
 	"github.com/yasyf/synckit/internal/runtimehealth"
 	"github.com/yasyf/synckit/internal/runtimeowner"
@@ -19,91 +18,115 @@ import (
 	"github.com/yasyf/synckit/rpc"
 )
 
-// App identifies the consumer helper generation installed by Synckit.
+const shutdownTimeout = 30 * time.Second
+
+// App identifies one consumer helper generation.
 type App struct {
 	Name         string
 	RuntimeBuild string
 }
 
-// Config supplies only product-owned resources for one embedded helper.
+// Product is the product-owned runtime state published at readiness.
+type Product interface {
+	Drain(context.Context) error
+	Close(context.Context) error
+}
+
+// Config supplies the exact daemonkit process owners and product preparation.
 type Config struct {
 	App       App
 	Socket    string
 	Server    *rpc.Server
-	Workers   dkdaemon.Workers
-	State     io.Closer
-	Resources dkdaemon.Resources
-	Activate  func(dkdaemon.Activation) error
-	Drain     func() error
+	Workers   *worker.Pool
+	Children  *proc.Manager
+	StopStore *proc.FileStore
+	Prepare   func(dkdaemon.Activation) (Product, error)
 }
 
-var newRuntime = wire.NewRuntime
+// Runtime owns daemonkit readiness and the product publication lifetime.
+type Runtime struct {
+	daemon  *dkdaemon.Runtime
+	slot    *dkdaemon.PublicationSlot[Product]
+	prepare func(dkdaemon.Activation) (Product, error)
+}
 
-// New constructs a helper runtime with Synckit's fixed protocol, health,
-// admission, stop authority, and durable service process store.
-func New(config Config) (*dkdaemon.Runtime, error) {
+// New constructs one exact helper runtime. It performs no I/O or preparation.
+func New(config Config) (*Runtime, error) {
 	if _, err := serviceidentity.HelperLabel(config.App.Name); err != nil {
 		return nil, fmt.Errorf("helperruntime: app name: %w", err)
 	}
 	if config.App.RuntimeBuild == "" {
 		return nil, errors.New("helperruntime: runtime build is required")
 	}
-	if config.Socket == "" {
-		return nil, errors.New("helperruntime: socket is required")
+	if config.Socket == "" || config.Server == nil || config.Workers == nil || config.Children == nil || config.StopStore == nil || config.Prepare == nil {
+		return nil, errors.New("helperruntime: socket, server, workers, children, stop store, and prepare are required")
 	}
-	if config.Server == nil {
-		return nil, errors.New("helperruntime: RPC server is required")
-	}
-	if config.Workers == nil {
-		return nil, errors.New("helperruntime: workers are required")
-	}
-	if config.State == nil {
-		return nil, errors.New("helperruntime: state is required")
-	}
-	if config.Resources == nil {
-		return nil, errors.New("helperruntime: resources are required")
-	}
-	if config.Activate == nil {
-		return nil, errors.New("helperruntime: activate is required")
-	}
-	if config.Drain == nil {
-		return nil, errors.New("helperruntime: drain is required")
-	}
-	classifier, verifier, err := runtimeowner.StopAuthority()
+	policy, err := runtimeowner.TrustPolicy()
 	if err != nil {
 		return nil, err
 	}
-	var runtime *dkdaemon.Runtime
-	runtime, err = newRuntime(wire.RuntimeConfig{
+	var daemonRuntime *dkdaemon.Runtime
+	daemonRuntime, err = wire.NewRuntime(wire.RuntimeConfig{
 		Socket: config.Socket, RuntimeBuild: config.App.RuntimeBuild, RuntimeProtocol: int(rpc.Version),
-		Wire: config.Server.Wire, Classifier: classifier, ReservedProtectedSessions: 1,
-		StopVerifier: verifier,
+		Wire: config.Server.Wire, TrustPolicy: policy, StopControlStore: config.StopStore,
 		Observations: []wire.ObservationRoute{runtimehealth.Observation(func(ctx context.Context) (dkdaemon.Health, error) {
-			return runtime.Health(ctx)
+			return daemonRuntime.Health(ctx)
 		})},
-		Admission: &settlingAdmission{intake: &drain.Intake{}, drain: config.Drain},
-		Workers:   config.Workers, State: config.State,
-		Resources: config.Resources, Activate: config.Activate,
+		Workers: config.Workers, Children: config.Children, ShutdownTimeout: shutdownTimeout,
 	})
-	return runtime, err
+	if err != nil {
+		return nil, err
+	}
+	return &Runtime{
+		daemon: daemonRuntime, slot: dkdaemon.NewPublicationSlot[Product](daemonRuntime), prepare: config.Prepare,
+	}, nil
 }
 
-type settlingAdmission struct {
-	intake *drain.Intake
-	drain  func() error
-	once   sync.Once
-	err    error
+// Run prepares, publishes, serves, drains, and settles one helper generation.
+func (r *Runtime) Run(ctx context.Context) error {
+	if r == nil || r.daemon == nil {
+		return errors.New("helperruntime: runtime is required")
+	}
+	activation, err := r.daemon.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	product, err := r.prepare(activation)
+	if err != nil {
+		_ = activation.Fail(err)
+		return errors.Join(err, r.closeDaemon(ctx))
+	}
+	publication, err := r.slot.Stage(activation, product)
+	if err == nil {
+		err = activation.CommitReady(publication)
+	}
+	if err != nil {
+		_ = activation.Fail(err)
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer cancel()
+		return errors.Join(err, product.Close(closeCtx), r.daemon.Close(closeCtx))
+	}
+
+	done := make(chan error, 1)
+	go func(waitCtx, closeBase context.Context) {
+		select {
+		case <-waitCtx.Done():
+		case <-activation.Context().Done():
+		}
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(closeBase), shutdownTimeout)
+		defer cancel()
+		done <- errors.Join(product.Drain(closeCtx), r.daemon.Close(closeCtx), product.Close(closeCtx))
+	}(ctx, ctx)
+	waitErr := r.daemon.Wait(context.WithoutCancel(ctx))
+	closeErr := <-done
+	if ctx.Err() != nil && (waitErr == nil || errors.Is(waitErr, ctx.Err())) {
+		waitErr = nil
+	}
+	return errors.Join(waitErr, closeErr)
 }
 
-func (a *settlingAdmission) Admit() (func(), error) { return a.intake.Admit() }
-
-func (a *settlingAdmission) AdmitProtected() (func(), error) { return a.intake.AdmitProtected() }
-
-func (a *settlingAdmission) Close() { a.intake.Close() }
-
-func (a *settlingAdmission) Draining() bool { return a.intake.Draining() }
-
-func (a *settlingAdmission) Settle(ctx context.Context) error {
-	a.once.Do(func() { a.err = a.drain() })
-	return errors.Join(a.err, a.intake.Settle(ctx))
+func (r *Runtime) closeDaemon(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), shutdownTimeout)
+	defer cancel()
+	return r.daemon.Close(ctx)
 }

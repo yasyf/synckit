@@ -20,9 +20,8 @@ func cookiesyncManifest() Manifest {
 			Debounce: codec.Duration(2 * time.Second),
 		},
 		Service: ServiceSpec{
-			Transport: "socket",
-			ServeArgs: []string{"rpc-serve"},
-			Sock:      "~/.config/cookiesync/rpc.sock",
+			Kind:   "resident",
+			Socket: "~/.config/cookiesync/rpc.sock",
 		},
 		Helper: &HelperSpec{
 			Command:     "cookiesync-helper",
@@ -34,14 +33,11 @@ func cookiesyncManifest() Manifest {
 func reposyncManifest() Manifest {
 	return Manifest{
 		Name:   "reposync",
-		Binary: "reposync",
+		Binary: "/opt/homebrew/bin/reposync",
 		Watch: WatchSpec{
 			Debounce: codec.Duration(500 * time.Millisecond),
 		},
-		Service: ServiceSpec{
-			Transport: "stdio",
-			ServeArgs: []string{"rpc-serve"},
-		},
+		Service: ServiceSpec{Kind: "spawned"},
 	}
 }
 
@@ -80,18 +76,20 @@ func TestValidate(t *testing.T) {
 		wantErr bool
 	}{
 		{"valid", func(*Manifest) {}, false},
-		{"stdio without sock", func(m *Manifest) {
-			m.Service.Transport = "stdio"
-			m.Service.Sock = ""
+		{"spawned without socket", func(m *Manifest) {
+			m.Binary = "/opt/homebrew/bin/cookiesync"
+			m.Service.Kind = "spawned"
+			m.Service.Socket = ""
 		}, false},
 		{"missing name", func(m *Manifest) { m.Name = "" }, true},
 		{"unsafe name", func(m *Manifest) { m.Name = "../cookiesync" }, true},
 		{"uppercase name", func(m *Manifest) { m.Name = "CookieSync" }, true},
 		{"missing binary", func(m *Manifest) { m.Binary = "" }, true},
-		{"missing transport", func(m *Manifest) { m.Service.Transport = "" }, true},
-		{"invalid transport", func(m *Manifest) { m.Service.Transport = "http" }, true},
-		{"empty serve_args", func(m *Manifest) { m.Service.ServeArgs = nil }, true},
-		{"missing sock with socket transport", func(m *Manifest) { m.Service.Sock = "" }, true},
+		{"missing kind", func(m *Manifest) { m.Service.Kind = "" }, true},
+		{"invalid kind", func(m *Manifest) { m.Service.Kind = "http" }, true},
+		{"missing socket with resident kind", func(m *Manifest) { m.Service.Socket = "" }, true},
+		{"relative spawned binary", func(m *Manifest) { m.Service.Kind = "spawned"; m.Service.Socket = "" }, true},
+		{"spawned socket", func(m *Manifest) { m.Binary = "/bin/cookiesync"; m.Service.Kind = "spawned" }, true},
 		{"missing helper command", func(m *Manifest) { m.Helper.Command = "" }, true},
 		{"invalid helper session", func(m *Manifest) { m.Helper.SessionType = SessionType("Console") }, true},
 	}

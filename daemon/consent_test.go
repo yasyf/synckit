@@ -15,10 +15,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/yasyf/daemonkit/supervise"
+	"github.com/yasyf/daemonkit/worker"
 
 	"github.com/yasyf/synckit/consent"
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/internal/rpctest"
 	"github.com/yasyf/synckit/presence"
 	"github.com/yasyf/synckit/rpc"
 )
@@ -186,22 +187,16 @@ func serveConsentEngine(t *testing.T, engine *consent.Engine) {
 	if err != nil {
 		t.Fatalf("sockpath: %v", err)
 	}
-	ln, err := rpc.Listen(context.Background(), sock)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
 	d := rpc.NewDispatcher()
 	consent.Register(d, engine)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = rpc.NewServer(d).Serve(ctx, ln)
-	}()
+	server, err := rpctest.Start(t.Context(), sock, filepath.Dir(sock), d)
+	if err != nil {
+		t.Fatalf("start server: %v", err)
+	}
 	t.Cleanup(func() {
-		cancel()
-		_ = ln.Close()
-		<-done
+		if err := server.Close(); err != nil {
+			t.Errorf("close server: %v", err)
+		}
 	})
 }
 
@@ -407,7 +402,7 @@ func TestConsentPresenceCLIPrintsWireSnapshot(t *testing.T) {
 func TestConsentDispatchesUnderParkedExclusive(t *testing.T) {
 	orig := buildConsentEngine
 	t.Cleanup(func() { buildConsentEngine = orig })
-	buildConsentEngine = func(supervise.TaskRunner) *consent.Engine {
+	buildConsentEngine = func(*worker.Pool) *consent.Engine {
 		return consent.NewEngine(staticSelf("me@self"), &fakeGate{}, staticProbe(presence.SessionSnapshot{}),
 			consent.NewRouter(&recordingRunner{}, consent.PresenceCommand), staticResolve())
 	}

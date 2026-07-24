@@ -8,24 +8,11 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 )
 
-func TestTransportRunnerSurfaceIsExact(t *testing.T) {
-	runner := reflect.TypeFor[TransportRunner]()
-	if runner.NumMethod() != 2 {
-		t.Fatalf("TransportRunner methods = %d, want 2", runner.NumMethod())
-	}
-	for i, name := range []string{"SSHStdio", "Stdio"} {
-		if got := runner.Method(i).Name; got != name {
-			t.Fatalf("TransportRunner method %d = %q, want %q", i, got, name)
-		}
-	}
-}
-
-func TestNoExportedRawPoolTransportConstructors(t *testing.T) {
+func TestNoExportedProcessTransportSurface(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
@@ -44,11 +31,11 @@ func TestNoExportedRawPoolTransportConstructors(t *testing.T) {
 			if !ok || function.Recv != nil || !function.Name.IsExported() {
 				continue
 			}
-			if function.Name.Name == "Stdio" || function.Name.Name == "SSHStdio" {
+			if function.Name.Name == "Stdio" || function.Name.Name == "SSHStdio" || function.Name.Name == "WithTransportRunner" {
 				t.Fatalf("removed raw constructor %s returned in %s", function.Name.Name, entry.Name())
 			}
-			if function.Type.Params != nil && strings.Contains(exprString(files, function.Type.Params), "supervise.Pool") {
-				t.Fatalf("exported function %s exposes *supervise.Pool", function.Name.Name)
+			if function.Type.Params != nil && (strings.Contains(exprString(files, function.Type.Params), "worker.Pool") || strings.Contains(exprString(files, function.Type.Params), "proc.Manager")) {
+				t.Fatalf("exported function %s exposes daemon process ownership", function.Name.Name)
 			}
 		}
 	}
