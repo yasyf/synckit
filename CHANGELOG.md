@@ -6,8 +6,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.30.0] - 2026-07-23
-
 ### Added
 - Exact schema-v1 `rpc-serve-v1` remote sessions with a 32-byte random nonce
   echo before daemonkit framing.
@@ -15,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordered dial addresses, and an absolute remote `synckitd` path.
 - `helperruntime.New` composes resident helpers from exact daemonkit worker and
   child owners plus one product preparation/publication callback.
+- Durable full/delta revision delivery with base fencing, idempotent receipts,
+  and no-change suppression.
 
 ### Changed
 - Pin daemonkit v0.13.0 and adopt its exact typed owner generations and
@@ -34,6 +34,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Arbitrary `TransportRunner`, `Stdio`, `SSHStdio`, and command-transport APIs.
 - Product stop-control roles for unsigned `synckitd`; no TeamID or signing
   identity is invented for local or remote service authentication.
+- The EOF-delimited `rpc-once/GetState` protocol and schema.
+
+## [0.30.0] - 2026-07-23
+
+### Added
+- `helperruntime.New` composes an embedded consumer helper from product-owned
+  workers, state, resources, activation, and drain hooks while Synckit privately
+  owns exact wire identity, runtime health, admission, stop authority, and the
+  shared service-process store.
+- `hostregistry.WithExecRunner` and `syncservice.WithTransportRunner` provide
+  callback-scoped, crash-recoverable process ownership for concurrent CLI
+  commands and local/SSH sync transports. Escaped runners and transports fail
+  deterministically after the scope settles.
+
+### Changed
+- Pin daemonkit v0.10.0 as the exact runtime dependency for the fleet hard cut.
+- The Synckit-owned RPC suite now derives one exact
+  `com.yasyf.synckit.rpc/<schema-sha256>/v1` wire build from its canonical schema.
+  Daemonkit rejects every other schema before dispatch.
+- `rpc.Server.ServeSession` now serves one spawned-parent stdio session through
+  daemonkit's exact framed engine without a synthetic listener or local adapter.
+- `synckitd serve` now uses daemonkit's sole composed wire runtime, product runtime-health
+  observation, receipt-authenticated stop control, exact release identity, readiness, and drain.
+- LaunchAgent installation now stops and settles the exact incumbent generation before
+  converging the durable desired set through daemonkit's service controller.
+
+### Removed
 - Public `syncservice.Stdio` and `syncservice.SSHStdio` constructors that exposed
   a caller-owned `*supervise.Pool`; process-backed transports now require the
   opaque scoped runner.
