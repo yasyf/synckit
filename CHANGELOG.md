@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `synckitd` launchd agents register at daemonkit's version-stable program
-  path (`~/.daemonkit/bin/synckitd`); daemonkit v0.20.0 heals stored
+  path (`~/.daemonkit/bin/synckitd`); daemonkit v0.20.1 heals stored
   registrations stranded by Homebrew upgrades.
 
 ## [0.35.2] - 2026-07-24
