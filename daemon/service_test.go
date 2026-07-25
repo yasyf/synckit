@@ -39,6 +39,7 @@ func useServiceController(t *testing.T, controller serviceController) {
 }
 
 func TestServiceAgentsUseFixedProgramsAndTypedPolicy(t *testing.T) {
+	const build = "v1.2.3"
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	binDir := t.TempDir()
@@ -58,19 +59,20 @@ func TestServiceAgentsUseFixedProgramsAndTypedPolicy(t *testing.T) {
 			SchemaFingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		},
 		Helper: &manifest.HelperSpec{Command: "helper-serve", SessionType: manifest.SessionTypeAqua},
-	}})
+	}}, build)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(agents) != 3 {
 		t.Fatalf("agents = %#v", agents)
 	}
+	daemonPath := filepath.Join(home, ".daemonkit", "bin", daemonBinary)
 	reconcile := findAgent(t, agents, labelPrefix+".reconcile")
-	if reconcile.RestartPolicy != dkservice.NoRestart || reconcile.StartInterval != reconcileInterval || reconcile.ProcessType != dkservice.ProcessTypeBackground {
+	if reconcile.Program != daemonPath || reconcile.RestartPolicy != dkservice.NoRestart || reconcile.StartInterval != reconcileInterval || reconcile.ProcessType != dkservice.ProcessTypeBackground {
 		t.Fatalf("reconcile policy = %#v", reconcile)
 	}
 	serve := findAgent(t, agents, labelPrefix+".serve")
-	if serve.RestartPolicy != dkservice.RestartAlways {
+	if serve.Program != daemonPath || serve.RestartPolicy != dkservice.RestartAlways {
 		t.Fatalf("serve policy = %#v", serve)
 	}
 	helper := findAgent(t, agents, labelPrefix+".helper.cookiesync")

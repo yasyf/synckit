@@ -82,7 +82,7 @@ func newUninstallCmd(build string) *cobra.Command {
 	}
 }
 
-func install(ctx context.Context, _ string) error {
+func install(ctx context.Context, build string) error {
 	if err := hostregistry.Mesh.InitializeState(ctx); err != nil {
 		return fmt.Errorf("initialize host mesh state: %w", err)
 	}
@@ -91,7 +91,7 @@ func install(ctx context.Context, _ string) error {
 		if err != nil {
 			return err
 		}
-		agents, err := serviceAgents(manifests)
+		agents, err := serviceAgents(manifests, build)
 		if err != nil {
 			return err
 		}

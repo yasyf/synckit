@@ -22,10 +22,10 @@ const (
 )
 
 // serviceAgents builds the exact launchd policy owned by synckitd.
-func serviceAgents(manifests []manifest.Manifest) ([]dkservice.Agent, error) {
-	executable, err := dkservice.CanonicalExecutable()
+func serviceAgents(manifests []manifest.Manifest, build string) ([]dkservice.Agent, error) {
+	executable, err := dkservice.StableProgram(daemonBinary, build)
 	if err != nil {
-		return nil, fmt.Errorf("resolve canonical synckitd executable: %w", err)
+		return nil, fmt.Errorf("resolve stable synckitd program: %w", err)
 	}
 	logPath := func(label string) (string, error) {
 		home, err := os.UserHomeDir()
@@ -34,7 +34,7 @@ func serviceAgents(manifests []manifest.Manifest) ([]dkservice.Agent, error) {
 		}
 		return filepath.Join(home, "Library", "Logs", "synckit", label+".log"), nil
 	}
-	build := func(label string, args []string, program string) (dkservice.Agent, error) {
+	newAgent := func(label string, args []string, program string) (dkservice.Agent, error) {
 		log, err := logPath(label)
 		if err != nil {
 			return dkservice.Agent{}, err
@@ -48,7 +48,7 @@ func serviceAgents(manifests []manifest.Manifest) ([]dkservice.Agent, error) {
 		}, nil
 	}
 
-	reconcile, err := build(labelPrefix+".reconcile", []string{"reconcile"}, executable)
+	reconcile, err := newAgent(labelPrefix+".reconcile", []string{"reconcile"}, executable)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +56,7 @@ func serviceAgents(manifests []manifest.Manifest) ([]dkservice.Agent, error) {
 	reconcile.StartInterval = reconcileInterval
 	reconcile.ProcessType = dkservice.ProcessTypeBackground
 
-	serve, err := build(labelPrefix+".serve", []string{"serve"}, executable)
+	serve, err := newAgent(labelPrefix+".serve", []string{"serve"}, executable)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +79,7 @@ func serviceAgents(manifests []manifest.Manifest) ([]dkservice.Agent, error) {
 		if err != nil {
 			return nil, fmt.Errorf("manifest %q helper identity: %w", m.Name, err)
 		}
-		helper, err := build(helperLabel, []string{m.Helper.Command}, program)
+		helper, err := newAgent(helperLabel, []string{m.Helper.Command}, program)
 		if err != nil {
 			return nil, err
 		}
