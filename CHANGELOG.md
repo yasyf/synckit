@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.36.0] - 2026-07-24
+## [0.36.1] - 2026-07-24
 
 ### Changed
 
@@ -304,8 +304,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.36.0...HEAD
-[0.36.0]: https://github.com/yasyf/synckit/compare/v0.35.2...v0.36.0
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.36.1...HEAD
+[0.36.1]: https://github.com/yasyf/synckit/compare/v0.35.2...v0.36.1
 [0.35.2]: https://github.com/yasyf/synckit/releases/tag/v0.35.2
 [0.35.1]: https://github.com/yasyf/synckit/releases/tag/v0.35.1
 [0.35.0]: https://github.com/yasyf/synckit/releases/tag/v0.35.0
