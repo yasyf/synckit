@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.2] - 2026-07-25
+
+### Fixed
+
+- Pin daemonkit v0.20.6 so a `synckitd` launchd agent whose service was booted
+  out reads as drift instead of a hard failure (`launchctl print` exit 113 on
+  current macOS), unwedging the cold Homebrew-upgrade path on hosts running a
+  stale build.
+- Durable untrack now runs off the child settlement path, so a slow record
+  store can no longer terminalize a `synckitd` worker claim, and worker
+  children inherit the daemon's `PATH`.
+
 ## [0.36.1] - 2026-07-24
 
 ### Changed
@@ -304,7 +316,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.36.1...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.36.2...HEAD
+[0.36.2]: https://github.com/yasyf/synckit/compare/v0.36.1...v0.36.2
 [0.36.1]: https://github.com/yasyf/synckit/compare/v0.35.2...v0.36.1
 [0.35.2]: https://github.com/yasyf/synckit/releases/tag/v0.35.2
 [0.35.1]: https://github.com/yasyf/synckit/releases/tag/v0.35.1
