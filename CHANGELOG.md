@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.2] - 2026-07-24
+
+### Fixed
+- Pin daemonkit v0.19.1 so a terminalized runtime worker claim tears down the
+  resident daemon and listener instead of leaving a process that cannot admit
+  work.
+- Releases now require an annotated tag signed by the fleet release key before
+  any artifact is built or published.
+
 ## [0.35.0] - 2026-07-24
 
 ### Changed
@@ -287,8 +296,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.19.1...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.35.2...HEAD
+[0.35.2]: https://github.com/yasyf/synckit/releases/tag/v0.35.2
+[0.35.1]: https://github.com/yasyf/synckit/releases/tag/v0.35.1
+[0.35.0]: https://github.com/yasyf/synckit/releases/tag/v0.35.0
+[0.34.0]: https://github.com/yasyf/synckit/releases/tag/v0.34.0
+[0.33.0]: https://github.com/yasyf/synckit/releases/tag/v0.33.0
+[0.30.0]: https://github.com/yasyf/synckit/releases/tag/v0.30.0
+[0.23.0]: https://github.com/yasyf/synckit/releases/tag/v0.23.0
+[0.22.0]: https://github.com/yasyf/synckit/releases/tag/v0.22.0
+[0.21.0]: https://github.com/yasyf/synckit/releases/tag/v0.21.0
+[0.20.0]: https://github.com/yasyf/synckit/releases/tag/v0.20.0
 [0.19.1]: https://github.com/yasyf/synckit/releases/tag/v0.19.1
+[0.17.0]: https://github.com/yasyf/synckit/releases/tag/v0.17.0
+[0.16.0]: https://github.com/yasyf/synckit/releases/tag/v0.16.0
 [0.4.2]: https://github.com/yasyf/synckit/releases/tag/v0.4.2
 [0.4.1]: https://github.com/yasyf/synckit/releases/tag/v0.4.1
 [0.4.0]: https://github.com/yasyf/synckit/releases/tag/v0.4.0

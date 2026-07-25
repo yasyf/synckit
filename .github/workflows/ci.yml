@@ -26,6 +26,8 @@ jobs:
           go-version-file: go.mod
           cache: true
           check-latest: true
+      - name: Verify release workflow
+        run: bash .github/scripts/verify-release-workflow.sh
       - name: Vet
         run: go vet ./...
       - name: Test (race)
