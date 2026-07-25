@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-07-24
+
+### Changed
+
+- `synckitd` launchd agents register at daemonkit's version-stable program
+  path (`~/.daemonkit/bin/synckitd`); daemonkit v0.20.0 heals stored
+  registrations stranded by Homebrew upgrades.
+
 ## [0.35.2] - 2026-07-24
 
 ### Fixed
@@ -296,7 +304,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.35.2...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.36.0...HEAD
+[0.36.0]: https://github.com/yasyf/synckit/compare/v0.35.2...v0.36.0
 [0.35.2]: https://github.com/yasyf/synckit/releases/tag/v0.35.2
 [0.35.1]: https://github.com/yasyf/synckit/releases/tag/v0.35.1
 [0.35.0]: https://github.com/yasyf/synckit/releases/tag/v0.35.0
