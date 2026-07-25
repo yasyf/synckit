@@ -66,7 +66,11 @@ func TestServiceAgentsUseFixedProgramsAndTypedPolicy(t *testing.T) {
 	if len(agents) != 3 {
 		t.Fatalf("agents = %#v", agents)
 	}
-	daemonPath := filepath.Join(home, ".daemonkit", "bin", daemonBinary)
+	daemonDir, err := filepath.EvalSymlinks(filepath.Join(home, ".daemonkit", "bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemonPath := filepath.Join(daemonDir, daemonBinary)
 	reconcile := findAgent(t, agents, labelPrefix+".reconcile")
 	if reconcile.Program != daemonPath || reconcile.RestartPolicy != dkservice.NoRestart || reconcile.StartInterval != reconcileInterval || reconcile.ProcessType != dkservice.ProcessTypeBackground {
 		t.Fatalf("reconcile policy = %#v", reconcile)
