@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	dkservice "github.com/yasyf/daemonkit/service"
@@ -31,6 +33,13 @@ func (f *fakeServiceController) Close(ctx context.Context) error {
 	return f.closeErr
 }
 
+func useHelperStaging(t *testing.T, stage func(string, string) (string, error)) {
+	t.Helper()
+	previous := stageHelperProgram
+	stageHelperProgram = stage
+	t.Cleanup(func() { stageHelperProgram = previous })
+}
+
 func useServiceController(t *testing.T, controller serviceController) {
 	t.Helper()
 	previous := openServiceController
@@ -45,10 +54,6 @@ func TestServiceAgentsUseFixedProgramsAndTypedPolicy(t *testing.T) {
 	binDir := t.TempDir()
 	helperPath := filepath.Join(binDir, "cookiesync")
 	if err := os.WriteFile(helperPath, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
-		t.Fatal(err)
-	}
-	helperPath, err := filepath.EvalSymlinks(helperPath)
-	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir)
@@ -76,12 +81,187 @@ func TestServiceAgentsUseFixedProgramsAndTypedPolicy(t *testing.T) {
 		t.Fatalf("reconcile policy = %#v", reconcile)
 	}
 	serve := findAgent(t, agents, labelPrefix+".serve")
-	if serve.Program != daemonPath || serve.RestartPolicy != dkservice.RestartAlways {
+	if serve.Program != daemonPath || serve.RestartPolicy != dkservice.RestartAlways || serve.ProcessType != 0 {
 		t.Fatalf("serve policy = %#v", serve)
 	}
+	stagedHelper := filepath.Join(daemonDir, labelPrefix+".helper.cookiesync")
 	helper := findAgent(t, agents, labelPrefix+".helper.cookiesync")
-	if helper.Program != helperPath || helper.RestartPolicy != dkservice.RestartAlways || helper.LimitLoadToSessionType != dkservice.SessionTypeAqua {
+	if helper.Program != stagedHelper || helper.RestartPolicy != dkservice.RestartAlways || helper.ProcessType != 0 {
 		t.Fatalf("helper policy = %#v", helper)
+	}
+	if _, err := os.Stat(helperPath); err != nil {
+		t.Fatalf("helper source removed: %v", err)
+	}
+}
+
+func TestServiceAgentsNeverSessionLimitOrThrottleHelpers(t *testing.T) {
+	sessions := []manifest.SessionType{
+		"",
+		manifest.SessionTypeAqua,
+		manifest.SessionTypeBackground,
+		manifest.SessionTypeLoginWindow,
+		manifest.SessionTypeStandardIO,
+		manifest.SessionTypeSystem,
+	}
+	for _, session := range sessions {
+		t.Run(string(session), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			binDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(binDir, "reposync"), []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir)
+			agents, err := serviceAgents([]manifest.Manifest{{
+				Name: "reposync", Binary: "reposync", Watch: manifest.WatchSpec{Debounce: codec.Duration(0)},
+				Service: manifest.ServiceSpec{
+					Kind: "resident", Socket: "~/.config/reposync/rpc.sock",
+					SchemaFingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				},
+				Helper: &manifest.HelperSpec{Command: "helper-serve", SessionType: session},
+			}}, "v1.2.3")
+			if err != nil {
+				t.Fatal(err)
+			}
+			helper := findAgent(t, agents, labelPrefix+".helper.reposync")
+			if helper.LimitLoadToSessionType != 0 || helper.ProcessType != 0 {
+				t.Fatalf("helper policy = %#v", helper)
+			}
+			plist, err := helper.Plist()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"LimitLoadToSessionType", "ProcessType"} {
+				if strings.Contains(string(plist), key) {
+					t.Fatalf("helper plist carries %s\n%s", key, plist)
+				}
+			}
+		})
+	}
+}
+
+func TestServiceAgentsStageOnlyUnbundledHelperPrograms(t *testing.T) {
+	tests := []struct {
+		name   string
+		source func(t *testing.T, binDir string) string
+		staged bool
+	}{
+		{
+			name: "plain executable",
+			source: func(t *testing.T, binDir string) string {
+				target := filepath.Join(t.TempDir(), "reposync")
+				if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Join(binDir, "reposync")); err != nil {
+					t.Fatal(err)
+				}
+				return target
+			},
+			staged: true,
+		},
+		{
+			name: "bundled executable",
+			source: func(t *testing.T, binDir string) string {
+				macos := filepath.Join(t.TempDir(), "Reposync.app", "Contents", "MacOS")
+				if err := os.MkdirAll(macos, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(macos, "reposync")
+				if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Join(binDir, "reposync")); err != nil {
+					t.Fatal(err)
+				}
+				return target
+			},
+			staged: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			binDir := t.TempDir()
+			source, err := filepath.EvalSymlinks(tt.source(t, binDir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir)
+			stagedPath := filepath.Join(t.TempDir(), "staged-reposync")
+			var calls []string
+			useHelperStaging(t, func(label, got string) (string, error) {
+				if got != source {
+					t.Fatalf("staged source = %q, want %q", got, source)
+				}
+				calls = append(calls, label)
+				return stagedPath, nil
+			})
+			agents, err := serviceAgents([]manifest.Manifest{{
+				Name: "reposync", Binary: "reposync", Watch: manifest.WatchSpec{Debounce: codec.Duration(0)},
+				Service: manifest.ServiceSpec{
+					Kind: "resident", Socket: "~/.config/reposync/rpc.sock",
+					SchemaFingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				},
+				Helper: &manifest.HelperSpec{Command: "helper-serve"},
+			}}, "v1.2.3")
+			if err != nil {
+				t.Fatal(err)
+			}
+			helper := findAgent(t, agents, labelPrefix+".helper.reposync")
+			wantProgram, wantCalls := source, []string(nil)
+			if tt.staged {
+				wantProgram, wantCalls = stagedPath, []string{labelPrefix + ".helper.reposync"}
+			}
+			if helper.Program != wantProgram {
+				t.Fatalf("helper program = %q, want %q", helper.Program, wantProgram)
+			}
+			if !slices.Equal(calls, wantCalls) {
+				t.Fatalf("staging calls = %#v, want %#v", calls, wantCalls)
+			}
+		})
+	}
+}
+
+func TestBundledExecutableMatchesInstalledHelperShapes(t *testing.T) {
+	tests := []struct {
+		program string
+		want    bool
+	}{
+		{program: "/opt/homebrew/Caskroom/reposync/0.27.4/reposync", want: false},
+		{program: "/opt/homebrew/Caskroom/cookiesync/0.27.2/CookieSync.app/Contents/MacOS/cookiesync", want: true},
+		{program: "/opt/homebrew/bin/reposync", want: false},
+		{program: "/Applications/CookieSync.app/Contents/MacOS/cookiesync", want: true},
+		{program: "/opt/homebrew/Caskroom/x/1.0/App.app/Contents/Helpers/tool", want: false},
+		{program: "/opt/homebrew/Caskroom/x/1.0/plain/Contents/MacOS/tool", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.program, func(t *testing.T) {
+			if got := bundledExecutable(tt.program); got != tt.want {
+				t.Fatalf("bundledExecutable(%q) = %t, want %t", tt.program, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServiceAgentsFailWhenHelperStagingFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "reposync"), []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	stageErr := errors.New("stage failed")
+	useHelperStaging(t, func(string, string) (string, error) { return "", stageErr })
+	_, err := serviceAgents([]manifest.Manifest{{
+		Name: "reposync", Binary: "reposync", Watch: manifest.WatchSpec{Debounce: codec.Duration(0)},
+		Service: manifest.ServiceSpec{
+			Kind: "resident", Socket: "~/.config/reposync/rpc.sock",
+			SchemaFingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		Helper: &manifest.HelperSpec{Command: "helper-serve"},
+	}}, "v1.2.3")
+	if !errors.Is(err, stageErr) {
+		t.Fatalf("error = %v", err)
 	}
 }
 

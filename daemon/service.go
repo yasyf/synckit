@@ -67,24 +67,19 @@ func serviceAgents(manifests []manifest.Manifest, build string) ([]dkservice.Age
 		if m.Helper == nil {
 			continue
 		}
-		program, err := canonicalHelperProgram(m.Binary)
-		if err != nil {
-			return nil, err
-		}
-		session, err := serviceSessionType(m.Helper.SessionType)
-		if err != nil {
-			return nil, fmt.Errorf("manifest %q helper: %w", m.Name, err)
-		}
 		helperLabel, err := serviceidentity.HelperLabel(m.Name)
 		if err != nil {
 			return nil, fmt.Errorf("manifest %q helper identity: %w", m.Name, err)
+		}
+		program, err := helperProgram(helperLabel, m.Binary)
+		if err != nil {
+			return nil, err
 		}
 		helper, err := newAgent(helperLabel, []string{m.Helper.Command}, program)
 		if err != nil {
 			return nil, err
 		}
 		helper.RestartPolicy = dkservice.RestartAlways
-		helper.LimitLoadToSessionType = session
 		agents = append(agents, helper)
 	}
 	return agents, nil
@@ -117,21 +112,29 @@ func canonicalHelperProgram(binary string) (string, error) {
 	return program, nil
 }
 
-func serviceSessionType(value manifest.SessionType) (dkservice.SessionType, error) {
-	switch value {
-	case "":
-		return 0, nil
-	case manifest.SessionTypeAqua:
-		return dkservice.SessionTypeAqua, nil
-	case manifest.SessionTypeBackground:
-		return dkservice.SessionTypeBackground, nil
-	case manifest.SessionTypeLoginWindow:
-		return dkservice.SessionTypeLoginWindow, nil
-	case manifest.SessionTypeStandardIO:
-		return dkservice.SessionTypeStandardIO, nil
-	case manifest.SessionTypeSystem:
-		return dkservice.SessionTypeSystem, nil
-	default:
-		return 0, fmt.Errorf("unsupported launchd session type %q", value)
+var stageHelperProgram = func(label, source string) (string, error) {
+	return dkservice.StableProgramFrom(label, source)
+}
+
+func helperProgram(label, binary string) (string, error) {
+	source, err := canonicalHelperProgram(binary)
+	if err != nil {
+		return "", err
 	}
+	if bundledExecutable(source) {
+		return source, nil
+	}
+	program, err := stageHelperProgram(label, source)
+	if err != nil {
+		return "", fmt.Errorf("stage helper binary %q: %w", binary, err)
+	}
+	return program, nil
+}
+
+func bundledExecutable(program string) bool {
+	macos := filepath.Dir(program)
+	contents := filepath.Dir(macos)
+	return filepath.Base(macos) == "MacOS" &&
+		filepath.Base(contents) == "Contents" &&
+		filepath.Ext(filepath.Dir(contents)) == ".app"
 }

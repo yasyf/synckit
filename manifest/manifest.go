@@ -45,7 +45,10 @@ type ServiceSpec struct {
 	SchemaFingerprint string `json:"schema_fingerprint"`
 }
 
-// SessionType is a launchd session name accepted by a resident helper.
+// SessionType is a resident helper's launchd session intent. It is validated
+// but materializes no launchd key: a session limit makes launchctl bootstrap
+// refuse with EIO, and ProcessType Background starves helper subprocesses past
+// their deadlines under load.
 type SessionType string
 
 const (

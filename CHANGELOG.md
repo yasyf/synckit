@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.3] - 2026-07-26
+
+### Fixed
+
+- Consumer helper LaunchAgents no longer carry `LimitLoadToSessionType` or
+  `ProcessType`. The session limit made `launchctl bootstrap` refuse with
+  `Input/output error` when a helper was installed over ssh, and `ProcessType`
+  `Background` starved helper subprocesses past their deadlines under load; a
+  manifest's `helper.session_type` is still validated but materializes no
+  launchd key.
+- Plain-executable helper programs register at daemonkit's digest-keyed stable
+  path (`StableProgramFrom`, daemonkit v0.20.8) instead of the versioned
+  Caskroom target their alias resolved to, so a consumer cask upgrade no longer
+  strands the plist on a path that no longer exists. Helpers whose executable
+  lives inside a `.app` bundle keep resolving as before.
+
 ## [0.36.2] - 2026-07-25
 
 ### Fixed
@@ -316,7 +332,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.36.2...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.36.3...HEAD
+[0.36.3]: https://github.com/yasyf/synckit/compare/v0.36.2...v0.36.3
 [0.36.2]: https://github.com/yasyf/synckit/compare/v0.36.1...v0.36.2
 [0.36.1]: https://github.com/yasyf/synckit/compare/v0.35.2...v0.36.1
 [0.35.2]: https://github.com/yasyf/synckit/releases/tag/v0.35.2
