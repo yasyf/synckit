@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.4] - 2026-07-27
+
+### Fixed
+
+- Pin daemonkit v0.20.9 so every user-home-derived durable path — the launchd
+  plist directory, the stable program root, the artifact store — resolves the
+  invoking user's home through the passwd database instead of `$HOME`. A
+  consumer helper installed from a Homebrew postinstall no longer renders its
+  plist and stages its binary under the sandboxed temp `HOME` that launchd
+  refuses to bootstrap from.
+- `launchctl` exit 5 is no longer waited out as a transient in-flux state, so a
+  permanent launchd denial surfaces as a diagnostic naming the bootstrapped
+  plist path instead of six silent retries.
+- Controller startup recovery reconciles in a recovery mode: a persisted desired
+  agent whose install fails is logged and left as drift for a later converge
+  rather than failing recovery closed, so a wedged `synckitd` agent can no
+  longer block the reconcile that would repair it.
+
 ## [0.36.3] - 2026-07-26
 
 ### Fixed
@@ -332,7 +350,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.36.3...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.36.4...HEAD
+[0.36.4]: https://github.com/yasyf/synckit/compare/v0.36.3...v0.36.4
 [0.36.3]: https://github.com/yasyf/synckit/compare/v0.36.2...v0.36.3
 [0.36.2]: https://github.com/yasyf/synckit/compare/v0.36.1...v0.36.2
 [0.36.1]: https://github.com/yasyf/synckit/compare/v0.35.2...v0.36.1
