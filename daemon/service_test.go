@@ -47,10 +47,17 @@ func useServiceController(t *testing.T, controller serviceController) {
 	t.Cleanup(func() { openServiceController = previous })
 }
 
-func TestServiceAgentsUseFixedProgramsAndTypedPolicy(t *testing.T) {
-	const build = "v1.2.3"
+func useHome(t *testing.T) string {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("DAEMONKIT_HOME", home)
+	return home
+}
+
+func TestServiceAgentsUseFixedProgramsAndTypedPolicy(t *testing.T) {
+	const build = "v1.2.3"
+	home := useHome(t)
 	binDir := t.TempDir()
 	helperPath := filepath.Join(binDir, "cookiesync")
 	if err := os.WriteFile(helperPath, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
@@ -105,7 +112,7 @@ func TestServiceAgentsNeverSessionLimitOrThrottleHelpers(t *testing.T) {
 	}
 	for _, session := range sessions {
 		t.Run(string(session), func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
+			useHome(t)
 			binDir := t.TempDir()
 			if err := os.WriteFile(filepath.Join(binDir, "reposync"), []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
 				t.Fatal(err)
@@ -180,7 +187,7 @@ func TestServiceAgentsStageOnlyUnbundledHelperPrograms(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
+			useHome(t)
 			binDir := t.TempDir()
 			source, err := filepath.EvalSymlinks(tt.source(t, binDir))
 			if err != nil {
@@ -244,7 +251,7 @@ func TestBundledExecutableMatchesInstalledHelperShapes(t *testing.T) {
 }
 
 func TestServiceAgentsFailWhenHelperStagingFails(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	useHome(t)
 	binDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "reposync"), []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
 		t.Fatal(err)
@@ -266,7 +273,7 @@ func TestServiceAgentsFailWhenHelperStagingFails(t *testing.T) {
 }
 
 func TestInstallAndUninstallConvergeExactDesiredSet(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	useHome(t)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
 	binDir := t.TempDir()
 	helperPath := filepath.Join(binDir, "cookiesync")

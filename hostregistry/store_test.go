@@ -255,6 +255,7 @@ func TestRefreshKnownHostsCreatesSolePrivateTrustFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	t.Setenv("DAEMONKIT_HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	sshDir := filepath.Join(home, ".ssh")
 	if err := os.MkdirAll(sshDir, 0o700); err != nil {
