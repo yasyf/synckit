@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.1] - 2026-08-03
+
+### Fixed
+
+- Release builds drop the Linux targets. daemonkit v0.21 compiles only on
+  macOS, so the v0.37.0 release run failed on its `linux_arm64` build before
+  publishing anything; v0.37.0 remains a valid module version with no release
+  artifacts behind it.
+
 ## [0.37.0] - 2026-08-03
 
 ### Changed
@@ -422,7 +431,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.37.0...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.37.1...HEAD
+[0.37.1]: https://github.com/yasyf/synckit/compare/v0.37.0...v0.37.1
 [0.37.0]: https://github.com/yasyf/synckit/compare/v0.36.4...v0.37.0
 [0.36.4]: https://github.com/yasyf/synckit/compare/v0.36.3...v0.36.4
 [0.36.3]: https://github.com/yasyf/synckit/compare/v0.36.2...v0.36.3
