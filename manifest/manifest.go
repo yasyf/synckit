@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -38,10 +39,12 @@ type WatchSpec struct {
 	Debounce codec.Duration `json:"debounce"`
 }
 
-// ServiceSpec selects one exact local presentation of the fixed v1 service.
+// ServiceSpec selects one exact local presentation of the fixed v1 service. A
+// resident service declares no socket path: it is derived from the helper's
+// launchd label, so the helper that binds it and the caller that opens it can
+// never disagree.
 type ServiceSpec struct {
 	Kind              string `json:"kind"`
-	Socket            string `json:"socket,omitempty"`
 	SchemaFingerprint string `json:"schema_fingerprint"`
 }
 
@@ -98,12 +101,8 @@ func (m Manifest) Validate() error {
 		return fmt.Errorf("manifest %q: field %q must be one of resident or spawned, got %q", m.Name, "service.kind", m.Service.Kind)
 	case syncservice.ValidateServiceSchema(m.Name, m.Service.SchemaFingerprint) != nil:
 		return fmt.Errorf("manifest %q: field %q must bind the exact service schema", m.Name, "service.schema_fingerprint")
-	case m.Service.Kind == "resident" && m.Service.Socket == "":
-		return fmt.Errorf("manifest %q: field %q is required when kind is resident", m.Name, "service.socket")
 	case m.Service.Kind == "spawned" && (!filepath.IsAbs(m.Binary) || filepath.Clean(m.Binary) != m.Binary):
 		return fmt.Errorf("manifest %q: field %q must be exact and absolute when kind is spawned", m.Name, "binary")
-	case m.Service.Kind == "spawned" && m.Service.Socket != "":
-		return fmt.Errorf("manifest %q: field %q must be empty when kind is spawned", m.Name, "service.socket")
 	case m.Helper != nil && m.Helper.Command == "":
 		return fmt.Errorf("manifest %q: field %q is required", m.Name, "helper.command")
 	case m.Helper != nil && !validSessionType(m.Helper.SessionType):
@@ -136,25 +135,50 @@ func Load(path string) (*Manifest, error) {
 	return &m, nil
 }
 
+// Skipped names one manifest file Discover could not load. Name is the file's
+// stem, which is the service name because that is what register writes the file
+// as — and it is the only identity left once the contents will not decode, so a
+// caller can still tell which consumer a skipped file belongs to.
+type Skipped struct {
+	Name string
+	Path string
+	Err  error
+}
+
 // Discover loads every *.json manifest in dir (ignoring dotfiles and non-.json
-// entries), returning them sorted by Name. A missing dir yields an empty slice.
-func Discover(dir string) ([]Manifest, error) {
+// entries), returning them sorted by Name alongside one Skipped per file that
+// would not load. A missing dir yields an empty slice.
+//
+// A file that fails to load is skipped and logged, never fatal: manifests are
+// written by independent consumers on their own release cadence, so one left
+// behind by an older synckit is an expected state of the directory, not a
+// corrupt one. Failing the scan would take every other consumer's service down
+// with it. The skips are reported rather than merely logged because a consumer
+// whose file will not decode is registered but stale, not gone — a caller
+// converging launchd agents must not mistake it for one that was removed.
+// Directory-level failures — an unreadable dir, two files claiming the same
+// service — stay fatal, because neither isolates to one consumer.
+func Discover(dir string) ([]Manifest, []Skipped, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("read manifests dir %q: %w", dir, err)
+		return nil, nil, fmt.Errorf("read manifests dir %q: %w", dir, err)
 	}
 	var manifests []Manifest
+	var skipped []Skipped
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || strings.HasPrefix(name, ".") || filepath.Ext(name) != ".json" {
 			continue
 		}
-		m, err := Load(filepath.Join(dir, name))
+		path := filepath.Join(dir, name)
+		m, err := Load(path)
 		if err != nil {
-			return nil, err
+			slog.Error("skipping manifest that failed to load", "path", path, "err", err)
+			skipped = append(skipped, Skipped{Name: strings.TrimSuffix(name, ".json"), Path: path, Err: err})
+			continue
 		}
 		manifests = append(manifests, *m)
 	}
@@ -163,8 +187,8 @@ func Discover(dir string) ([]Manifest, error) {
 	})
 	for i := 1; i < len(manifests); i++ {
 		if manifests[i-1].Name == manifests[i].Name {
-			return nil, fmt.Errorf("duplicate manifest name %q", manifests[i].Name)
+			return nil, nil, fmt.Errorf("duplicate manifest name %q", manifests[i].Name)
 		}
 	}
-	return manifests, nil
+	return manifests, skipped, nil
 }

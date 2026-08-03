@@ -2,12 +2,10 @@ package rpc
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 
-	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/wire"
+	"github.com/yasyf/daemonkit"
 )
 
 type peerPIDKey struct{}
@@ -27,50 +25,35 @@ func PeerSID(ctx context.Context) (int, bool) {
 }
 
 // Listen binds a raw Unix listener. Long-lived daemons delegate listener
-// ownership and takeover to daemonkit Runtime.
+// ownership and takeover to daemonkit's Serve.
 func Listen(ctx context.Context, sockPath string) (net.Listener, error) {
 	var config net.ListenConfig
 	return config.Listen(ctx, "unix", sockPath)
 }
 
-// Server resolves one admitted Dispatcher for each persistent request.
-type Server struct {
-	resolve DispatcherResolver
-	Wire    *wire.Server
-}
-
-// DispatcherResolver resolves the graph already admitted for one wire request.
-type DispatcherResolver func(dkdaemon.Publication) (*Dispatcher, error)
-
-// NewServer returns a server with synckit's exact RPC schema identity.
-func NewServer(resolve DispatcherResolver) *Server {
-	if resolve == nil {
-		panic("rpc: dispatcher resolver is required")
+// Handle serves one admitted daemonkit business request off d's registry, so a
+// daemon product and a spawned child session put the same bytes on the wire.
+// An undecodable payload is an error Response rather than a session failure;
+// only an unroutable op or an unencodable response fails the session.
+func (d *Dispatcher) Handle(ctx context.Context, request daemonkit.Request) (daemonkit.Reply, error) {
+	if request.Op != callOp {
+		return daemonkit.Reply{}, fmt.Errorf("rpc: op %q is not %q", request.Op, callOp)
 	}
-	server := &Server{resolve: resolve}
-	server.Wire = &wire.Server{WireBuild: WireBuild, MaxFrame: MaxFrame}
-	server.Wire.Register(wire.HandlerSpec{Op: callOp, Handler: server.dispatch, Concurrent: true})
-	return server
-}
-
-func (s *Server) dispatch(ctx context.Context, request wire.Request) (any, error) {
-	req, err := DecodeRequest(request.Payload)
+	decoded, err := DecodeRequest(request.Body)
 	if err != nil {
-		payload, encodeErr := EncodeResponse(&Response{OK: false, Error: err.Error()})
-		return json.RawMessage(payload), encodeErr
+		return reply(&Response{OK: false, Error: err.Error()})
 	}
-	dispatcher, err := s.resolve(request.Publication)
-	if err != nil {
-		return nil, err
-	}
-	peer := request.Peer
-	ctx = context.WithValue(ctx, peerPIDKey{}, peer.PID)
-	if sid, err := sidOf(peer.PID); err == nil {
+	ctx = context.WithValue(ctx, peerPIDKey{}, request.Caller.PID)
+	if sid, err := sidOf(request.Caller.PID); err == nil {
 		ctx = context.WithValue(ctx, peerSIDKey{}, sid)
 	}
-	payload, err := EncodeResponse(dispatcher.Dispatch(ctx, req))
+	return reply(d.Dispatch(ctx, decoded))
+}
+
+func reply(response *Response) (daemonkit.Reply, error) {
+	payload, err := EncodeResponse(response)
 	if err != nil {
-		return nil, fmt.Errorf("encode response: %w", err)
+		return daemonkit.Reply{}, err
 	}
-	return json.RawMessage(payload), nil
+	return daemonkit.Reply{Body: payload}, nil
 }

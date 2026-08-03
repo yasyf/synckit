@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/yasyf/daemonkit/wire"
 )
 
 // DispatchTimeout caps how long a single dispatched handler may run. The handler ctx
@@ -15,11 +13,15 @@ import (
 const DispatchTimeout = 10 * time.Minute
 
 const (
-	// MaxFrame bounds one daemonkit frame carrying a synckit request or response.
-	MaxFrame = 16 << 20
-	callOp   = wire.Op("synckit.rpc.call")
-	// RuntimeHealthOp is the suite-qualified immutable runtime-health observation.
-	RuntimeHealthOp = wire.Op("synckit.rpc.runtime.health")
+	// MaxPayload bounds one encoded synckit request or response body.
+	MaxPayload = 16 << 20
+	// MaxFrame is the smallest daemonkit frame whose payload ceiling still carries
+	// MaxPayload: a terminal base64s its body and reserves 4 KiB of envelope, so a
+	// frame sized at the payload itself would cap bodies at three quarters of it.
+	// Every Contract.MaxFrame on a synckit session states this same number —
+	// daemonkit refuses a contract that disagrees with what a spawn conveyed.
+	MaxFrame = (MaxPayload*4+2)/3 + 4<<10
+	callOp   = "synckit.rpc.call"
 )
 
 // Request is one RPC command: a method name and an arbitrary params object.
@@ -34,18 +36,6 @@ type Response struct {
 	OK     bool            `json:"ok"`
 	Result json.RawMessage `json:"result"`
 	Error  string          `json:"error,omitempty"`
-}
-
-// RuntimeHealth is the exact identity and readiness of one synckitd process generation.
-type RuntimeHealth struct {
-	RuntimeBuild      string `json:"runtime_build"`
-	RuntimeProtocol   int    `json:"runtime_protocol"`
-	ProcessGeneration string `json:"process_generation"`
-	PID               int    `json:"pid"`
-	State             string `json:"state"`
-	Draining          bool   `json:"draining"`
-	Busy              bool   `json:"busy"`
-	Ready             bool   `json:"ready"`
 }
 
 // EncodeRequest renders req as a daemonkit payload.
@@ -82,22 +72,4 @@ func DecodeResponse(payload []byte) (*Response, error) {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return &resp, nil
-}
-
-// EncodeRuntimeHealth renders health as the suite runtime-health observation.
-func EncodeRuntimeHealth(health RuntimeHealth) ([]byte, error) {
-	data, err := json.Marshal(health)
-	if err != nil {
-		return nil, fmt.Errorf("encode runtime health: %w", err)
-	}
-	return data, nil
-}
-
-// DecodeRuntimeHealth parses the suite runtime-health observation.
-func DecodeRuntimeHealth(payload []byte) (RuntimeHealth, error) {
-	var health RuntimeHealth
-	if err := json.Unmarshal(payload, &health); err != nil {
-		return RuntimeHealth{}, fmt.Errorf("decode runtime health: %w", err)
-	}
-	return health, nil
 }

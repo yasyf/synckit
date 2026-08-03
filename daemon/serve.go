@@ -5,22 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
-	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/wire"
-	"github.com/yasyf/daemonkit/worker"
+	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/synckit/debug"
 	"github.com/yasyf/synckit/hostregistry"
-	"github.com/yasyf/synckit/internal/runtimehealth"
-	"github.com/yasyf/synckit/internal/runtimeowner"
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
@@ -49,28 +41,30 @@ var (
 	watchHealthyRun  = 30 * time.Second
 )
 
+// runtimeProduct is the daemon daemonkit publishes at readiness: the dispatcher
+// answers business, and the watch supervisor spends the shutdown budget.
 type runtimeProduct struct {
 	supervisor *supervisor
 	dispatcher *rpc.Dispatcher
 }
 
-func newServeCmd(build string) *cobra.Command {
+func newServeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
 		Short: "Run the resident daemon: own the host mesh, serve the RPC socket, and supervise the watch engines.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return serve(cmd.Context(), build)
+			return serve(cmd.Context())
 		},
 	}
 }
 
-// serve is the resident process: it binds the rpc socket, registers the
-// status/reconcile/reload handlers, and supervises one watch engine per
-// discovered manifest. It blocks until ctx is canceled (SIGINT/SIGTERM),
-// rebuilding the supervisor on SIGHUP.
-func serve(ctx context.Context, build string) error {
-	sock, err := hostregistry.Mesh.SockPath()
+// serve is the resident process: daemonkit owns the socket, the singleton
+// flock, the owner record, and the drain ladder; start builds the dispatcher
+// and the watch supervisor, and returning the product IS readiness. It blocks
+// until ctx is canceled, a drain signal arrives, or the drain verb lands.
+func serve(ctx context.Context) error {
+	spec, err := stableServeSpec()
 	if err != nil {
 		return err
 	}
@@ -78,24 +72,33 @@ func serve(ctx context.Context, build string) error {
 	if err != nil {
 		return err
 	}
-	processes, err := newProcessOwner(dir)
-	if err != nil {
-		return err
-	}
-	sup := newSupervisor(processes.workers, processes.children, newDeliveryStore(dir))
+	_, err = daemonkit.Serve(ctx, spec, func(c daemonkit.Ctx) (daemonkit.Product, error) {
+		return startServe(c, dir)
+	})
+	return err
+}
+
+// startServe wires the daemon against the ownership scope Serve hands over. The
+// engine generations and every presentation it starts parent to c.Context — the
+// activation's own lifetime, cancelled when the drain begins.
+//
+//nolint:contextcheck // c.Context is the lifetime Serve mints for the product; the caller's own ctx is deliberately not it.
+func startServe(c daemonkit.Ctx, dir string) (daemonkit.Product, error) {
+	sup := newSupervisor(c, newDeliveryStore(dir))
 	d := rpc.NewDispatcher()
 	d.Register("status", handleStatus)
 	// reconcile and reload mutate the engine generation, so they serialize behind
 	// the exclusive mutex — a reload never tears down the clients a reconcile pass
 	// is mid-drive on; status is a pure read and stays concurrent.
 	d.RegisterExclusive("reconcile", func(hctx context.Context, _ map[string]any) (any, error) {
-		return reconcileAll(hctx, processes.children)
+		return reconcileAll(hctx, c)
 	})
-	// The generation reload starts must outlive the request, so it parents to
-	// serve's ctx: the request ctx dies as soon as Dispatch returns, which would
-	// silently cancel every engine the reload just started.
-	d.RegisterExclusive("reload", func(_ context.Context, _ map[string]any) (any, error) {
-		if err := sup.reload(ctx); err != nil {
+	// The generation reload starts must outlive the request, so it parents to the
+	// daemon's own lifetime: the request ctx dies as soon as Dispatch returns,
+	// which would silently cancel every engine the reload just started.
+	d.RegisterExclusive("reload", func(context.Context, map[string]any) (any, error) {
+		//nolint:contextcheck // the engines this starts outlive the request; the daemon's own lifetime is their only honest parent.
+		if err := sup.reload(c.Context); err != nil {
 			return nil, err
 		}
 		return map[string]any{"reloaded": true}, nil
@@ -103,78 +106,42 @@ func serve(ctx context.Context, build string) error {
 	// consent.request|relay|presence ride plain Register (concurrent), never the
 	// exclusive mutex reconcile/reload share: a 10-min Touch ID prompt behind it
 	// would wedge the daemon.
-	registerConsent(d, processes.workers)
-
-	policy, err := runtimeowner.TrustPolicy()
-	if err != nil {
-		return err
-	}
-	stopStore, err := runtimeowner.ServiceProcessStore()
-	if err != nil {
-		return err
-	}
-	product := &runtimeProduct{supervisor: sup, dispatcher: d}
-	var runtime *dkdaemon.Runtime
-	var slot *dkdaemon.PublicationSlot[*runtimeProduct]
-	rpcServer := rpc.NewServer(func(publication dkdaemon.Publication) (*rpc.Dispatcher, error) {
-		admitted, err := slot.Value(publication)
-		if err != nil {
-			return nil, err
-		}
-		return admitted.dispatcher, nil
-	})
-	runtime, err = wire.NewRuntime(wire.RuntimeConfig{
-		Socket: sock, RuntimeBuild: build, RuntimeProtocol: int(rpc.Version),
-		Wire: rpcServer.Wire, TrustPolicy: policy, StopControlStore: stopStore,
-		Observations: []wire.ObservationRoute{runtimehealth.Observation(func(ctx context.Context) (dkdaemon.Health, error) {
-			return runtime.Health(ctx)
-		})},
-		Workers: processes.workers, Children: processes.children,
-	})
-	if err != nil {
-		return err
-	}
-	slot = dkdaemon.NewPublicationSlot[*runtimeProduct](runtime)
-	activation, err := runtime.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	fail := func(closeBase context.Context, cause error) error {
-		_ = activation.Fail(cause)
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(closeBase), 30*time.Second)
+	registerConsent(d, c)
+	if err := activateServe(c.Context, sup); err != nil {
+		closeCtx, cancel := context.WithTimeout(c.Context, serveShutdown)
 		defer cancel()
-		return errors.Join(cause, runtime.Close(closeCtx))
-	}
-	// The activation context, not the caller context, owns presentation lifetime.
-	if err := activateServe(activation.Context(), sup, sock); err != nil { //nolint:contextcheck
-		return fail(ctx, err)
-	}
-	publication, err := slot.Stage(activation, product)
-	if err != nil {
-		return fail(ctx, err)
-	}
-	if err := activation.CommitReady(publication); err != nil {
-		return fail(ctx, err)
-	}
-	go func(waitCtx, closeBase context.Context) {
-		select {
-		case <-waitCtx.Done():
-		case <-activation.Context().Done():
-		}
 		sup.close()
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(closeBase), 30*time.Second)
-		defer cancel()
 		_ = sup.wait(closeCtx)
-		_ = runtime.Close(closeCtx)
-	}(ctx, ctx)
-	err = runtime.Wait(context.WithoutCancel(ctx))
-	if ctx.Err() != nil && (err == nil || errors.Is(err, ctx.Err())) {
-		return nil
+		return nil, err
 	}
-	return err
+	return &runtimeProduct{supervisor: sup, dispatcher: d}, nil
 }
 
-func activateServe(lifetime context.Context, sup *supervisor, sock string) error {
+func (p *runtimeProduct) Handle(ctx context.Context, request daemonkit.Request) (daemonkit.Reply, error) {
+	return p.dispatcher.Handle(ctx, request)
+}
+
+// Drain cancels the running watch generation and joins its goroutines within
+// the drain share; Close settles whatever the join left, closing the long-lived
+// local clients that generation drove.
+func (p *runtimeProduct) Drain(budget daemonkit.Budget) error {
+	p.supervisor.close()
+	ctx, cancel := budget.Context(context.Background())
+	defer cancel()
+	return p.supervisor.wait(ctx)
+}
+
+func (p *runtimeProduct) Close(budget daemonkit.Budget) error {
+	ctx, cancel := budget.Context(context.Background())
+	defer cancel()
+	return p.supervisor.wait(ctx)
+}
+
+// activateServe does the presentation work bound to the daemon's activation
+// lifetime. SIGHUP is not a reload trigger any more — daemonkit claims it as a
+// drain signal — so a manifest change rebinds the watchers through the reload
+// rpc verb, which register and unregister already nudge.
+func activateServe(lifetime context.Context, sup *supervisor) error {
 	if _, err := ensureManifestsDir(); err != nil {
 		return err
 	}
@@ -188,34 +155,17 @@ func activateServe(lifetime context.Context, sup *supervisor, sock string) error
 	if err := sup.reload(lifetime); err != nil {
 		return err
 	}
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	go func() {
-		defer signal.Stop(hup)
-		for {
-			select {
-			case <-lifetime.Done():
-				return
-			case <-hup:
-				if err := sup.reload(lifetime); err != nil {
-					slog.ErrorContext(lifetime, "serve: reload on SIGHUP", "err", err)
-				}
-			}
-		}
-	}()
-	slog.InfoContext(lifetime, "synckitd activated", "socket", sock)
+	slog.InfoContext(lifetime, "synckitd activated", "label", serveLabel)
 	return nil
 }
 
 // supervisor owns the current generation of watch goroutines and the long-lived
 // local clients those goroutines drive. reload tears the current generation down
-// and starts a fresh one from the manifests on disk, so a register/unregister or
-// a SIGHUP rebinds the watchers without restarting the process. It is safe for
-// concurrent reload (the rpc reload handler and the SIGHUP goroutine both call
-// it).
+// and starts a fresh one from the manifests on disk, so a register/unregister
+// rebinds the watchers without restarting the process. It is safe for concurrent
+// reload.
 type supervisor struct {
-	workers  *worker.Pool
-	children *proc.Manager
+	scope    processScope
 	delivery *deliveryStore
 	mu       sync.Mutex
 	cancel   context.CancelFunc
@@ -225,8 +175,8 @@ type supervisor struct {
 	settled  bool
 }
 
-func newSupervisor(workers *worker.Pool, children *proc.Manager, delivery *deliveryStore) *supervisor {
-	return &supervisor{workers: workers, children: children, delivery: delivery}
+func newSupervisor(scope processScope, delivery *deliveryStore) *supervisor {
+	return &supervisor{scope: scope, delivery: delivery}
 }
 
 // reload cancels the running watch generation, waits for it to drain, closes the
@@ -280,9 +230,9 @@ func (s *supervisor) reload(parent context.Context) error {
 // round trip happens asynchronously under superviseWatch, keeping reload prompt.
 // The caller holds s.mu, so appending to s.clients is safe.
 func (s *supervisor) startEngine(ctx context.Context, wg *sync.WaitGroup, m manifest.Manifest, reg *hostregistry.Registry) {
-	local := syncservice.NewClient(dialTransport(s.children, m, reg.Self, reg.Self))
+	local := syncservice.NewClient(dialTransport(s.scope, m, reg.Self, reg.Self))
 	s.clients = append(s.clients, local)
-	eng := buildEngine(ctx, local, m, reg, s.workers, s.children, s.delivery)
+	eng := buildEngine(ctx, local, m, reg, s.scope, s.delivery)
 
 	// run returns how long it spent inside the backend, so a run that dies in the
 	// list phase (never reaching the backend) reports zero and never counts healthy.
@@ -391,8 +341,7 @@ func buildEngine(
 	local *syncservice.Client,
 	m manifest.Manifest,
 	reg *hostregistry.Registry,
-	workers *worker.Pool,
-	children *proc.Manager,
+	scope processScope,
 	delivery *deliveryStore,
 ) *watch.Engine[string] {
 	hosts := append([]string{reg.Self}, reg.Hosts...)
@@ -402,10 +351,10 @@ func buildEngine(
 		manifestResolver{client: local, name: m.Name, memo: memo},
 		newBreakerNotifier(
 			ctx,
-			manifestNotifier{local: local, m: m, self: reg.Self, children: children, delivery: delivery},
+			manifestNotifier{local: local, m: m, self: reg.Self, scope: scope, delivery: delivery},
 			m.Name,
 			reg.Self,
-			workers,
+			scope,
 		),
 		func(id string) string { return id },
 		debounce,
@@ -547,7 +496,7 @@ type manifestNotifier struct {
 	local    *syncservice.Client
 	m        manifest.Manifest
 	self     string
-	children *proc.Manager
+	scope    processScope
 	delivery *deliveryStore
 }
 
@@ -581,7 +530,7 @@ func (n manifestNotifier) Notify(ctx context.Context, peer, _ string) error {
 		}
 		pending = &change
 	}
-	c := syncservice.NewClient(dialTransport(n.children, n.m, peer, n.self))
+	c := syncservice.NewClient(dialTransport(n.scope, n.m, peer, n.self))
 	defer func() { _ = c.Close() }()
 	ack, err := c.Apply(ctx, *pending)
 	if err != nil {

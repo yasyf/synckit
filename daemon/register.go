@@ -11,7 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
 )
@@ -81,13 +80,12 @@ func newUnregisterCmd() *cobra.Command {
 // daemon that is down (no socket) is not an error, since the next serve start
 // discovers the change anyway.
 func nudgeReload(ctx context.Context) {
-	sock, err := hostregistry.Mesh.SockPath()
+	client, err := daemonClient()
 	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, reloadTimeout)
 	defer cancel()
-	client := daemonClient(sock)
 	defer func() { _ = client.Close() }()
 	_, _ = client.Call(ctx, &rpc.Request{Method: "reload"})
 }

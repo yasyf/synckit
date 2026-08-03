@@ -23,7 +23,6 @@ func cookiesyncManifest() Manifest {
 		},
 		Service: ServiceSpec{
 			Kind:              "resident",
-			Socket:            "~/.config/cookiesync/rpc.sock",
 			SchemaFingerprint: testServiceSchema,
 		},
 		Helper: &HelperSpec{
@@ -79,10 +78,9 @@ func TestValidate(t *testing.T) {
 		wantErr bool
 	}{
 		{"valid", func(*Manifest) {}, false},
-		{"spawned without socket", func(m *Manifest) {
+		{"spawned", func(m *Manifest) {
 			m.Binary = "/opt/homebrew/bin/cookiesync"
 			m.Service.Kind = "spawned"
-			m.Service.Socket = ""
 		}, false},
 		{"missing name", func(m *Manifest) { m.Name = "" }, true},
 		{"unsafe name", func(m *Manifest) { m.Name = "../cookiesync" }, true},
@@ -90,9 +88,7 @@ func TestValidate(t *testing.T) {
 		{"missing binary", func(m *Manifest) { m.Binary = "" }, true},
 		{"missing kind", func(m *Manifest) { m.Service.Kind = "" }, true},
 		{"invalid kind", func(m *Manifest) { m.Service.Kind = "http" }, true},
-		{"missing socket with resident kind", func(m *Manifest) { m.Service.Socket = "" }, true},
-		{"relative spawned binary", func(m *Manifest) { m.Service.Kind = "spawned"; m.Service.Socket = "" }, true},
-		{"spawned socket", func(m *Manifest) { m.Binary = "/bin/cookiesync"; m.Service.Kind = "spawned" }, true},
+		{"relative spawned binary", func(m *Manifest) { m.Service.Kind = "spawned" }, true},
 		{"missing helper command", func(m *Manifest) { m.Helper.Command = "" }, true},
 		{"invalid helper session", func(m *Manifest) { m.Helper.SessionType = SessionType("Console") }, true},
 	}
@@ -188,9 +184,12 @@ func TestDiscover(t *testing.T) {
 		t.Fatalf("write dotfile: %v", err)
 	}
 
-	got, err := Discover(dir)
+	got, skipped, err := Discover(dir)
 	if err != nil {
 		t.Fatalf("Discover() error = %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("Discover() skipped = %#v, want none", skipped)
 	}
 	if len(got) != 2 {
 		t.Fatalf("Discover() len = %d, want 2", len(got))
@@ -201,12 +200,62 @@ func TestDiscover(t *testing.T) {
 }
 
 func TestDiscoverMissingDir(t *testing.T) {
-	got, err := Discover(filepath.Join(t.TempDir(), "nope"))
+	got, _, err := Discover(filepath.Join(t.TempDir(), "nope"))
 	if err != nil {
 		t.Fatalf("Discover() of missing dir error = %v, want nil", err)
 	}
 	if len(got) != 0 {
 		t.Errorf("Discover() of missing dir len = %d, want 0", len(got))
+	}
+}
+
+// TestDiscoverIsolatesAManifestThatWillNotLoad proves one stale manifest cannot
+// wedge the mesh. Each case is a shape actually found in a live manifests dir:
+// keys from a pre-v0.21 synckit, the service.socket field v0.21 deleted, and a
+// truncated file. Every one skips its own service and leaves the rest loading.
+func TestDiscoverIsolatesAManifestThatWillNotLoad(t *testing.T) {
+	tests := []struct {
+		name  string
+		stale string
+	}{
+		{
+			name:  "keys from a pre-v0.21 synckit",
+			stale: `{"name":"reposync","binary":"reposync","brew":"yasyf/tap/reposync","watch":{"backend":"fsnotify","debounce":"15s"},"service":{"transport":"stdio","serve_args":["rpc-serve"]}}`,
+		},
+		{
+			name:  "the service.socket field v0.21 deleted",
+			stale: `{"name":"reposync","binary":"/opt/homebrew/bin/reposync","watch":{"debounce":"1s"},"service":{"kind":"spawned","socket":"/tmp/reposync.sock","schema_fingerprint":"` + testServiceSchema + `"}}`,
+		},
+		{
+			name:  "a truncated file",
+			stale: `{"name":"reposync",`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			data, err := json.Marshal(cookiesyncManifest())
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "cookiesync.json"), data, 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "reposync.json"), []byte(tt.stale), 0o600); err != nil {
+				t.Fatalf("write stale: %v", err)
+			}
+
+			got, skipped, err := Discover(dir)
+			if err != nil {
+				t.Fatalf("Discover() error = %v, want the stale manifest skipped", err)
+			}
+			if len(got) != 1 || got[0].Name != "cookiesync" {
+				t.Fatalf("Discover() = %#v, want cookiesync alone", got)
+			}
+			if len(skipped) != 1 || skipped[0].Name != "reposync" || skipped[0].Err == nil {
+				t.Fatalf("Discover() skipped = %#v, want reposync named with its error", skipped)
+			}
+		})
 	}
 }
 
@@ -221,7 +270,7 @@ func TestDiscoverRejectsDuplicateServiceName(t *testing.T) {
 			t.Fatalf("write %s: %v", filename, err)
 		}
 	}
-	if _, err := Discover(dir); err == nil {
+	if _, _, err := Discover(dir); err == nil {
 		t.Fatal("Discover accepted duplicate service names")
 	}
 }

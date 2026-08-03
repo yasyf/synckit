@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -12,8 +11,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/synckit/internal/rpctest"
 	"github.com/yasyf/synckit/presence"
@@ -36,15 +33,16 @@ func TestRequestDerivesRequestorFromPeerSID(t *testing.T) {
 	d := rpc.NewDispatcher()
 	Register(d, e)
 
-	// A short MkdirTemp dir, not t.TempDir(): the test's long name would
-	// overflow the 104-byte sockaddr_un path limit.
-	dir, err := os.MkdirTemp("", "consentsock")
+	// A short /tmp root, not t.TempDir(): the daemon socket derives from the
+	// label under DAEMONKIT_HOME, and the test's long name would overflow the
+	// 104-byte sockaddr_un path limit.
+	home, err := os.MkdirTemp("/tmp", "consent")
 	if err != nil {
 		t.Fatalf("mkdirtemp: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "s.sock")
-	server, err := rpctest.Start(t.Context(), sock, dir, d)
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("DAEMONKIT_HOME", home)
+	server, err := rpctest.Start(t.Context(), "com.github.yasyf.synckit.consenttest", d)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
 	}
@@ -54,7 +52,10 @@ func TestRequestDerivesRequestorFromPeerSID(t *testing.T) {
 		}
 	})
 
-	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), WireBuild: rpc.WireBuild})
+	client, err := server.Client()
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
 	defer func() { _ = client.Close() }()
 	resp, err := client.Call(context.Background(), &rpc.Request{
 		Method: MethodRequest,

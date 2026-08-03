@@ -10,13 +10,26 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/yasyf/daemonkit/worker"
+	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/synckit/internal/clirunner"
 )
 
+// maxCommandRun ceilings one command's whole life — spawn, streams, settlement — over
+// the caller's own deadline, never past it, so a wedged local command or ssh session
+// cannot outlive the CLI that started it.
+const maxCommandRun = 12 * time.Minute
+
+const maxCommandOutput = 16 << 20
+
 // ErrRunnerClosed means a callback-scoped command runner has left its scope.
 var ErrRunnerClosed = errors.New("hostregistry: runner scope closed")
+
+// Commander runs one bounded disposable command under durable process ownership.
+// Both *daemonkit.Owned (a CLI scope) and daemonkit.Ctx (a daemon's) satisfy it.
+type Commander interface {
+	Run(ctx context.Context, cmd daemonkit.Cmd) (daemonkit.RunResult, error)
+}
 
 // Runner executes commands locally and over SSH; the SSH/exec boundary tests mock.
 type Runner interface {
@@ -27,11 +40,11 @@ type Runner interface {
 }
 
 // execRunner is the production Runner: Local and SSH execute through one
-// daemonkit task owner; SSH also sources brew's shellenv remotely.
-type execRunner struct{ runner *worker.Pool }
+// daemonkit process-ownership scope; SSH also sources brew's shellenv remotely.
+type execRunner struct{ runner Commander }
 
 // NewExecRunner returns the default Runner that executes commands locally and over ssh.
-func NewExecRunner(runner *worker.Pool) Runner {
+func NewExecRunner(runner Commander) Runner {
 	return execRunner{runner: runner}
 }
 
@@ -45,8 +58,8 @@ func WithExecRunner(ctx context.Context, callback func(Runner) error) error {
 	if err != nil {
 		return fmt.Errorf("resolve synckit state directory: %w", err)
 	}
-	return clirunner.WithPool(ctx, directory, func(pool *worker.Pool) error {
-		runner := &scopedRunner{runner: execRunner{runner: pool}}
+	return clirunner.WithOwned(ctx, directory, func(owned *daemonkit.Owned) error {
+		runner := &scopedRunner{runner: execRunner{runner: owned}}
 		runner.active.Store(true)
 		defer runner.active.Store(false)
 		return callback(runner)
@@ -80,7 +93,7 @@ func (r execRunner) SSH(ctx context.Context, target, remoteCmd string) (string, 
 	return ExecBootstrapSSH(ctx, r.runner, target, remoteCmd, nil)
 }
 
-func runCmd(ctx context.Context, runner *worker.Pool, name string, args ...string) (string, error) {
+func runCmd(ctx context.Context, runner Commander, name string, args ...string) (string, error) {
 	executable, err := exec.LookPath(name)
 	if err != nil {
 		return "", fmt.Errorf("resolve %s: %w", name, err)
@@ -89,8 +102,11 @@ func runCmd(ctx context.Context, runner *worker.Pool, name string, args ...strin
 	if err != nil {
 		return "", fmt.Errorf("resolve absolute %s: %w", name, err)
 	}
-	result, runErr := runner.Run(ctx, worker.CommandRequest{
-		Path: filepath.Clean(executable), Args: args, Dir: filepath.Dir(executable), TotalTimeout: 12 * time.Minute,
+	runCtx, cancel := context.WithTimeout(ctx, maxCommandRun)
+	defer cancel()
+	result, runErr := runner.Run(runCtx, daemonkit.Cmd{
+		Path: filepath.Clean(executable), Args: args, Dir: filepath.Dir(executable),
+		Exec: daemonkit.ServingSameUser(), MaxOutput: maxCommandOutput,
 	})
 	if runErr != nil {
 		return string(result.Stdout), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), runErr, strings.TrimSpace(string(result.Stderr)))

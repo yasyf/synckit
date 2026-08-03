@@ -29,24 +29,6 @@
           "result": "json|null|required"
         }
       }
-    },
-    "synckit.rpc.runtime.health": {
-      "request": {
-        "encoding": "empty"
-      },
-      "response": {
-        "encoding": "json",
-        "fields": {
-          "busy": "boolean|required",
-          "draining": "boolean|required",
-          "pid": "integer|required",
-          "process_generation": "string|required",
-          "ready": "boolean|required",
-          "runtime_build": "string|required",
-          "runtime_protocol": "integer|required",
-          "state": "string|required"
-        }
-      }
     }
   },
   "suite": "com.yasyf.synckit.rpc",

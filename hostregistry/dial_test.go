@@ -11,44 +11,25 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/trust"
-	"github.com/yasyf/daemonkit/worker"
+	"github.com/yasyf/daemonkit"
 )
 
-func testTaskPool(t *testing.T) *worker.Pool {
+func testOwned(t *testing.T) *daemonkit.Owned {
 	t.Helper()
-	generation, err := proc.ProcessGeneration()
+	openCtx, cancelOpen := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelOpen()
+	owned, err := daemonkit.OwnProcesses(openCtx, filepath.Join(t.TempDir(), "processes.db"))
 	if err != nil {
-		t.Fatal(err)
-	}
-	reaper := &proc.Reaper{
-		Store:      &proc.FileStore{Path: filepath.Join(t.TempDir(), "processes.db")},
-		Generation: generation,
-	}
-	pool, err := worker.NewPool(worker.Config{
-		Capacity: 4, QueueCapacity: 4, MaxTotalRun: 12 * time.Minute,
-		MaxStdinBytes: 16 << 20, MaxStdoutBytes: 16 << 20, MaxStderrBytes: 1 << 20,
-	}, reaper)
-	if err != nil {
-		t.Fatalf("new process pool: %v", err)
-	}
-	claim, err := pool.ClaimRuntime(trust.VerifierWorkerBudgets())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := claim.Recover(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := claim.Activate(); err != nil {
-		t.Fatal(err)
+		t.Fatalf("own processes: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := claim.Close(context.Background()); err != nil {
-			t.Errorf("close process pool: %v", err)
+		closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := owned.Close(closeCtx); err != nil {
+			t.Errorf("close process scope: %v", err)
 		}
 	})
-	return claim.Product()
+	return owned
 }
 
 // fakeSSH writes an executable ssh stand-in that logs the address it was invoked with
@@ -102,7 +83,7 @@ func TestExecSSHTriesAddrsInOrderOn255(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "attempts.log")
 	swapSSHBin(t, fakeSSH(t, logPath))
 
-	out, err := execSSHAddrs(context.Background(), testTaskPool(t), []string{"me@connfail-lan", "me@good-tailnet"}, "echo hi", nil)
+	out, err := execSSHAddrs(context.Background(), testOwned(t), []string{"me@connfail-lan", "me@good-tailnet"}, "echo hi", nil)
 	if err != nil {
 		t.Fatalf("execSSHAddrs: %v", err)
 	}
@@ -153,7 +134,7 @@ func TestExecSSHDialBudgetBoundsDeadAddressFailover(t *testing.T) {
 	swapSSHBin(t, slowConnfailSSH(t, logPath))
 
 	addrs := []string{"me@connfail-1", "me@connfail-2", "me@connfail-3", "me@connfail-4", "me@connfail-5", "me@connfail-final"}
-	_, err := execSSHAddrs(context.Background(), testTaskPool(t), addrs, "echo hi", nil)
+	_, err := execSSHAddrs(context.Background(), testOwned(t), addrs, "echo hi", nil)
 	if err == nil {
 		t.Fatal("execSSHAddrs succeeded, want the dial failure surfaced")
 	}
@@ -175,7 +156,7 @@ func TestExecSSHDialBudgetStillDialsCanonicalTarget(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "attempts.log")
 	swapSSHBin(t, slowConnfailSSH(t, logPath))
 
-	out, err := execSSHAddrs(context.Background(), testTaskPool(t), []string{"me@connfail-1", "me@connfail-2", "me@connfail-3", "me@good-tailnet"}, "echo hi", nil)
+	out, err := execSSHAddrs(context.Background(), testOwned(t), []string{"me@connfail-1", "me@connfail-2", "me@connfail-3", "me@good-tailnet"}, "echo hi", nil)
 	if err != nil {
 		t.Fatalf("execSSHAddrs: %v (a spent budget must still dial the canonical target)", err)
 	}
@@ -195,7 +176,7 @@ func TestExecSSHRemoteFailureNeverFailsOver(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "attempts.log")
 	swapSSHBin(t, fakeSSH(t, logPath))
 
-	_, err := execSSHAddrs(context.Background(), testTaskPool(t), []string{"me@remotefail-lan", "me@good-tailnet"}, "echo hi", nil)
+	_, err := execSSHAddrs(context.Background(), testOwned(t), []string{"me@remotefail-lan", "me@good-tailnet"}, "echo hi", nil)
 	if err == nil {
 		t.Fatal("execSSHAddrs succeeded, want the remote command's failure surfaced")
 	}
@@ -229,10 +210,10 @@ func TestExecSSHKillsBackgroundedDescendantOnCtxCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	pool := testTaskPool(t)
+	owned := testOwned(t)
 	done := make(chan error, 1)
 	go func() {
-		_, err := execSSHAddrs(ctx, pool, []string{"me@peer"}, "echo hi", nil)
+		_, err := execSSHAddrs(ctx, owned, []string{"me@peer"}, "echo hi", nil)
 		done <- err
 	}()
 	pid := waitDescendantPID(t, pidFile)
@@ -288,10 +269,10 @@ func TestExecSSHCtxCancelWithExitZeroLeaderReturnsCtxErr(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	pool := testTaskPool(t)
+	owned := testOwned(t)
 	done := make(chan error, 1)
 	go func() {
-		_, err := execSSHAddrs(ctx, pool, []string{"me@peer-a", "me@peer-b"}, "echo hi", nil)
+		_, err := execSSHAddrs(ctx, owned, []string{"me@peer-a", "me@peer-b"}, "echo hi", nil)
 		done <- err
 	}()
 	pid := waitDescendantPID(t, pidFile)
@@ -374,7 +355,7 @@ func TestExecSSHReapsSurvivingDescendantWhenLeaderExitsFirst(t *testing.T) {
 		}
 	})
 
-	out, err := execSSHAddrs(context.Background(), testTaskPool(t), []string{"me@connfail-lan", "me@good-tailnet"}, "echo hi", nil)
+	out, err := execSSHAddrs(context.Background(), testOwned(t), []string{"me@connfail-lan", "me@good-tailnet"}, "echo hi", nil)
 	if err != nil {
 		t.Fatalf("execSSHAddrs: %v (a 255 leader must fail over to the next address)", err)
 	}
@@ -410,7 +391,7 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 		logPath := filepath.Join(t.TempDir(), "attempts.log")
 		swapSSHBin(t, fakeSSH(t, logPath))
 
-		_, err := execSSHAddrs(context.Background(), testTaskPool(t), []string{"me@remotefail-lan"}, "echo hi", nil)
+		_, err := execSSHAddrs(context.Background(), testOwned(t), []string{"me@remotefail-lan"}, "echo hi", nil)
 		if err == nil {
 			t.Fatal("execSSHAddrs succeeded, want the remote failure surfaced")
 		}
@@ -424,9 +405,9 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 		if !strings.Contains(sshErr.Stderr, "remote boom") {
 			t.Fatalf("SSHError.Stderr = %q, want it to carry the remote stderr", sshErr.Stderr)
 		}
-		var ee *worker.ExitError
+		var ee *daemonkit.ExitError
 		if !errors.As(err, &ee) {
-			t.Fatalf("error %v does not unwrap to *worker.ExitError; isConnFailure would misjudge failover", err)
+			t.Fatalf("error %v does not unwrap to *daemonkit.ExitError; isConnFailure would misjudge failover", err)
 		}
 	})
 
@@ -445,10 +426,10 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		pool := testTaskPool(t)
+		owned := testOwned(t)
 		done := make(chan error, 1)
 		go func() {
-			_, err := execSSHAddrs(ctx, pool, []string{"me@peer"}, "echo hi", nil)
+			_, err := execSSHAddrs(ctx, owned, []string{"me@peer"}, "echo hi", nil)
 			done <- err
 		}()
 		_ = waitDescendantPID(t, readyFile)
@@ -544,7 +525,7 @@ func TestExecSSHReturnsStdoutOnTerminalFailure(t *testing.T) {
 	}
 	swapSSHBin(t, path)
 
-	out, err := execSSHAddrs(context.Background(), testTaskPool(t), []string{"me@peer"}, "brew install x", nil)
+	out, err := execSSHAddrs(context.Background(), testOwned(t), []string{"me@peer"}, "brew install x", nil)
 	if err == nil {
 		t.Fatal("execSSHAddrs succeeded, want the terminal failure surfaced")
 	}

@@ -4,7 +4,6 @@ package synctransport
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,17 +14,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/wire"
+	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/rpc"
 )
 
 const (
-	closeGrace      = 3 * time.Second
-	maxStderrBytes  = 64 << 10
-	spawnPolicyName = "synckit.spawn-policy.v1\x00"
+	closeGrace     = 3 * time.Second
+	spawnBudget    = 30 * time.Second
+	maxStderrBytes = 64 << 10
 )
 
 // Response is the exact raw-result sync-service response envelope.
@@ -41,6 +39,13 @@ type Transport interface {
 	Close() error
 }
 
+// Spawner starts one long-lived owned child under a durable process-ownership
+// scope. Both *daemonkit.Owned (a CLI scope) and daemonkit.Ctx (a daemon's)
+// satisfy it.
+type Spawner interface {
+	Spawn(ctx context.Context, cmd daemonkit.Cmd, channel daemonkit.Channel, stderr io.Writer) (*daemonkit.Child, error)
+}
+
 type failedTransport struct{ err error }
 
 // Failed returns a transport that reports one construction failure.
@@ -49,16 +54,23 @@ func Failed(err error) Transport { return failedTransport{err: err} }
 func (t failedTransport) Do(context.Context, *rpc.Request) (*Response, error) { return nil, t.err }
 func (failedTransport) Close() error                                          { return nil }
 
-// Socket returns a persistent transport to one resident Unix socket.
-func Socket(socket string) Transport {
-	return &socketTransport{client: rpc.NewClient(rpc.ClientConfig{
-		Dial: wire.UnixDialer(socket), WireBuild: rpc.WireBuild,
+// Local returns a persistent transport to the resident daemon spec names. The
+// lane verifies the accepting process against spec's Trust.Serving on every
+// acquisition, so a same-UID squatter that rebound the socket never sees a
+// payload.
+func Local(spec daemonkit.Daemon) Transport {
+	client, err := daemonkit.Open(spec)
+	if err != nil {
+		return Failed(err)
+	}
+	return &localTransport{client: rpc.NewClient(rpc.ClientConfig{
+		Open: func(context.Context) (*daemonkit.Business, error) { return client.Business(), nil },
 	})}
 }
 
-type socketTransport struct{ client *rpc.Client }
+type localTransport struct{ client *rpc.Client }
 
-func (t *socketTransport) Do(ctx context.Context, request *rpc.Request) (*Response, error) {
+func (t *localTransport) Do(ctx context.Context, request *rpc.Request) (*Response, error) {
 	response, err := t.client.Call(ctx, request)
 	if err != nil {
 		return nil, err
@@ -66,20 +78,22 @@ func (t *socketTransport) Do(ctx context.Context, request *rpc.Request) (*Respon
 	return &Response{OK: response.OK, Result: response.Result, Error: response.Error}, nil
 }
 
-func (t *socketTransport) Close() error { return t.client.Close() }
+func (t *localTransport) Close() error { return t.client.Close() }
 
-// NewSpawned returns the fixed local spawned-service transport.
-func NewSpawned(manager *proc.Manager, executable, serviceID string) Transport {
-	return &spawnedTransport{manager: manager, executable: executable, serviceID: serviceID}
+// NewSpawned returns the fixed local spawned-service transport: one sealed
+// child per session, reached over the handoff socketpair daemonkit establishes
+// before the child runs its first instruction.
+func NewSpawned(spawner Spawner, executable, serviceID string) Transport {
+	return &spawnedTransport{spawner: spawner, executable: executable, serviceID: serviceID}
 }
 
 type spawnedTransport struct {
-	manager    *proc.Manager
+	spawner    Spawner
 	executable string
 	serviceID  string
 
 	mu      sync.Mutex
-	client  *rpc.SpawnedClient
+	client  *rpc.Client
 	session *spawnedProcess
 	closed  bool
 }
@@ -104,36 +118,21 @@ func (t *spawnedTransport) Do(ctx context.Context, request *rpc.Request) (*Respo
 }
 
 func (t *spawnedTransport) start(ctx context.Context) error {
-	request, err := spawnedRequest(t.executable, []string{rpc.RemoteServeCommand, t.serviceID}, true)
+	cmd, err := spawnedCommand(t.executable, []string{rpc.RemoteServeCommand, t.serviceID})
 	if err != nil {
 		return err
 	}
-	child, receipt, err := t.manager.Prepare(ctx, request)
+	cmd.Limits = rpc.SpawnLimits()
+	session, err := startSpawnedProcess(ctx, t.spawner, cmd, daemonkit.ChannelHandoff)
 	if err != nil {
-		return fmt.Errorf("syncservice: prepare local service: %w", err)
+		return fmt.Errorf("syncservice: spawn local service: %w", err)
 	}
-	stderr, err := child.TakeStderr()
-	if err != nil {
-		_ = child.Stop(context.WithoutCancel(ctx))
-		return err
-	}
-	session := newSpawnedProcess(child, stderr)
-	if err := child.Start(ctx); err != nil {
-		_ = session.close(ctx)
-		return err
-	}
-	endpoint, err := child.ClaimSpawnedSession(ctx, receipt)
-	if err != nil {
-		_ = session.close(ctx)
-		return err
-	}
-	client, err := rpc.NewSpawnedClient(ctx, endpoint)
-	if err != nil {
-		_ = session.close(ctx)
-		return err
-	}
+	t.client = rpc.NewClient(rpc.ClientConfig{
+		Open: func(openCtx context.Context) (*daemonkit.Business, error) {
+			return session.child.Business(openCtx, rpc.Contract())
+		},
+	})
 	t.session = session
-	t.client = client
 	return nil
 }
 
@@ -161,23 +160,23 @@ func (t *spawnedTransport) Close() error {
 }
 
 // NewRemote returns the sole strict SSH transport for one registered host fact.
-func NewRemote(manager *proc.Manager, fact hostregistry.SSHHostFact, knownHostsPath, serviceID string) Transport {
+func NewRemote(spawner Spawner, fact hostregistry.SSHHostFact, knownHostsPath, serviceID string) Transport {
 	return &remoteTransport{
-		manager: manager, fact: fact, knownHostsPath: knownHostsPath, serviceID: serviceID,
+		spawner: spawner, fact: fact, knownHostsPath: knownHostsPath, serviceID: serviceID,
 	}
 }
 
 type remoteTransport struct {
-	manager        *proc.Manager
+	spawner        Spawner
 	fact           hostregistry.SSHHostFact
 	knownHostsPath string
 	serviceID      string
 
-	mu     sync.Mutex
-	client *rpc.Client
-	pipe   *managedPipe
-	index  int
-	closed bool
+	mu      sync.Mutex
+	client  *rpc.Client
+	session *spawnedProcess
+	index   int
+	closed  bool
 }
 
 func (t *remoteTransport) Do(ctx context.Context, request *rpc.Request) (*Response, error) {
@@ -187,12 +186,11 @@ func (t *remoteTransport) Do(ctx context.Context, request *rpc.Request) (*Respon
 		return nil, errors.New("syncservice: remote transport closed")
 	}
 	if t.client == nil {
-		t.client = rpc.NewClient(rpc.ClientConfig{Dial: t.dial, WireBuild: rpc.WireBuild})
+		t.client = rpc.NewClient(rpc.ClientConfig{Open: t.dial})
 	}
 	response, err := t.client.Call(ctx, request)
 	if err != nil {
-		var transportErr *rpc.TransportError
-		if errors.As(err, &transportErr) && transportErr.Outcome == wire.PreSendFailure && t.index+1 < len(t.fact.Addresses) {
+		if undispatched(err) && t.index+1 < len(t.fact.Addresses) {
 			t.index++
 		}
 		_ = t.reset(ctx)
@@ -201,7 +199,22 @@ func (t *remoteTransport) Do(ctx context.Context, request *rpc.Request) (*Respon
 	return &Response{OK: response.OK, Result: response.Result, Error: response.Error}, nil
 }
 
-func (t *remoteTransport) dial(ctx context.Context) (net.Conn, error) {
+// undispatched reports whether the call provably never reached the peer's
+// dispatch, so the next address may carry it. The predicate is the client's own
+// TransportError, not daemonkit's classifier: a lane that failed to open —
+// ssh never spawned, the hello never verified — carries no daemonkit call
+// error to classify, and that unreachable-address case is the one failover
+// exists for.
+func undispatched(err error) bool {
+	var transportErr *rpc.TransportError
+	return errors.As(err, &transportErr) && transportErr.Undispatched
+}
+
+// dial opens one ssh session to the current dial address and hands its stdio
+// channel to the business lane. SSH authenticated the transport, so the lane is
+// daemonkit's named BusinessOverConn waiver: no kernel peer credentials exist
+// on a pipe to another machine.
+func (t *remoteTransport) dial(ctx context.Context) (*daemonkit.Business, error) {
 	if t.index >= len(t.fact.Addresses) {
 		return nil, errors.New("syncservice: remote host has no dial address")
 	}
@@ -209,20 +222,37 @@ func (t *remoteTransport) dial(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	pipe, err := startManagedPipe(ctx, t.manager, argv)
+	cmd, err := spawnedCommand(argv[0], argv[1:])
 	if err != nil {
 		return nil, err
 	}
-	nonce, err := rpc.NewRemoteNonce()
-	if err == nil {
-		err = rpc.VerifyRemoteHello(ctx, pipe, nonce)
-	}
+	session, err := startSpawnedProcess(ctx, t.spawner, cmd, daemonkit.ChannelStdio)
 	if err != nil {
-		closeErr := pipe.close(ctx)
-		return nil, errors.Join(err, closeErr, pipe.stderrError())
+		return nil, fmt.Errorf("syncservice: spawn %s: %w", argv[0], err)
 	}
-	t.pipe = pipe
-	return pipe, nil
+	// Conn hands the parent side of the child's stdio over for good: a failed
+	// attach leaves nobody else holding it, so this is where it closes.
+	conn, err := session.child.Conn()
+	if err != nil {
+		return nil, errors.Join(err, session.close(ctx))
+	}
+	business, err := t.attach(ctx, conn)
+	if err != nil {
+		return nil, errors.Join(err, conn.Close(), session.close(ctx), session.stderrError())
+	}
+	t.session = session
+	return business, nil
+}
+
+func (t *remoteTransport) attach(ctx context.Context, conn net.Conn) (*daemonkit.Business, error) {
+	nonce, err := rpc.NewRemoteNonce()
+	if err != nil {
+		return nil, err
+	}
+	if err := rpc.VerifyRemoteHello(ctx, conn, nonce); err != nil {
+		return nil, err
+	}
+	return daemonkit.BusinessOverConn(ctx, conn, rpc.Contract())
 }
 
 func (t *remoteTransport) reset(ctx context.Context) error {
@@ -231,9 +261,9 @@ func (t *remoteTransport) reset(ctx context.Context) error {
 		err = errors.Join(err, t.client.Close())
 		t.client = nil
 	}
-	if t.pipe != nil {
-		err = errors.Join(err, t.pipe.close(ctx))
-		t.pipe = nil
+	if t.session != nil {
+		err = errors.Join(err, t.session.close(ctx))
+		t.session = nil
 	}
 	return err
 }
@@ -248,185 +278,69 @@ func (t *remoteTransport) Close() error {
 	return t.reset(context.Background())
 }
 
+// spawnedProcess is one owned child plus the bounded stderr daemonkit drains
+// for its whole life.
 type spawnedProcess struct {
-	child  *proc.PreparedChild
-	stderr *boundedCapture
+	child  *daemonkit.Child
+	stderr *daemonkit.Capture
 	once   sync.Once
 	err    error
 }
 
-func newSpawnedProcess(child *proc.PreparedChild, stderr *os.File) *spawnedProcess {
-	return &spawnedProcess{child: child, stderr: newBoundedCapture(stderr)}
+// startSpawnedProcess spawns cmd on channel under its own session, bounding the
+// spawn — the record write, the exec-posture verification, the channel — by
+// spawnBudget rather than by the caller's whole request deadline.
+func startSpawnedProcess(
+	parent context.Context,
+	spawner Spawner,
+	cmd daemonkit.Cmd,
+	channel daemonkit.Channel,
+) (*spawnedProcess, error) {
+	ctx, cancel := context.WithTimeout(parent, spawnBudget)
+	defer cancel()
+	stderr := daemonkit.NewCapture(maxStderrBytes)
+	child, err := spawner.Spawn(ctx, cmd, channel, stderr)
+	if err != nil {
+		return nil, err
+	}
+	return &spawnedProcess{child: child, stderr: stderr}, nil
 }
 
 func (p *spawnedProcess) close(parent context.Context) error {
 	p.once.Do(func() {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), closeGrace)
 		defer cancel()
-		p.err = errors.Join(p.child.Stop(ctx), p.stderr.wait(ctx))
+		_, stopErr := p.child.Stop(ctx)
+		p.err = errors.Join(stopErr, p.child.StderrErr())
 	})
 	return p.err
 }
 
-type managedPipe struct {
-	reader *os.File
-	writer *os.File
-	spawnedProcess
-}
-
-func startManagedPipe(ctx context.Context, manager *proc.Manager, argv []string) (*managedPipe, error) {
-	if len(argv) == 0 {
-		return nil, errors.New("syncservice: empty process argv")
-	}
-	request, err := spawnedRequest(argv[0], argv[1:], false)
-	if err != nil {
-		return nil, err
-	}
-	child, _, err := manager.Prepare(ctx, request)
-	if err != nil {
-		return nil, fmt.Errorf("syncservice: prepare %s: %w", argv[0], err)
-	}
-	stdin, err := child.TakeStdin()
-	if err != nil {
-		_ = child.Stop(context.WithoutCancel(ctx))
-		return nil, err
-	}
-	stdout, err := child.TakeStdout()
-	if err != nil {
-		_ = stdin.Close()
-		_ = child.Stop(context.WithoutCancel(ctx))
-		return nil, err
-	}
-	stderr, err := child.TakeStderr()
-	if err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		_ = child.Stop(context.WithoutCancel(ctx))
-		return nil, err
-	}
-	pipe := &managedPipe{
-		reader: stdout, writer: stdin,
-		spawnedProcess: spawnedProcess{child: child, stderr: newBoundedCapture(stderr)},
-	}
-	if err := child.Start(ctx); err != nil {
-		_ = pipe.close(ctx)
-		return nil, err
-	}
-	return pipe, nil
-}
-
-func spawnedRequest(executable string, args []string, sealed bool) (proc.SpawnRequest, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return proc.SpawnRequest{}, fmt.Errorf("syncservice: resolve home: %w", err)
-	}
-	signature, err := proc.NewSignatureDigest(sha256.Sum256([]byte(spawnPolicyName + executable)))
-	if err != nil {
-		return proc.SpawnRequest{}, err
-	}
-	stdin, stdout := proc.StdioPipe, proc.StdioPipe
-	if sealed {
-		stdin, stdout = proc.StdioNull, proc.StdioNull
-	}
-	return proc.NewSpawnRequest(proc.SpawnConfig{
-		RecoveryID: "synckit.transport.v1", Executable: executable, Args: args,
-		Dir: filepath.Dir(executable), Env: []string{"HOME=" + home},
-		Stdin: stdin, Stdout: stdout, Stderr: proc.StdioPipe,
-		SpawnedSession: sealed, ExpectedSignature: &signature,
-	})
-}
-
-func (p *managedPipe) Read(buffer []byte) (int, error)  { return p.reader.Read(buffer) }
-func (p *managedPipe) Write(buffer []byte) (int, error) { return p.writer.Write(buffer) }
-
-func (p *managedPipe) Close() error {
-	return p.close(context.Background())
-}
-
-func (p *managedPipe) close(parent context.Context) error {
-	p.once.Do(func() {
-		p.err = errors.Join(p.writer.Close(), p.reader.Close())
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), closeGrace)
-		defer cancel()
-		p.err = errors.Join(p.err, p.child.Stop(ctx), p.stderr.wait(ctx))
-	})
-	return p.err
-}
-
-func (p *managedPipe) LocalAddr() net.Addr  { return pipeAddress("local") }
-func (p *managedPipe) RemoteAddr() net.Addr { return pipeAddress("child") }
-func (p *managedPipe) SetDeadline(deadline time.Time) error {
-	return errors.Join(p.reader.SetDeadline(deadline), p.writer.SetDeadline(deadline))
-}
-
-func (p *managedPipe) SetReadDeadline(deadline time.Time) error {
-	return p.reader.SetReadDeadline(deadline)
-}
-
-func (p *managedPipe) SetWriteDeadline(deadline time.Time) error {
-	return p.writer.SetWriteDeadline(deadline)
-}
-
-func (p *managedPipe) stderrError() error {
-	data, truncated := p.stderr.snapshot()
+func (p *spawnedProcess) stderrError() error {
+	data := bytes.TrimSpace(p.stderr.Bytes())
 	if len(data) == 0 {
 		return nil
 	}
 	suffix := ""
-	if truncated {
+	if p.stderr.Truncated() {
 		suffix = " (truncated)"
 	}
-	return fmt.Errorf("ssh stderr%s: %s", suffix, bytes.TrimSpace(data))
+	return fmt.Errorf("ssh stderr%s: %s", suffix, data)
 }
 
-type pipeAddress string
-
-func (pipeAddress) Network() string  { return "pipe" }
-func (a pipeAddress) String() string { return string(a) }
-
-type boundedCapture struct {
-	mu        sync.Mutex
-	buffer    bytes.Buffer
-	truncated bool
-	reader    io.ReadCloser
-	closeOnce sync.Once
-	closeErr  error
-	done      chan error
-}
-
-func newBoundedCapture(reader io.ReadCloser) *boundedCapture {
-	capture := &boundedCapture{reader: reader, done: make(chan error, 1)}
-	go func() {
-		limited := &io.LimitedReader{R: reader, N: maxStderrBytes + 1}
-		capture.mu.Lock()
-		_, firstErr := io.Copy(&capture.buffer, limited)
-		if capture.buffer.Len() > maxStderrBytes {
-			capture.buffer.Truncate(maxStderrBytes)
-			capture.truncated = true
-		}
-		capture.mu.Unlock()
-		_, drainErr := io.Copy(io.Discard, reader)
-		capture.done <- errors.Join(firstErr, drainErr, capture.closeReader())
-	}()
-	return capture
-}
-
-func (c *boundedCapture) wait(ctx context.Context) error {
-	select {
-	case err := <-c.done:
-		return err
-	case <-ctx.Done():
-		return errors.Join(ctx.Err(), c.closeReader(), <-c.done)
+// spawnedCommand is the exact command shape every synckit child runs: its own
+// session, a sealed environment carrying only HOME, and the same-user exec
+// posture stated at the spawn site.
+func spawnedCommand(executable string, args []string) (daemonkit.Cmd, error) {
+	if executable == "" {
+		return daemonkit.Cmd{}, errors.New("syncservice: empty process argv")
 	}
-}
-
-func (c *boundedCapture) closeReader() error {
-	c.closeOnce.Do(func() { c.closeErr = c.reader.Close() })
-	return c.closeErr
-}
-
-func (c *boundedCapture) snapshot() ([]byte, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return bytes.Clone(c.buffer.Bytes()), c.truncated
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return daemonkit.Cmd{}, fmt.Errorf("syncservice: resolve home: %w", err)
+	}
+	return daemonkit.Cmd{
+		Path: executable, Args: args, Dir: filepath.Dir(executable),
+		Env: []string{"HOME=" + home}, Session: true, Exec: daemonkit.ServingSameUser(),
+	}, nil
 }

@@ -6,8 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yasyf/daemonkit/worker"
-
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/watch"
 )
@@ -58,7 +56,7 @@ func newBreakerNotifier(
 	ctx context.Context,
 	inner watch.Notifier[string],
 	name, self string,
-	runner *worker.Pool,
+	runner hostregistry.Commander,
 ) *breakerNotifier {
 	return &breakerNotifier{
 		inner:     inner,
@@ -157,7 +155,7 @@ func (b *breakerNotifier) closed(peer string) {
 // tailscaleSnapshot logs a one-line tailnet view of peer the first time its breaker
 // opens, to make the next unreachable-peer storm diagnosable. It never affects sync
 // behavior: an unreachable or unparseable tailscale degrades to a single info line.
-func tailscaleSnapshot(ctx context.Context, runner *worker.Pool, peer string) {
+func tailscaleSnapshot(ctx context.Context, runner hostregistry.Commander, peer string) {
 	ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 	defer cancel()
 	line, err := hostregistry.TailscalePeerStatus(ctx, hostregistry.NewExecRunner(runner), peer)

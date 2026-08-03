@@ -6,6 +6,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-08-03
+
+### Changed
+
+- Pin daemonkit v0.21.2. Synckit composes the single root `daemonkit` package —
+  `Serve`, `Open`, `Ctx`, `Owned`, `Cmd` — instead of the `daemon`, `proc`,
+  `worker`, `wire`, and `service` packages v0.20 exposed.
+- `helperruntime.Config` is reshaped: `Socket`, `Workers`, `Children`, and
+  `StopStore` are gone; `Program daemonkit.Program` and `MaxFrame daemonkit.Bytes`
+  are new; `Prepare` takes a `daemonkit.Ctx` in place of a `daemon.Activation`;
+  and `App.RuntimeBuild` is deleted. The new `helperruntime.Spec` derives a
+  helper's socket, lock, state dir, and launchd job from its label alone, so
+  neither end declares a path.
+- `hostregistry.NewExecRunner` accepts the new `hostregistry.Commander` interface
+  (`Run(context.Context, daemonkit.Cmd) (daemonkit.RunResult, error)`) in place
+  of `*worker.Pool`; both `*daemonkit.Owned` and `daemonkit.Ctx` satisfy it. Each
+  command now bounds its own run at 12 minutes and its output at 16 MiB.
+- `rpc.MaxFrame` is now the frame size that still carries a 16 MiB body after
+  base64 expansion and envelope reserve; the body ceiling itself is the new
+  `rpc.MaxPayload`.
+- Consumer helper LaunchAgents no longer carry `LimitLoadToSessionType` or
+  `ProcessType`. A manifest's `helper.session_type` is still accepted and
+  validated but no longer reaches the plist — daemonkit v0.21's launchd model has
+  no successor field.
+- `synckitd install` records the labels it converged in
+  `<mesh>/installed-agents.json` and sweeps the ones a later run no longer plans,
+  since v0.21's launchd keeps no state of its own. `synckitd uninstall` now also
+  deletes the programs it staged under `<mesh>/bin`, and neither verb aborts on a
+  single unreadable manifest.
+- Adding a peer refuses a non-macOS host by kernel name before any brew command
+  runs, instead of misreporting Linuxbrew's refusal as an unpublished formula.
+- A manifest that fails to load no longer fails the scan. `manifest.Discover`
+  skips it, logs the path and the offending field, and returns every manifest
+  that did load alongside a `[]manifest.Skipped` naming the ones it did not, so
+  one consumer's stale file cannot stop the rest of the mesh from converging —
+  and `synckitd install` leaves a skipped consumer's agents in place, sweeping
+  only agents whose manifest is absent rather than unloadable. `synckitd status`
+  lists each
+  skipped consumer with the reason. An unreadable manifests directory, and two
+  files claiming the same service, stay fatal.
+
+### Removed
+
+- `rpc.SpawnedClient` and `rpc.NewSpawnedClient`. A spawned service is served over
+  daemonkit's handoff socketpair; `rpc.Contract` and `rpc.SpawnLimits` state the
+  session both ends adopt.
+- The `synckit.rpc.runtime.health` operation, with `rpc.RuntimeHealth`,
+  `rpc.EncodeRuntimeHealth`, and `rpc.RuntimeHealthOp`. Process liveness is
+  daemonkit's to report.
+- `manifest.ServiceSpec.Socket`. A resident service derives its socket from the
+  helper's launchd label. The manifest decoder rejects unknown fields, so every
+  manifest still carrying a `service.socket` key fails to load and must be
+  regenerated — re-run each tool's own install command after upgrading.
+
+### Migration
+
+- **Every consumer must re-register its manifest.** `manifest.ServiceSpec`
+  rejects unknown fields, and this release deletes `service.socket`, so a
+  manifest written by an older synckit no longer loads. Nothing breaks while you
+  get to it: the skipped consumer's helper keeps running under the registration
+  it already has, `synckitd install` leaves its agents alone, and every other
+  consumer converges normally. What the consumer does not get is new
+  configuration, because synckit can no longer read what it asked for. Re-run
+  each tool's own install command (`reposync install`, `cookiesync install`,
+  `cc-pool install`, …), then `synckitd install`. `synckitd status` lists what
+  loaded and what was skipped, with the offending field for each.
+- The wire build is now
+  `com.yasyf.synckit.rpc/4d9aa242cd68e09b6516b1f31361cc9f2496e5ac1028a9910788fe90773578e2/v1`
+  (was `.../80574f71afde89fd7be498f813094104a6042dc04fd35bf8e2320de41ebac71c/v1`),
+  because the runtime-health operation left the schema. A v0.36 peer is refused at
+  handshake, so every node in a mesh upgrades together.
+
 ## [0.36.4] - 2026-07-27
 
 ### Fixed
@@ -350,7 +422,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.36.4...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.37.0...HEAD
+[0.37.0]: https://github.com/yasyf/synckit/compare/v0.36.4...v0.37.0
 [0.36.4]: https://github.com/yasyf/synckit/compare/v0.36.3...v0.36.4
 [0.36.3]: https://github.com/yasyf/synckit/compare/v0.36.2...v0.36.3
 [0.36.2]: https://github.com/yasyf/synckit/compare/v0.36.1...v0.36.2

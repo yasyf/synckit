@@ -31,6 +31,7 @@ func TestAddHostStepSequence(t *testing.T) {
 	stubLocalNodes(t)
 
 	mock := hostregistry.NewMockRunner().
+		OnSSH("uname -s", "Darwin\n", nil).
 		OnSSH("command -v synckitd", "/opt/homebrew/bin/synckitd", nil).
 		OnSSH("command -v cookiesync", "", nil). // consumer not installed
 		OnSSH("brew install yasyf/tap/cookiesync", "", nil).
@@ -66,6 +67,7 @@ func TestAddHostStepSequence(t *testing.T) {
 	// inverse-register, reconcile, install.
 	cmds := mock.SSHCmds("peer@node")
 	wantContains := []string{
+		"uname -s",
 		"command -v synckitd",
 		"command -v cookiesync",
 		"brew install yasyf/tap/cookiesync",
@@ -103,6 +105,7 @@ func TestAddHostConsumerAlreadyInstalled(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	stubLocalNodes(t)
 	mock := hostregistry.NewMockRunner().
+		OnSSH("uname -s", "Darwin\n", nil).
 		OnSSH("command -v synckitd", "/opt/homebrew/bin/synckitd", nil).
 		OnSSH("command -v cookiesync", "/opt/homebrew/bin/cookiesync", nil).
 		DefaultSSH("", nil)
@@ -142,6 +145,28 @@ func TestAddHostRecordsBonjourLocalAddr(t *testing.T) {
 	want := []string{"peer@node.local", "peer@node.tail.ts.net"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("DialAddrs = %v, want %v (LAN .local first, tailnet last)", got, want)
+	}
+}
+
+// TestAddHostRefusesANonMacPeer proves the OS probe runs before anything is
+// installed: synckit's formulae are macOS-only, and Linuxbrew's refusal reaches
+// remoteBrewInstall wearing the missing-formula wording, which would report an
+// unsupported platform as an unpublished release.
+func TestAddHostRefusesANonMacPeer(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	stubLocalNodes(t)
+	mock := hostregistry.NewMockRunner().
+		OnSSH("uname -s", "Linux\n", nil).
+		DefaultSSH("", nil)
+
+	err := AddHost(context.Background(), mock, nil, "peer@node", "me@self", false, nil)
+	if err == nil || !strings.Contains(err.Error(), "not macOS") {
+		t.Fatalf("AddHost error = %v, want a legible non-macOS refusal", err)
+	}
+	for _, c := range mock.SSHCmdsAll() {
+		if strings.Contains(c, "brew") {
+			t.Errorf("brew ran on a non-macOS peer: %q", c)
+		}
 	}
 }
 

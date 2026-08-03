@@ -12,7 +12,7 @@ import (
 	"os"
 	"slices"
 
-	"github.com/yasyf/daemonkit/daemon"
+	"github.com/yasyf/daemonkit/durable"
 )
 
 // StateSchemaVersion is the only persisted state version accepted.
@@ -191,7 +191,7 @@ func (c Config) writeEnvelope(env stateEnvelope) error {
 	if err != nil {
 		return err
 	}
-	return daemon.WriteFileDurable(path, append(data, '\n'), 0o600)
+	return durable.WriteFile(path, append(data, '\n'), 0o600)
 }
 
 func (c Config) validateContract() error {

@@ -5,8 +5,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/worker"
+	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
@@ -19,8 +18,8 @@ func newReconcileCmd() *cobra.Command {
 		Short: "Run one convergent reconcile pass for every registered consumer.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return withCLIProcessOwner(cmd.Context(), func(_ *worker.Pool, children *proc.Manager) error {
-				results, err := reconcileAll(cmd.Context(), children)
+			return withCLIProcessScope(cmd.Context(), func(owned *daemonkit.Owned) error {
+				results, err := reconcileAll(cmd.Context(), owned)
 				if err != nil {
 					return err
 				}
@@ -48,7 +47,7 @@ type reconcileResult struct {
 // reconcile over its local sync service — convergence happens in the consumer,
 // which pull-merges its peers from the mesh internally. A per-consumer failure
 // is captured in its result, never aborting the others.
-func reconcileAll(ctx context.Context, children *proc.Manager) ([]reconcileResult, error) {
+func reconcileAll(ctx context.Context, scope processScope) ([]reconcileResult, error) {
 	reg, err := hostregistry.Mesh.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load mesh: %w", err)
@@ -64,7 +63,7 @@ func reconcileAll(ctx context.Context, children *proc.Manager) ([]reconcileResul
 	delivery := newDeliveryStore(directory)
 	results := make([]reconcileResult, 0, len(manifests))
 	for _, m := range manifests {
-		results = append(results, reconcileOne(ctx, children, m, reg, delivery))
+		results = append(results, reconcileOne(ctx, scope, m, reg, delivery))
 	}
 	return results, nil
 }
@@ -74,18 +73,18 @@ func reconcileAll(ctx context.Context, children *proc.Manager) ([]reconcileResul
 // per-consumer fault never aborts the others.
 func reconcileOne(
 	ctx context.Context,
-	children *proc.Manager,
+	scope processScope,
 	m manifest.Manifest,
 	registry *hostregistry.Registry,
 	delivery *deliveryStore,
 ) reconcileResult {
-	c := syncservice.NewClient(dialTransport(children, m, registry.Self, registry.Self))
+	c := syncservice.NewClient(dialTransport(scope, m, registry.Self, registry.Self))
 	defer func() { _ = c.Close() }()
 
 	if _, err := c.Reconcile(ctx, ""); err != nil {
 		return reconcileResult{Name: m.Name, Err: err.Error()}
 	}
-	notifier := manifestNotifier{local: c, m: m, self: registry.Self, children: children, delivery: delivery}
+	notifier := manifestNotifier{local: c, m: m, self: registry.Self, scope: scope, delivery: delivery}
 	for _, peer := range registry.Hosts {
 		if err := notifier.Notify(ctx, peer, ""); err != nil {
 			return reconcileResult{Name: m.Name, Err: err.Error()}

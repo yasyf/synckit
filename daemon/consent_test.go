@@ -15,8 +15,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/yasyf/daemonkit/worker"
-
 	"github.com/yasyf/synckit/consent"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/internal/rpctest"
@@ -47,7 +45,8 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // relayMaxRequest bytes, so an oversize stdin request is truncated without touching the
 // bytes past the cap. Valid JSON in those first bytes still forwards.
 func TestConsentRelayReadCapsAtRequestLimit(t *testing.T) {
-	shortConfigHome(t) // socket resolves, no daemon bound: callDaemon fails, not the read
+	shortConfigHome(t)
+	shortDaemonHome(t)
 
 	obj := []byte(`{"origin":"host"}`)
 	pad := bytes.Repeat([]byte(" "), relayMaxRequest-len(obj)) // whitespace keeps the JSON valid
@@ -73,6 +72,7 @@ func TestConsentRelayReadCapsAtRequestLimit(t *testing.T) {
 // double prompt.
 func TestConsentRelayOversizeDegradesNotRejects(t *testing.T) {
 	shortConfigHome(t)
+	shortDaemonHome(t)
 
 	oversize := slices.Concat([]byte(`{"origin":"`), bytes.Repeat([]byte("a"), relayMaxRequest))
 	var out bytes.Buffer
@@ -159,9 +159,8 @@ func attendedSnapshot(t *testing.T) presence.SessionSnapshot {
 	return presence.SessionSnapshot{OnConsole: true, ConsoleUser: currentUser(t)}
 }
 
-// shortConfigHome points hostregistry.Mesh at a fresh, short config dir. A short
-// base, not t.TempDir(): Mesh.SockPath() must fit the 104-byte sockaddr_un limit,
-// which the deep t.TempDir() path would overflow.
+// shortConfigHome points hostregistry.Mesh at a fresh, short config dir and
+// initializes its state.
 func shortConfigHome(t *testing.T) {
 	t.Helper()
 	base, err := os.MkdirTemp("", "sk")
@@ -183,13 +182,10 @@ func shortConfigHome(t *testing.T) {
 func serveConsentEngine(t *testing.T, engine *consent.Engine) {
 	t.Helper()
 	shortConfigHome(t)
-	sock, err := hostregistry.Mesh.SockPath()
-	if err != nil {
-		t.Fatalf("sockpath: %v", err)
-	}
+	shortDaemonHome(t)
 	d := rpc.NewDispatcher()
 	consent.Register(d, engine)
-	server, err := rpctest.Start(t.Context(), sock, filepath.Dir(sock), d)
+	server, err := rpctest.Start(t.Context(), serveLabel, d)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
 	}
@@ -344,7 +340,8 @@ func TestConsentRelayCLINeverRoutesOnward(t *testing.T) {
 // unreachable daemon and a malformed request both resolve to an unavailable
 // reply with a nil error, so synckit's exit-255 ssh failover never double-prompts.
 func TestConsentRelayCLINeverExits255(t *testing.T) {
-	shortConfigHome(t) // point at a config dir whose socket has no daemon bound
+	shortConfigHome(t)
+	shortDaemonHome(t)
 
 	tests := []struct {
 		name  string
@@ -402,7 +399,7 @@ func TestConsentPresenceCLIPrintsWireSnapshot(t *testing.T) {
 func TestConsentDispatchesUnderParkedExclusive(t *testing.T) {
 	orig := buildConsentEngine
 	t.Cleanup(func() { buildConsentEngine = orig })
-	buildConsentEngine = func(*worker.Pool) *consent.Engine {
+	buildConsentEngine = func(hostregistry.Commander) *consent.Engine {
 		return consent.NewEngine(staticSelf("me@self"), &fakeGate{}, staticProbe(presence.SessionSnapshot{}),
 			consent.NewRouter(&recordingRunner{}, consent.PresenceCommand), staticResolve())
 	}
@@ -415,7 +412,7 @@ func TestConsentDispatchesUnderParkedExclusive(t *testing.T) {
 		<-release
 		return nil, nil
 	})
-	registerConsent(d, testDaemonPool(t.Context(), t))
+	registerConsent(d, testProcessScope(t))
 
 	go d.Dispatch(context.Background(), &rpc.Request{Method: "reconcile"})
 	<-entered

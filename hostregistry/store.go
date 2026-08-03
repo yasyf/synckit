@@ -20,8 +20,7 @@ import (
 	"path/filepath"
 	"time"
 
-	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/durable"
 )
 
 const (
@@ -32,10 +31,10 @@ const (
 )
 
 // ErrLockBusy is returned when the reconcile lock is held past the caller's deadline.
-// It aliases proc.ErrLockBusy so it is one sentinel across the daemonkit boundary;
+// It aliases durable.ErrLockBusy so it is one sentinel across the daemonkit boundary;
 // downstream tools alias it in turn (var ErrLockBusy = hostregistry.ErrLockBusy) and
 // match with errors.Is.
-var ErrLockBusy = proc.ErrLockBusy
+var ErrLockBusy = durable.ErrLockBusy
 
 // Config names the owning tool, which selects its per-tool config directory and
 // the verify/install probes. The host-registry methods that read or write
@@ -124,7 +123,7 @@ func (c Config) RefreshKnownHosts() error {
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 		return fmt.Errorf("create Synckit state directory: %w", err)
 	}
-	if err := dkdaemon.WriteFileDurable(destination, data, 0o600); err != nil {
+	if err := durable.WriteFile(destination, data, 0o600); err != nil {
 		return fmt.Errorf("write Synckit known_hosts: %w", err)
 	}
 	return ValidateKnownHosts(destination)
@@ -142,11 +141,9 @@ func (c Config) WithLock(ctx context.Context, fn func() error) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create state dir %s: %w", dir, err)
 	}
-	lock, err := (proc.FileLockSpec{
-		Path:     filepath.Join(dir, lockFile),
-		Mode:     proc.FileLockExclusive,
-		Deadline: lockDeadline,
-	}).Acquire(ctx)
+	lockCtx, cancel := context.WithTimeout(ctx, lockDeadline)
+	defer cancel()
+	lock, err := durable.AcquireLock(lockCtx, filepath.Join(dir, lockFile))
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrLockBusy, err)
 	}

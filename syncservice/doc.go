@@ -4,10 +4,10 @@
 // [rpc.Dispatcher] via [RegisterConsumer].
 //
 // A [Client] is the typed caller. It speaks the same wire over a [Transport].
-// [Socket] reaches a resident Unix socket. Synckit's daemon alone constructs
-// spawned and remote transports under its daemonkit process manager. The client
-// decodes each method's result into its Go type, so callers never touch the raw
-// envelope.
+// [Resident] reaches a resident helper over the socket its launchd label
+// derives. Synckit's daemon alone constructs spawned and remote transports
+// under its daemonkit process scope. The client decodes each method's result
+// into its Go type, so callers never touch the raw envelope.
 //
 // Exported payloads stay opaque, bounded, and digest-bound. Revisions use canonical
 // decimal strings, and payload bytes use base64 in the JSON envelope, so product

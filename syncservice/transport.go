@@ -1,8 +1,19 @@
 package syncservice
 
 import (
+	"github.com/yasyf/daemonkit"
+
+	"github.com/yasyf/synckit/helperruntime"
 	"github.com/yasyf/synckit/internal/synctransport"
 )
 
-// Socket returns a persistent transport to the resident Unix socket.
-func Socket(sock string) Transport { return synctransport.Socket(sock) }
+// Resident returns a persistent transport to the resident helper serving name.
+// The socket derives from that helper's launchd label, so no caller declares a
+// path and none can disagree with the one the helper binds.
+func Resident(name string) Transport {
+	spec, err := helperruntime.Spec(name, daemonkit.Program{}, 0)
+	if err != nil {
+		return synctransport.Failed(err)
+	}
+	return synctransport.Local(spec)
+}

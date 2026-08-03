@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yasyf/daemonkit/worker"
+	"github.com/yasyf/daemonkit"
 )
 
 // sshConnFailureExit is the exit status ssh returns for its own connection failures;
@@ -80,7 +80,7 @@ func brewWrap(remoteCmd string) string {
 // to the caller's ctx deadline — only the caller knows how long its command should take.
 // Every failing attempt surfaces as a [*SSHError] naming the dial address, its captured
 // stderr, and the unwrappable typed exit cause.
-func ExecSSH(ctx context.Context, runner *worker.Pool, target, remoteCmd string, stdin []byte) (string, error) {
+func ExecSSH(ctx context.Context, runner Commander, target, remoteCmd string, stdin []byte) (string, error) {
 	addrs, err := DialAddrs(target)
 	if err != nil {
 		return "", err
@@ -90,7 +90,7 @@ func ExecSSH(ctx context.Context, runner *worker.Pool, target, remoteCmd string,
 
 // ExecBootstrapSSH runs one explicit user@host provisioning command before a
 // host fact exists. It never participates in runtime service transport.
-func ExecBootstrapSSH(ctx context.Context, runner *worker.Pool, target, remoteCmd string, stdin []byte) (string, error) {
+func ExecBootstrapSSH(ctx context.Context, runner Commander, target, remoteCmd string, stdin []byte) (string, error) {
 	if _, _, err := splitSSHIdentity(target); err != nil {
 		return "", err
 	}
@@ -105,7 +105,7 @@ func ExecBootstrapSSH(ctx context.Context, runner *worker.Pool, target, remoteCm
 // remoteBrewInstall can read brew's "no available formula" message off stdout.
 func execSSHAddrs(
 	ctx context.Context,
-	runner *worker.Pool,
+	runner Commander,
 	addrs []string,
 	remoteCmd string,
 	stdin []byte,
@@ -133,13 +133,16 @@ func execSSHAddrs(
 // [*SSHError].
 func execSSHOnce(
 	ctx context.Context,
-	runner *worker.Pool,
+	runner Commander,
 	addr, remoteCmd string,
 	stdin []byte,
 ) (string, error) {
 	args := append(append([]string{}, dialOpts...), addr, brewWrap(remoteCmd))
-	result, err := runner.Run(ctx, worker.CommandRequest{
-		Path: sshBin, Args: args, Dir: filepath.Dir(sshBin), Stdin: stdin, TotalTimeout: 12 * time.Minute,
+	runCtx, cancel := context.WithTimeout(ctx, maxCommandRun)
+	defer cancel()
+	result, err := runner.Run(runCtx, daemonkit.Cmd{
+		Path: sshBin, Args: args, Dir: filepath.Dir(sshBin), Stdin: stdin,
+		Exec: daemonkit.ServingSameUser(), MaxOutput: maxCommandOutput,
 	})
 	if err != nil {
 		return string(result.Stdout), &SSHError{Addr: addr, Stderr: string(result.Stderr), Err: err}
@@ -151,9 +154,9 @@ func execSSHOnce(
 // only failure ExecSSH fails over on. A remote command's exit code (0-254) or a signal
 // kill is not a connection failure.
 func isConnFailure(err error) bool {
-	var exit *worker.ExitError
+	var exit *daemonkit.ExitError
 	if errors.As(err, &exit) {
-		return exit.ExitCode == sshConnFailureExit
+		return exit.Exit.Code == sshConnFailureExit
 	}
 	return false
 }

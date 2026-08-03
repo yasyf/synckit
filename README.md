@@ -13,8 +13,9 @@ go get github.com/yasyf/synckit
 ```
 
 A persistent RPC suite with exact build admission, same-UID trust, multiplexing,
-and bounded 16 MiB frames is already wired. Register product methods, then pass
-the dispatcher and exact daemonkit process owners to `helperruntime.New`:
+and bounded 16 MiB payloads is already wired. Register product methods, then pass
+the dispatcher, daemonkit program, and product preparation callback to
+`helperruntime.New`:
 
 ```go
 package main
@@ -38,9 +39,12 @@ Driving with an agent? Paste this:
 
 ```text
 Run `go get github.com/yasyf/synckit`, then use its rpc package to stand up a
-unix-socket server: register handlers on `rpc.NewDispatcher`, compose
-the dispatcher with `helperruntime.New`, and call it through a persistent
-`rpc.NewClient` using `rpc.WireBuild`. Listener ownership, publication admission,
+unix-socket server: register handlers on `rpc.NewDispatcher` and compose the
+dispatcher with `helperruntime.New`, whose `helperruntime.Spec` derives the
+socket from the helper's launchd label. Call it from another process with
+`syncservice.Resident(name)`, or open that same spec yourself —
+`daemonkit.Open(spec)`, then `rpc.NewClient(rpc.ClientConfig{Open: ...})` over
+the client's `Business` lane. Listener ownership, publication admission,
 readiness, trust, and bounded framing stay in daemonkit.
 ```
 
@@ -57,11 +61,12 @@ brew install yasyf/tap/synckitd
 synckitd register manifest.json
 ```
 
-`synckitd` installs the manifest under `~/.config/synckit/manifests` and drives your tool's typed sync service — list, reconcile, sync — through either a resident Unix socket or a receipt-authenticated local spawned session. Remote calls use Synckit's fixed `rpc-serve-v1` command over strict host-key-pinned SSH. The daemon never imports your code.
+`synckitd` installs the manifest under `~/.config/synckit/manifests` and drives your tool's typed sync service — list, reconcile, sync — through either a resident Unix socket or a socketpair-confined local spawned session. Remote calls use Synckit's fixed `rpc-serve-v1` command over strict host-key-pinned SSH. The daemon never imports your code.
 
-Process-backed transports are private to `synckitd` and owned by one daemonkit
-process manager. Resident socket helpers use `helperruntime.New`, supplying exact
-worker and child owners plus one product preparation callback.
+Process-backed transports are private to `synckitd` and run within a daemonkit
+`Ctx` or `Owned` scope. Resident socket helpers use `helperruntime.New` with their
+daemonkit `Program`, dispatcher, frame limit, and a preparation callback that
+receives the `Ctx`.
 
 ### Watch files without chasing your own writes
 
@@ -104,6 +109,6 @@ reposync and cookiesync import this one substrate, so the wire formats, lock sem
 
 ## The synckitd daemon
 
-`synckitd` is the one per-machine daemon behind every consumer: it owns the shared host mesh, the RPC socket, the reconcile tick, and the watch supervisor. `synckitd status` prints the mesh, registered manifests, socket path, and daemon liveness; `synckitd --help` carries the full command surface.
+`synckitd` is the one per-machine daemon behind every consumer: it owns the shared host mesh, the RPC socket, the reconcile tick, and the watch supervisor. `synckitd status` prints the mesh, registered manifests, the label-derived socket paths, and daemon liveness; `synckitd --help` carries the full command surface.
 
 Status: pre-1.0 — the API still moves between minors. Licensed under [PolyForm Noncommercial 1.0.0](LICENSE).

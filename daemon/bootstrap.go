@@ -65,6 +65,9 @@ func AddHost(ctx context.Context, r hostregistry.Runner, manifests []manifest.Ma
 		}
 		step("no-recurse: skipping remote install and reconciliation")
 	} else {
+		if err := requireDarwinPeer(ctx, r, target); err != nil {
+			return err
+		}
 		var err error
 		daemonPath, err = ensureRemoteDaemon(ctx, r, target, step)
 		if err != nil {
@@ -128,6 +131,23 @@ func discoverLANAddresses(ctx context.Context, target, self string) []string {
 			continue
 		}
 		return []string{hostregistry.LocalTarget(target)}
+	}
+	return nil
+}
+
+// requireDarwinPeer refuses a peer that is not a Mac before anything is
+// installed on it. synckitd and every consumer binary the bootstrap pulls are
+// macOS-only, and these are plain formulae rather than casks, so Linuxbrew
+// refuses them with brew's own "no available formula" wording — which
+// remoteBrewInstall reads as an unpublished release and reports as one. The
+// probe turns that misdirection into the actual reason.
+func requireDarwinPeer(ctx context.Context, r hostregistry.Runner, target string) error {
+	out, err := r.SSH(ctx, target, "uname -s")
+	if err != nil {
+		return fmt.Errorf("probe peer OS on %s: %w", target, err)
+	}
+	if kernel := strings.TrimSpace(out); kernel != "Darwin" {
+		return fmt.Errorf("peer %s reports kernel %q, not macOS: synckit bootstraps macOS peers only", target, kernel)
 	}
 	return nil
 }

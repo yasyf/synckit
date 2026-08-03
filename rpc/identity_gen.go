@@ -3,8 +3,8 @@
 package rpc
 
 const Version uint16 = 1
-const SchemaFingerprint = "80574f71afde89fd7be498f813094104a6042dc04fd35bf8e2320de41ebac71c"
-const WireBuild = "com.yasyf.synckit.rpc/80574f71afde89fd7be498f813094104a6042dc04fd35bf8e2320de41ebac71c/v1"
+const SchemaFingerprint = "4d9aa242cd68e09b6516b1f31361cc9f2496e5ac1028a9910788fe90773578e2"
+const WireBuild = "com.yasyf.synckit.rpc/4d9aa242cd68e09b6516b1f31361cc9f2496e5ac1028a9910788fe90773578e2/v1"
 const RemoteExecutableName = "synckitd"
 const RemoteServeCommand = "rpc-serve-v1"
 const RemoteHelloNonceBytes = 32

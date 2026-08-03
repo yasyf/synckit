@@ -12,13 +12,15 @@ import (
 	"slices"
 	"time"
 
-	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/durable"
 
 	"github.com/yasyf/synckit/syncservice"
 )
 
-const deliveryStateIdentity = "synckit-delivery-v1"
+const (
+	deliveryStateIdentity = "synckit-delivery-v1"
+	deliveryLockDeadline  = 30 * time.Second
+)
 
 type deliveryRecord struct {
 	ServiceID string                      `json:"service_id"`
@@ -104,7 +106,9 @@ func (s *deliveryStore) withState(ctx context.Context, write bool, apply func(*d
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
-	lock, err := (proc.FileLockSpec{Path: s.lock, Mode: proc.FileLockExclusive, Deadline: 30 * time.Second}).Acquire(ctx)
+	lockCtx, cancel := context.WithTimeout(ctx, deliveryLockDeadline)
+	defer cancel()
+	lock, err := durable.AcquireLock(lockCtx, s.lock)
 	if err != nil {
 		return err
 	}
@@ -129,7 +133,7 @@ func (s *deliveryStore) withState(ctx context.Context, write bool, apply func(*d
 	if err != nil {
 		return err
 	}
-	return dkdaemon.WriteFileDurable(s.path, append(raw, '\n'), 0o600)
+	return durable.WriteFile(s.path, append(raw, '\n'), 0o600)
 }
 
 func readDeliveryState(path string) (*deliveryState, error) {

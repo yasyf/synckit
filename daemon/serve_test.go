@@ -10,66 +10,45 @@ import (
 	"testing"
 	"time"
 
-	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/wire"
-
 	"github.com/yasyf/synckit/codec"
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/internal/rpctest"
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 )
 
-func TestRuntimeOwnershipUsesExactSuite(t *testing.T) {
-	dispatcher := rpc.NewDispatcher()
-	server := rpc.NewServer(func(dkdaemon.Publication) (*rpc.Dispatcher, error) { return dispatcher, nil })
-	if server.Wire.WireBuild != rpc.WireBuild {
-		t.Fatalf("wire build = %q, want %q", server.Wire.WireBuild, rpc.WireBuild)
-	}
-}
-
-func TestServePublishesReleaseBuildAfterActivation(t *testing.T) {
+func TestServeAdmitsBusinessAfterActivation(t *testing.T) {
 	shortConfigHome(t)
-	sock, err := hostregistry.Mesh.SockPath()
-	if err != nil {
-		t.Fatalf("socket path: %v", err)
-	}
+	shortDaemonHome(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
-	const build = "v9.8.7-test"
-	go func() { served <- serve(ctx, build) }()
+	go func() { served <- serve(ctx) }()
 
-	client := rpc.NewClient(rpc.ClientConfig{Dial: wire.UnixDialer(sock), WireBuild: rpc.WireBuild})
+	client, err := daemonClient()
+	if err != nil {
+		cancel()
+		t.Fatalf("daemon client: %v", err)
+	}
 	t.Cleanup(func() { _ = client.Close() })
-	deadline := time.Now().Add(5 * time.Second)
-	var health rpc.RuntimeHealth
-	for {
-		probeCtx, probeCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		health, err = client.RuntimeHealth(probeCtx)
-		probeCancel()
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			cancel()
-			t.Fatalf("daemon did not publish lifecycle readiness: %v", err)
-		}
-		time.Sleep(10 * time.Millisecond)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer readyCancel()
+	if err := rpctest.WaitReady(readyCtx, client); err != nil {
+		cancel()
+		t.Fatalf("daemon never admitted business: %v", err)
 	}
-	if health.RuntimeBuild != build || health.RuntimeProtocol != int(rpc.Version) ||
-		health.State != string(dkdaemon.StateHealthy) || !health.Ready || health.ProcessGeneration == "" {
-		t.Fatalf("health = %+v", health)
-	}
+
 	dir, err := manifestsDir()
 	if err != nil {
 		t.Fatalf("manifests dir: %v", err)
 	}
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		cancel()
 		t.Fatalf("activation did not create manifests dir: info=%v err=%v", info, err)
 	}
-	status, err := client.Call(t.Context(), &rpc.Request{Method: "status"})
+	status, err := client.Call(readyCtx, &rpc.Request{Method: "status"})
 	if err != nil || !status.OK {
+		cancel()
 		t.Fatalf("admitted status request = %+v, err=%v", status, err)
 	}
 
@@ -80,7 +59,7 @@ func TestServePublishesReleaseBuildAfterActivation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("serve: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("serve did not settle after cancellation")
 	}
 }
@@ -208,7 +187,7 @@ func serveFake(t *testing.T, fake *fakeConsumer) syncservice.Transport {
 func fakeMesh(t *testing.T, byPeer map[string]*fakeConsumer) {
 	t.Helper()
 	prev := dialTransport
-	dialTransport = func(_ *proc.Manager, _ manifest.Manifest, peer, _ string) syncservice.Transport {
+	dialTransport = func(_ processScope, _ manifest.Manifest, peer, _ string) syncservice.Transport {
 		fake, ok := byPeer[peer]
 		if !ok {
 			t.Fatalf("dialTransport: no fake consumer for peer %q", peer)
@@ -227,7 +206,6 @@ func testManifest() manifest.Manifest {
 		},
 		Service: manifest.ServiceSpec{
 			Kind:              "resident",
-			Socket:            "/tmp/stub.sock",
 			SchemaFingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		},
 	}
@@ -441,14 +419,12 @@ func TestEngineEventDrivesLocalSync(t *testing.T) {
 	fakeMesh(t, map[string]*fakeConsumer{"me@self": fake})
 
 	local := syncservice.NewClient(serveFake(t, fake))
-	workers, children := testDaemonOwner(t.Context(), t)
 	eng := buildEngine(
 		context.Background(),
 		local,
 		testManifest(),
 		&hostregistry.Registry{Self: "me@self"},
-		workers,
-		children,
+		testProcessScope(t),
 		newDeliveryStore(t.TempDir()),
 	)
 
@@ -478,6 +454,7 @@ func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(cfgHome) })
 	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	shortDaemonHome(t)
 	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +484,7 @@ func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
-	go func() { served <- serve(ctx, "v1.0.0-test") }()
+	go func() { served <- serve(ctx) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -515,16 +492,12 @@ func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
 			if err != nil {
 				t.Errorf("serve: %v", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(60 * time.Second):
 			t.Error("serve did not stop after ctx cancel")
 		}
 	})
 
-	sock, err := hostregistry.Mesh.SockPath()
-	if err != nil {
-		t.Fatalf("sock path: %v", err)
-	}
-	resp := callReload(t, sock)
+	resp := callReload(t)
 	if !resp.OK {
 		t.Fatalf("reload rpc: %s", resp.Error)
 	}
@@ -610,7 +583,7 @@ func TestReloadClosesEveryTransport(t *testing.T) {
 		transports []*countingTransport
 	)
 	prev := dialTransport
-	dialTransport = func(*proc.Manager, manifest.Manifest, string, string) syncservice.Transport {
+	dialTransport = func(processScope, manifest.Manifest, string, string) syncservice.Transport {
 		transport := &countingTransport{onClose: func() {
 			mu.Lock()
 			closed++
@@ -624,8 +597,7 @@ func TestReloadClosesEveryTransport(t *testing.T) {
 	}
 	t.Cleanup(func() { dialTransport = prev })
 
-	workers, children := testDaemonOwner(t.Context(), t)
-	sup := newSupervisor(workers, children, newDeliveryStore(t.TempDir()))
+	sup := newSupervisor(testProcessScope(t), newDeliveryStore(t.TempDir()))
 	var stopOnce sync.Once
 	stop := func() { stopOnce.Do(sup.stop) }
 	t.Cleanup(stop)
@@ -658,14 +630,17 @@ func TestReloadClosesEveryTransport(t *testing.T) {
 
 // callReload invokes the reload rpc, retrying dial failures until the daemon has
 // bound its socket.
-func callReload(t *testing.T, sock string) *rpc.Response {
+func callReload(t *testing.T) *rpc.Response {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	client, err := daemonClient()
+	if err != nil {
+		t.Fatalf("daemon client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		client := daemonClient(sock)
 		resp, err := client.Call(ctx, &rpc.Request{Method: "reload"})
-		_ = client.Close()
 		cancel()
 		if err == nil {
 			return resp

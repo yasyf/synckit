@@ -11,8 +11,7 @@ import (
 	"testing"
 	"time"
 
-	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/wire"
+	"github.com/yasyf/daemonkit"
 )
 
 func TestPayloadRoundTripsWithoutLineFraming(t *testing.T) {
@@ -56,63 +55,101 @@ func TestDispatcherBusinessFailuresRemainResponses(t *testing.T) {
 	}
 }
 
-func TestServerResolvesAdmittedDispatcherBeforeDispatch(t *testing.T) {
+func TestHandleRoutesTheCallOpThroughTheDispatcher(t *testing.T) {
 	dispatcher := NewDispatcher()
 	dispatched := false
 	dispatcher.Register("status", func(context.Context, map[string]any) (any, error) {
 		dispatched = true
 		return true, nil
 	})
-	resolved := false
-	server := NewServer(func(dkdaemon.Publication) (*Dispatcher, error) {
-		resolved = true
-		return dispatcher, nil
-	})
 	payload, err := EncodeRequest(&Request{Method: "status"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := server.dispatch(t.Context(), wire.Request{Payload: payload})
+	reply, err := dispatcher.Handle(t.Context(), daemonkit.Request{Op: callOp, Body: payload})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resolved || !dispatched {
-		t.Fatalf("resolved=%v dispatched=%v", resolved, dispatched)
+	if !dispatched {
+		t.Fatal("dispatcher never ran")
 	}
-	if _, ok := result.(json.RawMessage); !ok {
-		t.Fatalf("result type = %T, want json.RawMessage", result)
+	response, err := DecodeResponse(reply.Body)
+	if err != nil || !response.OK {
+		t.Fatalf("response = %+v, err = %v", response, err)
 	}
 }
 
-func TestServerRejectsUnresolvedPublicationBeforeDispatch(t *testing.T) {
+func TestHandleRefusesAnOpOutsideTheSuite(t *testing.T) {
 	dispatcher := NewDispatcher()
-	dispatched := false
-	dispatcher.Register("status", func(context.Context, map[string]any) (any, error) {
-		dispatched = true
-		return true, nil
-	})
-	want := errors.New("stale publication")
-	server := NewServer(func(dkdaemon.Publication) (*Dispatcher, error) { return nil, want })
-	payload, err := EncodeRequest(&Request{Method: "status"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := server.dispatch(t.Context(), wire.Request{Payload: payload}); !errors.Is(err, want) {
-		t.Fatalf("dispatch error = %v, want %v", err, want)
-	}
-	if dispatched {
-		t.Fatal("dispatcher ran for an unresolved publication")
+	if _, err := dispatcher.Handle(t.Context(), daemonkit.Request{Op: "synckit.rpc.other"}); err == nil {
+		t.Fatal("Handle accepted a foreign op")
 	}
 }
 
-func TestCallOnMissingSocketIsPreSendTransportError(t *testing.T) {
-	client := NewClient(ClientConfig{Dial: wire.UnixDialer(filepath.Join(t.TempDir(), "missing.sock")), WireBuild: WireBuild})
+func TestHandleTurnsAnUndecodablePayloadIntoAResponse(t *testing.T) {
+	dispatcher := NewDispatcher()
+	reply, err := dispatcher.Handle(t.Context(), daemonkit.Request{Op: callOp, Body: []byte("{")})
+	if err != nil {
+		t.Fatalf("Handle failed the session on a bad payload: %v", err)
+	}
+	response, err := DecodeResponse(reply.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || response.Error == "" {
+		t.Fatalf("response = %+v", response)
+	}
+}
+
+func TestMaxFrameCarriesAWholeMaxPayload(t *testing.T) {
+	if got := daemonkit.MaxDetail(MaxFrame); got < MaxPayload {
+		t.Fatalf("MaxDetail(MaxFrame) = %d, want >= %d", got, MaxPayload)
+	}
+	if Contract().MaxFrame != MaxFrame || SpawnLimits().MaxFrame != MaxFrame {
+		t.Fatalf("contract %d and spawn limits %d disagree with MaxFrame %d",
+			Contract().MaxFrame, SpawnLimits().MaxFrame, MaxFrame)
+	}
+}
+
+func TestCallOnAnAbsentDaemonIsUndispatched(t *testing.T) {
+	shortDaemonHome(t)
+	spec := daemonkit.Daemon{
+		Label:   "com.github.yasyf.synckit.rpctest.absent",
+		Schemas: []daemonkit.Schema{WireBuild},
+		Trust:   daemonkit.Trust{Serving: daemonkit.ServingSameUser()},
+	}
+	peer, err := daemonkit.Open(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(ClientConfig{
+		Open: func(context.Context) (*daemonkit.Business, error) { return peer.Business(), nil },
+	})
 	defer func() { _ = client.Close() }()
-	_, err := client.Call(context.Background(), &Request{Method: "status"})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err = client.Call(ctx, &Request{Method: "status"})
 	var transportErr *TransportError
-	if !errors.As(err, &transportErr) || transportErr.Outcome != wire.PreSendFailure {
-		t.Fatalf("error = %v, want pre-send TransportError", err)
+	if !errors.As(err, &transportErr) || !transportErr.Undispatched {
+		t.Fatalf("error = %v, want an undispatched TransportError", err)
 	}
+	if !errors.Is(err, daemonkit.ErrAbsent) {
+		t.Fatalf("error = %v, want the absence of a daemon rather than a failure to reach one", err)
+	}
+}
+
+// shortDaemonHome roots every daemonkit-derived path under /tmp. A t.TempDir()
+// path plus a synckit label and daemon.sock overflows the 104-byte sockaddr_un
+// limit, which would fail the dial before it ever reached the socket.
+func shortDaemonHome(t *testing.T) string {
+	t.Helper()
+	base, err := os.MkdirTemp("/tmp", "sk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	t.Setenv("DAEMONKIT_HOME", base)
+	return base
 }
 
 func TestListenLeavesSocketOwnershipToCaller(t *testing.T) {

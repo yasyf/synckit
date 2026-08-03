@@ -33,15 +33,25 @@ func ensureManifestsDir() (string, error) {
 	return dir, nil
 }
 
-// discoverManifests loads every manifest registered under the manifests dir.
+// discoverManifests loads every manifest registered under the manifests dir,
+// dropping the record of which files were skipped. A caller that converges
+// launchd agents needs that record — it is what separates a consumer whose file
+// is stale from one that unregistered — and uses discoverScan instead.
 func discoverManifests() ([]manifest.Manifest, error) {
+	manifests, _, err := discoverScan()
+	return manifests, err
+}
+
+// discoverScan loads every manifest registered under the manifests dir and
+// reports the ones that would not load.
+func discoverScan() ([]manifest.Manifest, []manifest.Skipped, error) {
 	dir, err := manifestsDir()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	manifests, err := manifest.Discover(dir)
+	manifests, skipped, err := manifest.Discover(dir)
 	if err != nil {
-		return nil, fmt.Errorf("discover manifests: %w", err)
+		return nil, nil, fmt.Errorf("discover manifests: %w", err)
 	}
-	return manifests, nil
+	return manifests, skipped, nil
 }

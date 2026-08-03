@@ -5,45 +5,69 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
-	"github.com/yasyf/daemonkit/trust"
-	"github.com/yasyf/daemonkit/wire"
+	"github.com/yasyf/daemonkit"
 )
 
-// TransportError reports daemonkit's proven delivery outcome for a failed call.
+// laneCloseGrace bounds releasing one retired or closed business lane; every
+// daemonkit verb refuses a context without a deadline, and a lane being dropped
+// has no caller deadline left to borrow.
+const laneCloseGrace = 5 * time.Second
+
+// callBudget is the deadline a Call rides when its caller states none. The
+// deadline is not optional — daemonkit refuses an undeadlined Call, and the one
+// it is given rides the wire into the handler's ctx — so synckit states the
+// bound its own server side already enforces: DispatchTimeout caps the handler,
+// and the client outwaits it by a minute rather than abandoning a request the
+// daemon is still working. A caller with a tighter deadline keeps it.
+const callBudget = DispatchTimeout + time.Minute
+
+// TransportError reports a failed call and whether daemonkit proved it never
+// reached dispatch. Undispatched is a safety predicate: true guarantees a safe
+// resend, false means unknown — never "dispatched".
 type TransportError struct {
-	Outcome wire.Outcome
-	Err     error
+	Undispatched bool
+	Err          error
 }
 
 func (e *TransportError) Error() string {
-	return fmt.Sprintf("rpc transport %s: %v", e.Outcome, e.Err)
+	if e.Undispatched {
+		return fmt.Sprintf("rpc transport (undispatched): %v", e.Err)
+	}
+	return fmt.Sprintf("rpc transport: %v", e.Err)
 }
 
 func (e *TransportError) Unwrap() error { return e.Err }
 
+// Lane supplies one fresh business lane to the peer a Client speaks to. The
+// three suppliers name their own authentication: daemonkit.Client.Business
+// (kernel-verified against Trust.Serving), daemonkit.Child.Business
+// (directional confinement over a spawned socketpair), and
+// daemonkit.BusinessOverConn (the caller authenticated the transport).
+type Lane func(context.Context) (*daemonkit.Business, error)
+
 // ClientConfig configures one reconnectable persistent synckit RPC client.
 type ClientConfig struct {
-	Dial      wire.Dialer
-	WireBuild string
+	Open Lane
 }
 
-// Client owns at most one persistent daemonkit session. A failed call retires its
-// session; only a later operation may establish another one.
+// Client owns at most one persistent business lane. A failed call retires its
+// lane; only a later operation may ask the supplier for another one.
 type Client struct {
-	config ClientConfig
+	open Lane
 
-	mu      sync.Mutex
-	session *wire.Client
-	closed  bool
+	mu     sync.Mutex
+	lane   *daemonkit.Business
+	closed bool
 }
 
-// NewClient returns a lazy persistent client with an exact build identity.
+// NewClient returns a lazy persistent client over config's lane supplier.
 func NewClient(config ClientConfig) *Client {
-	if config.Dial == nil || config.WireBuild == "" {
-		panic("rpc: Dial and WireBuild are required")
+	if config.Open == nil {
+		panic("rpc: Open is required")
 	}
-	return &Client{config: config}
+	return &Client{open: config.Open}
 }
 
 // Call sends req once. It never replays a request whose delivery is uncertain.
@@ -52,96 +76,73 @@ func (c *Client) Call(ctx context.Context, req *Request) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	session, response, err := c.invoke(ctx, callOp, payload)
-	if err != nil {
-		return nil, err
+	if _, stated := ctx.Deadline(); !stated {
+		bounded, cancel := context.WithTimeout(ctx, callBudget)
+		defer cancel()
+		ctx = bounded
 	}
-	resp, err := DecodeResponse(response)
+	lane, err := c.current(ctx)
 	if err != nil {
-		c.retire(session)
-		return nil, &TransportError{Outcome: wire.Delivered, Err: err}
+		return nil, &TransportError{Undispatched: true, Err: err}
+	}
+	result, err := lane.Call(ctx, callOp, payload)
+	if err != nil {
+		c.retire(ctx, lane)
+		return nil, &TransportError{Undispatched: daemonkit.Undispatched(err), Err: err}
+	}
+	resp, err := DecodeResponse(result.Body)
+	if err != nil {
+		c.retire(ctx, lane)
+		return nil, &TransportError{Err: err}
 	}
 	return resp, nil
 }
 
-// RuntimeHealth observes the exact synckitd process generation and readiness.
-func (c *Client) RuntimeHealth(ctx context.Context) (RuntimeHealth, error) {
-	session, response, err := c.invoke(ctx, RuntimeHealthOp, nil)
-	if err != nil {
-		return RuntimeHealth{}, err
-	}
-	health, err := DecodeRuntimeHealth(response)
-	if err != nil {
-		c.retire(session)
-		return RuntimeHealth{}, &TransportError{Outcome: wire.Delivered, Err: err}
-	}
-	return health, nil
-}
-
-func (c *Client) invoke(ctx context.Context, op wire.Op, payload []byte) (*wire.Client, []byte, error) {
-	session, err := c.current(ctx)
-	if err != nil {
-		return nil, nil, &TransportError{Outcome: wire.PreSendFailure, Err: err}
-	}
-	result, err := session.Call(ctx, op, "", payload)
-	if err != nil {
-		c.retire(session)
-		return nil, nil, &TransportError{Outcome: result.Outcome, Err: err}
-	}
-	if result.Outcome != wire.Delivered {
-		c.retire(session)
-		reason := result.Response.Reason
-		if reason == "" {
-			reason = result.Response.Err
-		}
-		return nil, nil, &TransportError{Outcome: result.Outcome, Err: errors.New(reason)}
-	}
-	if result.Response.Err != "" {
-		return nil, nil, errors.New(result.Response.Err)
-	}
-	return session, result.Response.Payload, nil
-}
-
-func (c *Client) current(ctx context.Context) (*wire.Client, error) {
+func (c *Client) current(ctx context.Context) (*daemonkit.Business, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return nil, errors.New("rpc: client closed")
 	}
-	if c.session != nil {
-		return c.session, nil
+	if c.lane != nil {
+		return c.lane, nil
 	}
-	session, err := wire.NewClient(ctx, wire.ClientConfig{
-		Dial:      c.config.Dial,
-		WireBuild: c.config.WireBuild,
-		Role:      trust.UnprotectedRole,
-		MaxFrame:  MaxFrame,
-	})
+	lane, err := c.open(ctx)
 	if err != nil {
 		return nil, err
 	}
-	c.session = session
-	return session, nil
+	c.lane = lane
+	return lane, nil
 }
 
-func (c *Client) retire(session *wire.Client) {
+func (c *Client) retire(parent context.Context, lane *daemonkit.Business) {
 	c.mu.Lock()
-	if c.session == session {
-		c.session = nil
+	if c.lane == lane {
+		c.lane = nil
 	}
 	c.mu.Unlock()
-	_ = session.Close()
+	closeLane(parent, lane)
 }
 
-// Close closes the persistent session and permanently rejects later calls.
+// Close releases the persistent lane and permanently rejects later calls.
+//
+//nolint:contextcheck // Transport.Close carries no context and daemonkit refuses an undeadlined release, so the grace is minted here.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	c.closed = true
-	session := c.session
-	c.session = nil
+	lane := c.lane
+	c.lane = nil
 	c.mu.Unlock()
-	if session == nil {
+	if lane == nil {
 		return nil
 	}
-	return session.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), laneCloseGrace)
+	defer cancel()
+	return lane.Close(ctx)
+}
+
+func closeLane(parent context.Context, lane *daemonkit.Business) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), laneCloseGrace)
+	defer cancel()
+	_ = lane.Close(ctx)
 }

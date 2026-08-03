@@ -34,7 +34,7 @@ func TestNoExportedProcessTransportSurface(t *testing.T) {
 			if function.Name.Name == "Stdio" || function.Name.Name == "SSHStdio" || function.Name.Name == "WithTransportRunner" {
 				t.Fatalf("removed raw constructor %s returned in %s", function.Name.Name, entry.Name())
 			}
-			if function.Type.Params != nil && (strings.Contains(exprString(files, function.Type.Params), "worker.Pool") || strings.Contains(exprString(files, function.Type.Params), "proc.Manager")) {
+			if function.Type.Params != nil && strings.Contains(exprString(files, function.Type.Params), "*daemonkit.Owned") {
 				t.Fatalf("exported function %s exposes daemon process ownership", function.Name.Name)
 			}
 		}
