@@ -2,6 +2,8 @@ module github.com/yasyf/synckit
 
 go 1.26.5
 
+toolchain go1.26.6
+
 require (
 	github.com/brutella/dnssd v1.2.14
 	github.com/charmbracelet/bubbles v1.0.0

@@ -6,6 +6,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.2] - 2026-08-16
+
+### Fixed
+
+- The serve LaunchAgent runs `synckitd serve` again. v0.37.0 moved that one
+  agent from synckit's own launchd path onto `daemonkit.Daemon` and dropped its
+  argument in the move, leaving `ProgramArguments` holding the staged program
+  alone. synckitd dispatches on argv, so launchd ran the root command, which
+  prints help and exits: the job crash-looped under `KeepAlive`, and
+  `synckitd install` blocked on a socket that never appeared, timed out, and
+  aborted before converging the reconcile tick or any consumer helper. `install`
+  could not succeed on 0.37.0 or 0.37.1. Upgrade, then re-run `synckitd install`.
+
+### Changed
+
+- Build with Go 1.26.6. The `toolchain` directive moves, not the `go` one, so a
+  consumer still builds synckit on 1.26.5. It closes the two standard-library
+  advisories synckit's own code reaches: GO-2026-6088 in `encoding/xml`, which
+  the ioreg plist decoder in `presence` calls, and GO-2026-5972 in
+  `encoding/asn1`, which `rpc.ServeSpawned` reaches through daemonkit's handoff.
+
 ## [0.37.1] - 2026-08-03
 
 ### Fixed
@@ -431,7 +452,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.37.1...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.37.2...HEAD
+[0.37.2]: https://github.com/yasyf/synckit/compare/v0.37.1...v0.37.2
 [0.37.1]: https://github.com/yasyf/synckit/compare/v0.37.0...v0.37.1
 [0.37.0]: https://github.com/yasyf/synckit/compare/v0.36.4...v0.37.0
 [0.36.4]: https://github.com/yasyf/synckit/compare/v0.36.3...v0.36.4
