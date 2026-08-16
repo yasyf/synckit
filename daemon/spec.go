@@ -20,13 +20,14 @@ const serveShutdown = 30 * time.Second
 
 // serveSpec is the one daemonkit identity the synckitd launcher and the serving
 // daemon both read: socket, lock, state dir, record file, and launchd job all
-// derive from its Label, so no fact is declared twice. Restart is stated
-// because the zero value is RestartNever and the serve agent has always
-// relaunched after every exit.
+// derive from its Label. Restart is stated because the zero value is
+// RestartNever; Args because the program is a copy of synckitd, which prints
+// help when launchd runs it bare.
 func serveSpec(program daemonkit.Program) daemonkit.Daemon {
 	return daemonkit.Daemon{
 		Label:    serveLabel,
 		Program:  program,
+		Args:     []string{"serve"},
 		Schemas:  []daemonkit.Schema{rpc.WireBuild},
 		Trust:    daemonkit.Trust{Serving: daemonkit.ServingSameUser()},
 		Restart:  daemonkit.RestartAlways,

@@ -1,15 +1,19 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/yasyf/daemonkit"
 	"github.com/yasyf/daemonkit/launchd"
 
 	"github.com/yasyf/synckit/codec"
@@ -252,6 +256,130 @@ func TestServiceAgentsUseStagedProgramsAndTypedPolicy(t *testing.T) {
 		if !filepath.IsAbs(agent.LogPath) || filepath.Base(agent.LogPath) != agent.Label+".log" {
 			t.Fatalf("agent %q log = %q", agent.Label, agent.LogPath)
 		}
+	}
+}
+
+// TestInstalledAgentPlistsNameTheirSubcommand reads ProgramArguments out of the
+// plist bytes launchd parses, for every agent synckitd install writes. synckitd
+// prints help when run bare, so the program alone crash-loops the job — what
+// v0.37.0 shipped for serve, past assertions that read Args off the struct.
+func TestInstalledAgentPlistsNameTheirSubcommand(t *testing.T) {
+	home := useHome(t)
+	useMesh(t)
+	usePathBinaries(t, "cookiesync")
+	staging := useFlatStaging(t)
+
+	spec, err := stableServeSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents, err := serviceAgents([]manifest.Manifest{helperManifest("cookiesync", manifest.SessionTypeAqua)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperLabel := labelPrefix + ".helper.cookiesync"
+	tests := []struct {
+		name  string
+		plist []byte
+		want  []string
+	}{
+		{
+			name:  "serve",
+			plist: ensuredServePlist(t, spec, home),
+			want:  []string{filepath.Join(home, ".daemonkit", "bin", serveAgentLabel), "serve"},
+		},
+		{
+			name:  "reconcile",
+			plist: agentPlist(t, findAgent(t, agents, reconcileAgentLabel)),
+			want:  []string{filepath.Join(staging, reconcileAgentLabel), "reconcile"},
+		},
+		{
+			name:  "helper",
+			plist: agentPlist(t, findAgent(t, agents, helperLabel)),
+			want:  []string{filepath.Join(staging, helperLabel), "helper-serve"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := plistStrings(t, tt.plist, "ProgramArguments")
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("ProgramArguments = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+// useFlatStaging publishes every staged program directly under one returned
+// directory, so each agent's exact program path is known before it is built.
+func useFlatStaging(t *testing.T) string {
+	t.Helper()
+	dir := resolvedTempDir(t)
+	useStaging(t, func(label, _ string) (string, error) {
+		path := filepath.Join(dir, label)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+			return "", err
+		}
+		return path, nil
+	})
+	return dir
+}
+
+// ensuredServePlist renders the LaunchAgent Client.Ensure writes for spec.
+// daemonkit's Daemon-to-Agent mapping is unexported, so it is reproduced from
+// its documented placement — ~/.daemonkit/bin/<label>, logging to the label's
+// state dir — while Args comes off the production spec.
+func ensuredServePlist(t *testing.T, spec daemonkit.Daemon, home string) []byte {
+	t.Helper()
+	label := string(spec.Label)
+	return agentPlist(t, launchd.Agent{
+		Label:         label,
+		Program:       filepath.Join(home, ".daemonkit", "bin", label),
+		Args:          spec.Args,
+		LogPath:       filepath.Join(home, label, "daemon.log"),
+		RestartPolicy: launchd.RestartAlways,
+		ExitTimeOut:   serveShutdown,
+	})
+}
+
+func agentPlist(t *testing.T, agent launchd.Agent) []byte {
+	t.Helper()
+	plist, err := agent.Plist()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plist
+}
+
+// plistStrings decodes the string array a rendered plist records under key.
+func plistStrings(t *testing.T, plist []byte, key string) []string {
+	t.Helper()
+	decoder := xml.NewDecoder(bytes.NewReader(plist))
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			t.Fatalf("plist has no %q key\n%s", key, plist)
+		}
+		if err != nil {
+			t.Fatalf("decode plist: %v", err)
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "key" {
+			continue
+		}
+		var name string
+		if err := decoder.DecodeElement(&name, &start); err != nil {
+			t.Fatalf("decode plist key: %v", err)
+		}
+		if name != key {
+			continue
+		}
+		var array struct {
+			Values []string `xml:"string"`
+		}
+		if err := decoder.Decode(&array); err != nil {
+			t.Fatalf("decode plist %q: %v", key, err)
+		}
+		return array.Values
 	}
 }
 
