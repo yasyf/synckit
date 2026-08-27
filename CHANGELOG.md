@@ -6,6 +6,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-08-26
+
+### Changed
+
+- Requires daemonkit v0.23.0, which moves every daemon's private state from
+  `~/<Label>` to `~/.daemonkit/a/<Label>`, inside the hidden directory
+  daemonkit already owns. `com.github.yasyf.synckit.serve` no longer cuts a
+  directory straight into the user's home.
+
+  There is no migration and no fallback read: the serve agent comes up fresh
+  under the new root and `~/com.github.yasyf.synckit.serve` stays where it
+  lies. Delete it by hand only after the agent has respawned under the new
+  root — an unset `Daemon.Log` defaults into the state directory and is baked
+  into launchd's `StandardOutPath`, so a directory removed while the old plist
+  is still loaded comes straight back on the next respawn just so launchd can
+  open its log. The gate is the plist being re-materialized, not the binary
+  being upgraded.
+
+  This release skips daemonkit v0.22.0's `~/.daemonkit/agents/<Label>`
+  entirely, so upgrading to it leaves one stale directory rather than two.
+
 ## [0.37.2] - 2026-08-16
 
 ### Fixed
@@ -452,7 +473,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.37.2...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.38.0...HEAD
+[0.38.0]: https://github.com/yasyf/synckit/compare/v0.37.2...v0.38.0
 [0.37.2]: https://github.com/yasyf/synckit/compare/v0.37.1...v0.37.2
 [0.37.1]: https://github.com/yasyf/synckit/compare/v0.37.0...v0.37.1
 [0.37.0]: https://github.com/yasyf/synckit/compare/v0.36.4...v0.37.0
