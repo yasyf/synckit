@@ -6,6 +6,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-08-30
+
+### Removed
+
+- **The pre-v0.21 legacy LaunchAgent sweep.** `removeAgent` used to fall back to
+  `launchd.RemoveUnmarked` when `launchd.Remove` refused a plist for carrying no
+  ownership marker — a one-time waiver for installs written before daemonkit
+  v0.21. Every fleet host runs v0.23.0 and an upgrade is delete-and-reinstall
+  clean, so no install on disk still has that shape. The waiver, the
+  `ErrNotOwned` branch that reached it, and the launchctl test double that
+  existed only to exercise it are gone, and `removeMarkedAgent` is plain
+  `removeAgent` now that the "Marked" qualifier contrasts with nothing.
+
+  **Cut ahead of the daemonkit release that deletes `launchd.RemoveUnmarked`.**
+  synckit v0.38.0 calls that symbol, so a build resolving v0.38.0 against a
+  daemonkit that no longer exports it fails to compile. Take v0.39.0 before, or
+  together with, that daemonkit release.
+
+### Fixed
+
+- **`ensuredServePlist` built its `LogPath` at the pre-v0.22 `~/<label>/daemon.log`.**
+  `launchd.Agent.Plist` validates the field, so it could not simply be dropped
+  for going unasserted; it now comes off `paths.Agent(label)`, the same source
+  `Ensure` falls back to when `Daemon.Log` is empty, so it cannot go stale again.
+
 ## [0.38.0] - 2026-08-26
 
 ### Changed
@@ -473,7 +498,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.38.0...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.39.0...HEAD
+[0.39.0]: https://github.com/yasyf/synckit/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/yasyf/synckit/compare/v0.37.2...v0.38.0
 [0.37.2]: https://github.com/yasyf/synckit/compare/v0.37.1...v0.37.2
 [0.37.1]: https://github.com/yasyf/synckit/compare/v0.37.0...v0.37.1
