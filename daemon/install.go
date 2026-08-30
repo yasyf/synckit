@@ -40,7 +40,7 @@ var (
 	applyAgent = func(ctx context.Context, agent launchd.Agent) error {
 		return launchd.Apply(ctx, launchctl, agent)
 	}
-	removeMarkedAgent = func(ctx context.Context, label string) error {
+	removeAgent = func(ctx context.Context, label string) error {
 		return launchd.Remove(ctx, launchctl, label)
 	}
 	ensureServeAgent = ensureServe
@@ -234,27 +234,6 @@ func retainedLabels(skipped []manifest.Skipped, recorded []string) []string {
 	return labels
 }
 
-// removeAgent removes one synckit agent. A plist written before daemonkit v0.21
-// carries no ownership marker and launchd.Remove refuses it; every label that
-// reaches here is synckit's own by prefix, so a missing marker dates the plist
-// rather than making it a third party's, and it is removed explicitly instead
-// of surfacing as a refusal.
-func removeAgent(ctx context.Context, label string) error {
-	err := removeMarkedAgent(ctx, label)
-	if errors.Is(err, launchd.ErrNotOwned) && synckitLabel(label) {
-		return removeLegacyAgent(ctx, label)
-	}
-	return err
-}
-
-// removeLegacyAgent is launchd's own waiver for the markerless shape: it
-// rereads the plist and refuses one that has since been marked, boots the job
-// out and fails on anything but a settled bootout, and only then deletes the
-// file — so a removal that reports success never leaves the job loaded.
-func removeLegacyAgent(ctx context.Context, label string) error {
-	return launchd.RemoveUnmarked(ctx, launchctl, label)
-}
-
 // ensureServe makes the serve daemon be this build, ready and serving: Ensure
 // places the stable executable, writes the plist for its own label, and evicts
 // the incumbent it replaces.
@@ -299,9 +278,9 @@ type installedAgents struct {
 	Labels   []string `json:"labels"`
 }
 
-// Validate refuses any label outside synckit's own namespace: this record is
-// what authorizes deleting a plist that carries no daemonkit ownership marker,
-// so a foreign label in it would authorize deleting a third party's agent.
+// Validate refuses any label outside synckit's own namespace: this record names
+// the agents uninstall and the stray sweep remove, so a foreign label in it
+// would aim a removal at a third party's agent.
 func (a installedAgents) Validate() error {
 	if a.Identity != installedAgentsIdentity {
 		return fmt.Errorf("installed agents identity is %q, want %q", a.Identity, installedAgentsIdentity)

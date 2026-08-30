@@ -15,6 +15,7 @@ import (
 
 	"github.com/yasyf/daemonkit"
 	"github.com/yasyf/daemonkit/launchd"
+	"github.com/yasyf/daemonkit/paths"
 
 	"github.com/yasyf/synckit/codec"
 	"github.com/yasyf/synckit/manifest"
@@ -61,12 +62,12 @@ func (f *fakeLaunchd) reset() {
 func useLaunchd(t *testing.T) *fakeLaunchd {
 	t.Helper()
 	fake := &fakeLaunchd{removeErr: map[string]error{}}
-	apply, remove := applyAgent, removeMarkedAgent
+	apply, remove := applyAgent, removeAgent
 	ensure, settle := ensureServeAgent, settleServeAgent
-	applyAgent, removeMarkedAgent = fake.apply, fake.remove
+	applyAgent, removeAgent = fake.apply, fake.remove
 	ensureServeAgent, settleServeAgent = fake.ensure, fake.settle
 	t.Cleanup(func() {
-		applyAgent, removeMarkedAgent = apply, remove
+		applyAgent, removeAgent = apply, remove
 		ensureServeAgent, settleServeAgent = ensure, settle
 	})
 	return fake
@@ -325,9 +326,9 @@ func useFlatStaging(t *testing.T) string {
 }
 
 // ensuredServePlist renders the LaunchAgent Client.Ensure writes for spec.
-// daemonkit's Daemon-to-Agent mapping is unexported, so it is reproduced from
-// its documented placement — ~/.daemonkit/bin/<label>, logging to the label's
-// state dir — while Args comes off the production spec.
+// daemonkit's Daemon-to-Agent mapping is unexported, so the program is
+// reproduced from its documented placement — ~/.daemonkit/bin/<label> — while
+// Args comes off the production spec and the log path off paths.Agent.
 func ensuredServePlist(t *testing.T, spec daemonkit.Daemon, home string) []byte {
 	t.Helper()
 	label := string(spec.Label)
@@ -335,7 +336,7 @@ func ensuredServePlist(t *testing.T, spec daemonkit.Daemon, home string) []byte 
 		Label:         label,
 		Program:       filepath.Join(home, ".daemonkit", "bin", label),
 		Args:          spec.Args,
-		LogPath:       filepath.Join(home, label, "daemon.log"),
+		LogPath:       paths.Agent(label).LogPath(),
 		RestartPolicy: launchd.RestartAlways,
 		ExitTimeOut:   serveShutdown,
 	})
@@ -919,99 +920,6 @@ func TestUninstallLabelsUnionTheRecordAndTheManifests(t *testing.T) {
 			}
 			if !slices.Equal(labels, tt.want) {
 				t.Fatalf("labels = %#v, want %#v", labels, tt.want)
-			}
-		})
-	}
-}
-
-// TestRemoveAgentRemovesAMarkerlessLegacyPlist covers the whole legacy waiver:
-// only a markerless plist takes it, the bootout's own verdict decides whether
-// the file may go, and a plist marked since the refusal belongs to Remove.
-func TestRemoveAgentRemovesAMarkerlessLegacyPlist(t *testing.T) {
-	notOwned := fmt.Errorf("%w: %q", launchd.ErrNotOwned, "plist")
-	refused := errors.New("launchd refused")
-	const (
-		markerless = "<plist/>"
-		marked     = "<plist><key>" + launchd.OwnerEnvKey + "</key></plist>"
-	)
-	tests := []struct {
-		name       string
-		label      string
-		markedErr  error
-		body       string
-		bootout    string
-		bootoutNo  int
-		wantErr    error
-		wantReason string
-		wantGone   bool
-		wantCalls  int
-	}{
-		{name: "marked plist", label: reconcileAgentLabel, body: markerless},
-		{
-			name: "legacy plist", label: reconcileAgentLabel, markedErr: notOwned, body: markerless,
-			wantGone: true, wantCalls: 1,
-		},
-		{
-			name: "launchd does not know the label", label: reconcileAgentLabel, markedErr: notOwned,
-			body: markerless, bootout: "Boot-out failed: 3: No such process", bootoutNo: 3,
-			wantGone: true, wantCalls: 1,
-		},
-		{
-			name: "bootout refusal keeps the plist", label: reconcileAgentLabel, markedErr: notOwned,
-			body: markerless, bootout: "Boot-out failed: 1: Operation not permitted", bootoutNo: 1,
-			wantReason: "Operation not permitted", wantCalls: 1,
-		},
-		{
-			name: "a plist marked since the refusal is not legacy", label: reconcileAgentLabel,
-			markedErr: notOwned, body: marked, wantErr: launchd.ErrMarked,
-		},
-		{name: "refusal surfaces", label: reconcileAgentLabel, markedErr: refused, body: markerless, wantErr: refused},
-		{
-			name:      "foreign label never takes the legacy path",
-			label:     "com.example.other",
-			markedErr: notOwned,
-			body:      markerless,
-			wantErr:   launchd.ErrNotOwned,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			useHome(t)
-			var ran [][]string
-			previousCtl, previousRemove := launchctl, removeMarkedAgent
-			launchctl = func(_ context.Context, path string, args ...string) (string, int, error) {
-				ran = append(ran, append([]string{path}, args...))
-				return tt.bootout, tt.bootoutNo, nil
-			}
-			removeMarkedAgent = func(context.Context, string) error { return tt.markedErr }
-			t.Cleanup(func() { launchctl, removeMarkedAgent = previousCtl, previousRemove })
-
-			plist, err := launchd.Agent{Label: tt.label}.PlistPath()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.MkdirAll(filepath.Dir(plist), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(plist, []byte(tt.body), 0o600); err != nil {
-				t.Fatal(err)
-			}
-
-			err = removeAgent(t.Context(), tt.label)
-			switch {
-			case tt.wantErr == nil && tt.wantReason == "" && err != nil:
-				t.Fatalf("error = %v", err)
-			case tt.wantErr != nil && !errors.Is(err, tt.wantErr):
-				t.Fatalf("error = %v, want %v", err, tt.wantErr)
-			case tt.wantReason != "" && (err == nil || !strings.Contains(err.Error(), tt.wantReason)):
-				t.Fatalf("error = %v, want launchd's own %q refusal", err, tt.wantReason)
-			}
-			_, statErr := os.Lstat(plist)
-			if gone := errors.Is(statErr, os.ErrNotExist); gone != tt.wantGone {
-				t.Fatalf("plist gone = %t, want %t", gone, tt.wantGone)
-			}
-			if len(ran) != tt.wantCalls {
-				t.Fatalf("launchctl calls = %#v, want %d", ran, tt.wantCalls)
 			}
 		})
 	}
