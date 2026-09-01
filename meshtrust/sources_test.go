@@ -8,10 +8,10 @@ import (
 
 func writeExecutable(t *testing.T, path string) string {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatalf("mkdir %q: %v", filepath.Dir(path), err)
 	}
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { //nolint:gosec // G306: exec.LookPath only accepts an executable file.
 		t.Fatalf("write %q: %v", path, err)
 	}
 	return path
@@ -26,7 +26,7 @@ func TestTailscaleBinary(t *testing.T) {
 	absent := filepath.Join(dir, "absent", "tailscale")
 
 	empty := filepath.Join(dir, "empty")
-	if err := os.MkdirAll(empty, 0o755); err != nil {
+	if err := os.MkdirAll(empty, 0o750); err != nil {
 		t.Fatalf("mkdir %q: %v", empty, err)
 	}
 

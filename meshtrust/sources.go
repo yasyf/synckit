@@ -51,7 +51,7 @@ func tailscaleStatus(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := exec.CommandContext(ctx, binary, "status", "--json").Output()
+	out, err := exec.CommandContext(ctx, binary, "status", "--json").Output() //nolint:gosec // G204: fixed argv against a binary resolved from PATH and the known install locations.
 	if err != nil {
 		return nil, fmt.Errorf("tailscale status: %w", err)
 	}

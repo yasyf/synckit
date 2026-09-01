@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.2] - 2026-08-31
+
+### Fixed
+
+- gosec annotations for the v0.39.1 tailscale resolver. The status call carries
+  the `G204` waiver its sibling `tailscale cert` call already had, and the new
+  test's fixture files are written with tighter modes. v0.39.1 is functionally
+  identical; take this one to keep `golangci-lint` green.
+
 ## [0.39.1] - 2026-08-31
 
 ### Fixed
@@ -514,7 +523,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.39.1...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.39.2...HEAD
+[0.39.2]: https://github.com/yasyf/synckit/compare/v0.39.1...v0.39.2
 [0.39.1]: https://github.com/yasyf/synckit/compare/v0.39.0...v0.39.1
 [0.39.0]: https://github.com/yasyf/synckit/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/yasyf/synckit/compare/v0.37.2...v0.38.0
