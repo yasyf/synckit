@@ -2,16 +2,20 @@ package meshtrust
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 
 	"github.com/yasyf/synckit/hostregistry"
 )
 
-// appBundleTailscale is where the Tailscale macOS app ships its CLI; a
-// daemon's spawn environment often lacks the shell's PATH.
-const appBundleTailscale = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+// tailscaleFallbacks are the install locations searched when the CLI is not on
+// PATH; a daemon's spawn environment often lacks the shell's.
+var tailscaleFallbacks = []string{
+	"/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+	"/opt/homebrew/bin/tailscale",
+	"/usr/local/bin/tailscale",
+}
 
 // StatePath returns the mesh state file this machine's trust derives from.
 func StatePath() (string, error) {
@@ -30,11 +34,24 @@ func loadRegistry() (registry, error) {
 	return registry{Self: g.Self, Hosts: g.Hosts}, nil
 }
 
-func tailscaleStatus(ctx context.Context) ([]byte, error) {
-	out, err := exec.CommandContext(ctx, "tailscale", "status", "--json").Output()
-	if errors.Is(err, exec.ErrNotFound) {
-		out, err = exec.CommandContext(ctx, appBundleTailscale, "status", "--json").Output()
+func tailscaleBinary() (string, error) {
+	if path, err := exec.LookPath("tailscale"); err == nil {
+		return path, nil
 	}
+	for _, path := range tailscaleFallbacks {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("locate tailscale: not on PATH, nor at %v", tailscaleFallbacks)
+}
+
+func tailscaleStatus(ctx context.Context) ([]byte, error) {
+	binary, err := tailscaleBinary()
+	if err != nil {
+		return nil, err
+	}
+	out, err := exec.CommandContext(ctx, binary, "status", "--json").Output()
 	if err != nil {
 		return nil, fmt.Errorf("tailscale status: %w", err)
 	}

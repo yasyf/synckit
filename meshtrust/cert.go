@@ -57,11 +57,12 @@ func validateHost(host string) error {
 }
 
 func tailscaleCert(ctx context.Context, certFile, keyFile, host string) error {
-	args := []string{"cert", "--cert-file", certFile, "--key-file", keyFile, host}
-	_, err := exec.CommandContext(ctx, "tailscale", args...).Output() //nolint:gosec // G204: fixed tailscale argv; host passed validateHost, paths are the caller's own dir.
-	if errors.Is(err, exec.ErrNotFound) {
-		_, err = exec.CommandContext(ctx, appBundleTailscale, args...).Output() //nolint:gosec // G204: same argv against the fixed app-bundle path.
+	binary, err := tailscaleBinary()
+	if err != nil {
+		return fmt.Errorf("tailscale cert %s: %w", host, err)
 	}
+	args := []string{"cert", "--cert-file", certFile, "--key-file", keyFile, host}
+	_, err = exec.CommandContext(ctx, binary, args...).Output() //nolint:gosec // G204: fixed tailscale argv; host passed validateHost, paths are the caller's own dir.
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			// A ctx kill surfaces as the kill signal's exit error, hiding the
