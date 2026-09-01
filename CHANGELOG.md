@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.1] - 2026-08-31
+
+### Fixed
+
+- **meshtrust finds the tailscale CLI on a Homebrew install.** A daemon's spawn
+  environment does not carry the shell's PATH, and the only fallback was
+  `/Applications/Tailscale.app/Contents/MacOS/Tailscale`, the path the macOS GUI
+  app ships. On a host whose tailscale came from Homebrew that path does not
+  exist, so `tailscale status` failed with `no such file or directory`, the
+  trust provider failed closed, and every tailnet peer lost its authorization —
+  a consuming daemon still served reads to those peers but rejected their
+  writes. `tailscaleBinary` now resolves through PATH first, then
+  `/Applications/Tailscale.app/Contents/MacOS/Tailscale`,
+  `/opt/homebrew/bin/tailscale`, and `/usr/local/bin/tailscale`, and both the
+  status call and `tailscale cert` minting share it.
+
 ## [0.39.0] - 2026-08-30
 
 ### Removed
@@ -498,7 +514,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.39.0...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.39.1...HEAD
+[0.39.1]: https://github.com/yasyf/synckit/compare/v0.39.0...v0.39.1
 [0.39.0]: https://github.com/yasyf/synckit/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/yasyf/synckit/compare/v0.37.2...v0.38.0
 [0.37.2]: https://github.com/yasyf/synckit/compare/v0.37.1...v0.37.2
