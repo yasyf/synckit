@@ -193,6 +193,21 @@ func TestApplyV2ReadinessPinsAndAck(t *testing.T) {
 			},
 		},
 		{
+			name: "stale holding this change finalizes its ack",
+			result: func(change ChangeEnvelope) ApplyResult {
+				return ApplyResult{AckedRevision: change.SourceRevision, Stale: true, HeldDigest: change.PayloadDigest}
+			},
+			wantReady:  all,
+			wantPinned: applyRoots,
+			wantLog: []string{
+				"pin " + owner + " " + all,
+				"complete " + a, "complete " + b, "complete " + c,
+				"apply " + all,
+				"pin synckit.acked/host-b " + all,
+				"pin " + owner + " []",
+			},
+		},
+		{
 			name:       "need snapshot releases the change",
 			missing:    map[artifact.Digest]int{applyRoots[0].Digest: 1},
 			result:     func(ChangeEnvelope) ApplyResult { return ApplyResult{NeedSnapshot: true} },

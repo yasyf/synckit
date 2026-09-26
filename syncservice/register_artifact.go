@@ -105,7 +105,8 @@ func applyArtifacts(ctx context.Context, svc ArtifactConsumer, store acceptStore
 	if fullAck && len(ready) < len(change.Artifacts) {
 		return ApplyResult{}, fmt.Errorf("%w: %d of %d roots ready", ErrIncompleteAck, len(ready), len(change.Artifacts))
 	}
-	if result.Stale || result.NeedSnapshot || (!fullAck && !result.Partial) {
+	holds := result.Stale && fullAck && result.HeldDigest == change.PayloadDigest
+	if (result.Stale && !holds) || result.NeedSnapshot || (!fullAck && !result.Partial) {
 		return result, release(ctx, store, change.Origin, owner)
 	}
 	if err := store.SetPins(ctx, ackedPinPrefix+change.Origin, change.Artifacts); err != nil {
