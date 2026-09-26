@@ -3,7 +3,10 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,7 +25,15 @@ const (
 	// daemonkit refuses a contract that disagrees with what a spawn conveyed.
 	MaxFrame = (MaxPayload*4+2)/3 + 4<<10
 	callOp   = "synckit.rpc.call"
+
+	unknownMethodPrefix = "unknown method "
 )
+
+// ErrUnknownMethod reports that the peer daemon predates the called method: its
+// dispatcher registers no handler under that name. Every synckitd since the
+// dispatcher first shipped sends the same reply for it, so a caller can tell a
+// daemon that needs upgrading from one whose handler failed.
+var ErrUnknownMethod = errors.New("unknown method")
 
 // Request is one RPC command: a method name and an arbitrary params object.
 type Request struct {
@@ -36,6 +47,18 @@ type Response struct {
 	OK     bool            `json:"ok"`
 	Result json.RawMessage `json:"result"`
 	Error  string          `json:"error,omitempty"`
+}
+
+// ReplyError turns the Error of a failed Response into an error. The reply a
+// dispatcher sends for a method it lacks wraps ErrUnknownMethod and keeps the
+// method name; every other reply is an opaque remote failure.
+func ReplyError(message string) error {
+	if method, ok := strings.CutPrefix(message, unknownMethodPrefix); ok {
+		if _, err := strconv.Unquote(method); err == nil {
+			return fmt.Errorf("%w %s", ErrUnknownMethod, method)
+		}
+	}
+	return errors.New(message)
 }
 
 // EncodeRequest renders req as a daemonkit payload.

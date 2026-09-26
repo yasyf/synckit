@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -62,7 +63,7 @@ func (d *Dispatcher) RegisterExclusive(method string, handler Handler) {
 func (d *Dispatcher) Dispatch(ctx context.Context, req *Request) *Response {
 	handler, ok := d.handlers[req.Method]
 	if !ok {
-		return &Response{OK: false, Error: fmt.Sprintf("unknown method %q", req.Method)}
+		return &Response{OK: false, Error: unknownMethodPrefix + strconv.Quote(req.Method)}
 	}
 
 	if d.exclusive[req.Method] {
