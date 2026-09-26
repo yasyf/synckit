@@ -20,7 +20,10 @@ var ErrBatchFull = errors.New("artifact: batch full")
 
 var errIncomingFull = fmt.Errorf("artifact: %d incoming batches already staged", MaxIncoming)
 
-var flushBarrier = fullSyncDir
+var (
+	flushBarrier  = fullSyncDir
+	syncObjectDir = syncDir
+)
 
 func partName(index int) string {
 	return fmt.Sprintf("%04d.part", index)
@@ -481,7 +484,7 @@ func (s *Store) publishLevel(landing string, landed []Digest, levels map[Digest]
 		dirs[filepath.Dir(target)] = struct{}{}
 	}
 	for dir := range dirs {
-		if err := syncDir(dir); err != nil {
+		if err := syncObjectDir(dir); err != nil {
 			return err
 		}
 	}

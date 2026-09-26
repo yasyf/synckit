@@ -106,6 +106,9 @@ func Open(root string) (*Store, error) {
 	if err == nil {
 		err = createLayout(root)
 	}
+	if err == nil {
+		err = syncObjectDirs(root)
+	}
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("artifact: open %s: %w", root, err), lock.Close())
 	}
@@ -139,6 +142,22 @@ func createLayout(root string) error {
 		return nil
 	}
 	return durable.SyncDir(objects)
+}
+
+func syncObjectDirs(root string) error {
+	objects := filepath.Join(root, objectsDir)
+	for prefix := range 256 {
+		if err := syncObjectDir(filepath.Join(objects, fmt.Sprintf("%02x", prefix))); err != nil {
+			return err
+		}
+	}
+	if err := syncObjectDir(objects); err != nil {
+		return err
+	}
+	if err := flushBarrier(objects); err != nil {
+		return fmt.Errorf("artifact: flush object directories: %w", err)
+	}
+	return nil
 }
 
 func mkdirAll(dir string) error {

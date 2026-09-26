@@ -545,3 +545,67 @@ func TestClosureExpandsManifestSeenFirstAsBlob(t *testing.T) {
 	}
 }
 
+func TestOpenSyncsObjectDirectoriesBeforeServing(t *testing.T) {
+	root := t.TempDir()
+	s, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("renamed into place before a crash")
+	digest := Sum(data)
+	objects := filepath.Join(root, objectsDir)
+	prefix := filepath.Join(objects, string(digest[:2]))
+	if err := os.WriteFile(filepath.Join(prefix, string(digest)), data, filePerm); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syncObjectDir, flushBarrier = syncDir, fullSyncDir })
+	dirFailure := errors.New("directory sync failed")
+	tests := []struct {
+		name     string
+		failDir  string
+		wantErr  error
+		wantLast string
+	}{
+		{"unsynced prefix fails open", prefix, dirFailure, "sync " + prefix},
+		{"every prefix synced then flushed", "", nil, "barrier " + objects},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var events []string
+			synced := map[string]bool{}
+			syncObjectDir = func(dir string) error {
+				events = append(events, "sync "+dir)
+				synced[dir] = true
+				if dir == tt.failDir {
+					return dirFailure
+				}
+				return syncDir(dir)
+			}
+			flushBarrier = func(dir string) error {
+				events = append(events, "barrier "+dir)
+				return fullSyncDir(dir)
+			}
+			reopened, err := Open(root)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Open = %v, want %v", err, tt.wantErr)
+			}
+			if got := events[len(events)-1]; got != tt.wantLast {
+				t.Fatalf("last durability event = %q, want %q", got, tt.wantLast)
+			}
+			if tt.wantErr != nil {
+				return
+			}
+			t.Cleanup(func() { _ = reopened.Close() })
+			if len(synced) != 257 || !synced[prefix] || !synced[objects] {
+				t.Fatalf("Open synced %d directories (prefix %v, objects %v), want all 256 prefixes and objects/", len(synced), synced[prefix], synced[objects])
+			}
+			missing, err := reopened.Has(t.Context(), []Digest{digest})
+			if err != nil || len(missing) != 0 {
+				t.Fatalf("Has after Open = %v, %v; want the synced object present", missing, err)
+			}
+		})
+	}
+}
