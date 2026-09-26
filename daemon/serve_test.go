@@ -3,13 +3,16 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/yasyf/synckit/codec"
+	"github.com/yasyf/synckit/delivery"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/internal/rpctest"
 	"github.com/yasyf/synckit/manifest"
@@ -375,6 +378,67 @@ func TestEngineEventDrivesLocalSync(t *testing.T) {
 }
 
 func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
+	watched := t.TempDir()
+	fake := newFakeConsumer(syncservice.WatchItem{ID: "only", WatchDirs: []string{watched}, Fingerprint: "fp-1"})
+	startStubServe(t, map[string]*fakeConsumer{"me@self": fake})
+
+	resp := callReload(t)
+	if !resp.OK {
+		t.Fatalf("reload rpc: %s", resp.Error)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, calls := fake.reconcileOrigin(); calls > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no fs event drove a sync after the reload rpc returned: the watch generation died with the request ctx")
+		}
+		if err := os.WriteFile(filepath.Join(watched, "touch"), []byte(time.Now().String()), 0o600); err != nil {
+			t.Fatalf("touch watched dir: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if origin, _ := fake.reconcileOrigin(); origin != "" {
+		t.Errorf("event-driven local sync origin = %q, want empty", origin)
+	}
+}
+
+func TestReconcileCommandGivesAPeerRegisteredSinceStartALane(t *testing.T) {
+	startStubServe(t, map[string]*fakeConsumer{
+		"me@self":   newFakeConsumer(),
+		"peer@node": newFakeConsumer(),
+	})
+	if resp := callReload(t); !resp.OK {
+		t.Fatalf("reload rpc: %s", resp.Error)
+	}
+	fact, err := hostregistry.NewSSHHostFact("peer@node", "/opt/homebrew/bin/synckitd", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hostregistry.Mesh.RegisterHost(context.Background(), fact); err != nil {
+		t.Fatalf("register peer: %v", err)
+	}
+
+	cmd := newReconcileCmd()
+	cmd.SetArgs(nil)
+	cmd.SetOut(io.Discard)
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	statuses, err := delivery.Status(context.Background(), "stub")
+	if err != nil {
+		t.Fatalf("delivery status: %v", err)
+	}
+	if !slices.ContainsFunc(statuses, func(s delivery.PeerStatus) bool { return s.Peer == "peer@node" }) {
+		t.Fatalf("statuses = %+v, want a lane for peer@node after reconcile", statuses)
+	}
+}
+
+func startStubServe(t *testing.T, fakes map[string]*fakeConsumer) {
+	t.Helper()
 	cfgHome, err := os.MkdirTemp("", "skd")
 	if err != nil {
 		t.Fatalf("mkdir config home: %v", err)
@@ -393,9 +457,7 @@ func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
 		t.Fatalf("seed mesh: %v", err)
 	}
 
-	watched := t.TempDir()
-	fake := newFakeConsumer(syncservice.WatchItem{ID: "only", WatchDirs: []string{watched}, Fingerprint: "fp-1"})
-	fakeMesh(t, map[string]*fakeConsumer{"me@self": fake})
+	fakeMesh(t, fakes)
 
 	manifestsDir, err := ensureManifestsDir()
 	if err != nil {
@@ -423,28 +485,6 @@ func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
 			t.Error("serve did not stop after ctx cancel")
 		}
 	})
-
-	resp := callReload(t)
-	if !resp.OK {
-		t.Fatalf("reload rpc: %s", resp.Error)
-	}
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, calls := fake.reconcileOrigin(); calls > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("no fs event drove a sync after the reload rpc returned: the watch generation died with the request ctx")
-		}
-		if err := os.WriteFile(filepath.Join(watched, "touch"), []byte(time.Now().String()), 0o600); err != nil {
-			t.Fatalf("touch watched dir: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if origin, _ := fake.reconcileOrigin(); origin != "" {
-		t.Errorf("event-driven local sync origin = %q, want empty", origin)
-	}
 }
 
 // countingTransport is a Transport that records how many times it was closed, so a

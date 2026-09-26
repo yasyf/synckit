@@ -2,14 +2,14 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/yasyf/daemonkit"
 
-	"github.com/yasyf/synckit/delivery"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
+	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 )
 
@@ -19,22 +19,40 @@ func newReconcileCmd() *cobra.Command {
 		Short: "Run one convergent reconcile pass for every registered consumer.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return withCLIProcessScope(cmd.Context(), func(owned *daemonkit.Owned) error {
-				results, err := reconcileAll(cmd.Context(), owned)
-				if err != nil {
-					return err
+			results, err := reconcileResident(cmd.Context())
+			if err != nil {
+				return err
+			}
+			for _, res := range results {
+				if res.Err != "" {
+					cmd.Printf("%s: error: %s\n", res.Name, res.Err)
+					continue
 				}
-				for _, res := range results {
-					if res.Err != "" {
-						cmd.Printf("%s: error: %s\n", res.Name, res.Err)
-						continue
-					}
-					cmd.Printf("%s: reconciled\n", res.Name)
-				}
-				return delivery.Kick(cmd.Context(), "", "")
-			})
+				cmd.Printf("%s: reconciled\n", res.Name)
+			}
+			return nil
 		},
 	}
+}
+
+func reconcileResident(ctx context.Context) ([]reconcileResult, error) {
+	client, err := daemonClient()
+	if err != nil {
+		return nil, fmt.Errorf("dial synckitd: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+	resp, err := client.Call(ctx, &rpc.Request{Method: "reconcile"})
+	if err != nil {
+		return nil, fmt.Errorf("reconcile: %w", err)
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("reconcile: %s", resp.Error)
+	}
+	var results []reconcileResult
+	if err := json.Unmarshal(resp.Result, &results); err != nil {
+		return nil, fmt.Errorf("decode reconcile result: %w", err)
+	}
+	return results, nil
 }
 
 // reconcileResult summarizes one consumer's reconcile pass for the tick output and

@@ -57,9 +57,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file.
   An older synckitd cannot read the v2 state, so do not downgrade after
   upgrading.
-- **`synckitd reconcile` asks the running daemon to deliver.** The CLI no longer
-  delivers itself. It sends `delivery.kick` to synckitd and fails when the
-  daemon is not running.
+- **`synckitd reconcile` runs its pass inside the running daemon.** The CLI no
+  longer reconciles consumers or delivers itself. It sends the `reconcile` RPC
+  to synckitd, which reconciles every consumer, starts delivery lanes for hosts
+  registered since the daemon started, and kicks delivery. The command fails
+  when the daemon is not running.
 
 ## [0.39.2] - 2026-08-31
 
