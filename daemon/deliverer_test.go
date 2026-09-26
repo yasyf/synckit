@@ -155,6 +155,7 @@ func register[P any](d *rpc.Dispatcher, c *counter, method string, handle func(P
 }
 
 type fakeSource struct {
+	capsFailures int
 	counter
 	mu        sync.Mutex
 	artifacts bool
@@ -218,6 +219,15 @@ func (f *fakeSource) pinned(owner string) []artifact.Ref {
 func (f *fakeSource) dispatcher() *rpc.Dispatcher {
 	d := rpc.NewDispatcher()
 	register(d, &f.counter, syncservice.MethodCapabilities, func(struct{}) (any, error) {
+		f.mu.Lock()
+		fail := f.capsFailures > 0
+		if fail {
+			f.capsFailures--
+		}
+		f.mu.Unlock()
+		if fail {
+			return nil, errors.New("capabilities unavailable")
+		}
 		if f.artifacts {
 			return syncservice.ArtifactCapabilities("stub"), nil
 		}
@@ -1104,6 +1114,19 @@ func TestDelivererSupersedesAfterTheFinalBatch(t *testing.T) {
 func TestDelivererCoalescesTheFirstArtifactRun(t *testing.T) {
 	h := newDeliveryHarness(t, true, "peer@node")
 	artifactMaxWait = 400 * time.Millisecond
+	h.source.publish(2, h.source.blob([]byte("payload")))
+	started := time.Now()
+	h.start()
+	h.await("peer@node", "ack", acked(2))
+	if waited := time.Since(started); waited < artifactMaxWait {
+		t.Fatalf("first artifact run acked after %s, want the %s coalescing window", waited, artifactMaxWait)
+	}
+}
+
+func TestDelivererCoalescesTheFirstArtifactRunAfterACapabilityFailure(t *testing.T) {
+	h := newDeliveryHarness(t, true, "peer@node")
+	artifactMaxWait, deliveryBackoffBase = 400*time.Millisecond, time.Millisecond
+	h.source.capsFailures = 1
 	h.source.publish(2, h.source.blob([]byte("payload")))
 	started := time.Now()
 	h.start()

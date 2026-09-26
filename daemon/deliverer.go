@@ -314,7 +314,9 @@ func peerStatus(record deliveryRecord, live *laneLive) delivery.PeerStatus {
 }
 
 func (s *deliveryScheduler) work(l *lane) {
-	_, _ = s.detect(s.ctx, l)
+	if !s.awaitCapabilities(l) {
+		return
+	}
 	timer := time.NewTimer(time.Hour)
 	timer.Stop()
 	defer timer.Stop()
@@ -367,6 +369,24 @@ func (s *deliveryScheduler) work(l *lane) {
 		default:
 			delay = 0
 			s.settle(l)
+		}
+	}
+}
+
+func (s *deliveryScheduler) awaitCapabilities(l *lane) bool {
+	var delay time.Duration
+	for {
+		_, err := s.detect(s.ctx, l)
+		if err == nil {
+			return true
+		}
+		delay = min(max(2*delay, s.timing.backoffBase), s.timing.backoffMax)
+		slog.WarnContext(s.ctx, "delivery: capability detection failed", "manifest", l.service, "peer", l.peer, "err", err, "retry_in", delay)
+		l.update(func(v *laneLive) { v.lastError, v.nextAttemptAt = err.Error(), s.now().Add(delay) })
+		select {
+		case <-s.ctx.Done():
+			return false
+		case <-time.After(delay):
 		}
 	}
 }
