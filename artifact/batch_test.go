@@ -16,17 +16,13 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-func closureDigests(t *testing.T, s *Store, roots []Ref) []Digest {
+func closureEntries(t *testing.T, s *Store, roots []Ref) []ObjectEntry {
 	t.Helper()
 	closure, err := s.Closure(t.Context(), roots, DefaultClosureBound)
 	if err != nil {
 		t.Fatalf("Closure: %v", err)
 	}
-	digests := make([]Digest, 0, len(closure.Objects))
-	for _, object := range closure.Objects {
-		digests = append(digests, object.Digest)
-	}
-	return digests
+	return closure.Objects
 }
 
 func putParts(t *testing.T, dst *Store, d BatchDescriptor, parts [][]byte, skip []int) int {
@@ -73,7 +69,7 @@ func sourceBatch(t *testing.T, seed, size int) (*Store, []Ref, BatchDescriptor) 
 		t.Fatalf("PutGroup: %v", err)
 	}
 	roots := []Ref{group}
-	d, err := src.BuildBatch(t.Context(), closureDigests(t, src, roots))
+	d, err := src.BuildBatch(t.Context(), closureEntries(t, src, roots))
 	if err != nil {
 		t.Fatalf("BuildBatch: %v", err)
 	}
@@ -93,7 +89,7 @@ func TestBatchRoundTrip(t *testing.T) {
 	if len(d.Parts) != 4 {
 		t.Fatalf("parts = %d, want 4 for 3 MiB of random content", len(d.Parts))
 	}
-	again, err := src.BuildBatch(ctx, closureDigests(t, src, roots))
+	again, err := src.BuildBatch(ctx, closureEntries(t, src, roots))
 	if err != nil || !reflect.DeepEqual(again, d) {
 		t.Fatalf("rebuild = %+v, %v; want the identical descriptor", again.ID, err)
 	}
@@ -137,31 +133,31 @@ func TestBatchRoundTrip(t *testing.T) {
 
 func TestBuildBatchRefusesPastBounds(t *testing.T) {
 	s := newStore(t)
-	tooMany := make([]Digest, MaxBatchObjects+1)
+	tooMany := make([]ObjectEntry, MaxBatchObjects+1)
 	for i := range tooMany {
-		tooMany[i] = Sum([]byte(fmt.Sprint(i)))
+		tooMany[i] = ObjectEntry{Digest: Sum([]byte(fmt.Sprint(i))), Kind: KindBlob, Size: 1}
 	}
 	if _, err := s.BuildBatch(t.Context(), tooMany); !errors.Is(err, ErrBatchFull) {
 		t.Fatalf("BuildBatch(%d objects) err = %v, want ErrBatchFull", len(tooMany), err)
 	}
-	digests := make([]Digest, 0, MaxBatchRaw/ChunkSize+1)
+	entries := make([]ObjectEntry, 0, MaxBatchRaw/ChunkSize+1)
 	for i := range MaxBatchRaw / ChunkSize {
 		ref, err := s.PutBlob(t.Context(), randomBytes(100+i, ChunkSize))
 		if err != nil {
 			t.Fatalf("PutBlob: %v", err)
 		}
-		digests = append(digests, ref.Digest)
+		entries = append(entries, ObjectEntry(ref))
 	}
 	extra, err := s.PutBlob(t.Context(), []byte{1})
 	if err != nil {
 		t.Fatalf("PutBlob: %v", err)
 	}
-	if _, err := s.BuildBatch(t.Context(), append(digests, extra.Digest)); !errors.Is(err, ErrBatchFull) {
+	if _, err := s.BuildBatch(t.Context(), append(entries, ObjectEntry(extra))); !errors.Is(err, ErrBatchFull) {
 		t.Fatalf("BuildBatch(32 MiB + 1 B) err = %v, want ErrBatchFull", err)
 	}
 	var missing *MissingError
 	absent := Sum([]byte("absent"))
-	if _, err := s.BuildBatch(t.Context(), []Digest{extra.Digest, absent}); !errors.As(err, &missing) || missing.Digest != absent {
+	if _, err := s.BuildBatch(t.Context(), []ObjectEntry{ObjectEntry(extra), {Digest: absent, Kind: KindBlob, Size: 1}}); !errors.As(err, &missing) || missing.Digest != absent {
 		t.Fatalf("BuildBatch(absent) err = %v, want MissingError", err)
 	}
 }
@@ -416,7 +412,7 @@ func TestBeginBatchAdmission(t *testing.T) {
 		if err != nil {
 			t.Fatalf("PutBlob: %v", err)
 		}
-		d, err := src.BuildBatch(t.Context(), []Digest{ref.Digest})
+		d, err := src.BuildBatch(t.Context(), []ObjectEntry{ObjectEntry(ref)})
 		if err != nil {
 			t.Fatalf("BuildBatch: %v", err)
 		}
@@ -451,7 +447,7 @@ func TestGCSweepsExpiredStaging(t *testing.T) {
 		if err != nil {
 			t.Fatalf("PutBlob: %v", err)
 		}
-		d, err := s.BuildBatch(t.Context(), []Digest{ref.Digest})
+		d, err := s.BuildBatch(t.Context(), []ObjectEntry{ObjectEntry(ref)})
 		if err != nil {
 			t.Fatalf("BuildBatch: %v", err)
 		}
@@ -484,5 +480,90 @@ func TestGCSweepsExpiredStaging(t *testing.T) {
 	}
 	if held, err := s.BeginBatch(t.Context(), batches[1]); err != nil || len(held) != 0 {
 		t.Fatalf("fresh staged batch = %v, %v", held, err)
+	}
+}
+
+func TestBlobShapedLikeManifestTransfersAsBlob(t *testing.T) {
+	src := newStore(t)
+	lookalike := Manifest{
+		Schema: ManifestSchema, Media: "test.lookalike", Chunks: []ChunkRef{},
+		Deps: []Ref{{Digest: Sum([]byte("never stored")), Kind: KindBlob, Size: 1}},
+	}
+	encoded, err := lookalike.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := src.PutBlob(t.Context(), encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := src.BuildBatch(t.Context(), closureEntries(t, src, []Ref{ref}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []ObjectEntry{ObjectEntry(ref)}; !reflect.DeepEqual(d.Objects, want) {
+		t.Fatalf("batch objects = %+v, want %+v", d.Objects, want)
+	}
+	dst := newStore(t)
+	if _, err := dst.BeginBatch(t.Context(), d); err != nil {
+		t.Fatal(err)
+	}
+	putParts(t, dst, d, outboxParts(t, src, d), nil)
+	if report, err := dst.CommitBatch(t.Context(), d.ID); err != nil || report.Stored != 1 {
+		t.Fatalf("CommitBatch = %+v, %v; want the blob stored", report, err)
+	}
+	if missing, err := dst.Complete(t.Context(), []Ref{ref}); err != nil || missing != 0 {
+		t.Fatalf("Complete = %d, %v; want 0", missing, err)
+	}
+}
+
+func TestConcurrentSenderFinishesAfterAnotherCommits(t *testing.T) {
+	src, roots, d := sourceBatch(t, 11, 3*ChunkSize)
+	parts := outboxParts(t, src, d)
+	dst := newStore(t)
+	for sender := range 2 {
+		if held, err := dst.BeginBatch(t.Context(), d); err != nil || len(held) != 0 {
+			t.Fatalf("BeginBatch(sender %d) = %v, %v; want nothing held", sender, held, err)
+		}
+	}
+	putParts(t, dst, d, parts, nil)
+	first, err := dst.CommitBatch(t.Context(), d.ID)
+	if err != nil || first.Stored != len(d.Objects) {
+		t.Fatalf("first CommitBatch = %+v, %v", first, err)
+	}
+	if err := dst.PutPart(t.Context(), d.ID, 0, parts[0]); err != nil {
+		t.Fatalf("second sender's PutPart after the commit: %v", err)
+	}
+	second, err := dst.CommitBatch(t.Context(), d.ID)
+	if want := (CommitReport{Present: len(d.Objects)}); err != nil || second != want {
+		t.Fatalf("second CommitBatch = %+v, %v; want %+v", second, err, want)
+	}
+	held, err := dst.BeginBatch(t.Context(), d)
+	if want := []int{0, 1, 2, 3}[:len(d.Parts)]; err != nil || !reflect.DeepEqual(held, want) {
+		t.Fatalf("BeginBatch after commit = %v, %v; want %v", held, err, want)
+	}
+	if missing, err := dst.Complete(t.Context(), roots); err != nil || missing != 0 {
+		t.Fatalf("Complete = %d, %v; want 0", missing, err)
+	}
+	ageStaging(t, dst, committedDir, 2*StagingTTL)
+	if _, err := dst.CommitBatch(t.Context(), d.ID); err == nil {
+		t.Fatal("CommitBatch succeeded after GC swept the committed record")
+	}
+}
+
+func ageStaging(t *testing.T, s *Store, dir string, age time.Duration) {
+	t.Helper()
+	old := time.Now().Add(-age)
+	entries, err := os.ReadDir(filepath.Join(s.root, dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if err := os.Chtimes(filepath.Join(s.root, dir, entry.Name()), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.GC(t.Context()); err != nil {
+		t.Fatal(err)
 	}
 }

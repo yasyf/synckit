@@ -251,9 +251,9 @@ func (f *fakeSource) dispatcher() *rpc.Dispatcher {
 		entries := make([]artifact.ObjectEntry, 0, len(p.Objects))
 		var raw []byte
 		packed := int64(len("SKP1")) + 1
-		for _, digest := range p.Objects {
-			data := f.objects.data[digest]
-			entries = append(entries, artifact.ObjectEntry{Digest: digest, Kind: f.objects.kinds[digest], Size: int64(len(data))})
+		for _, object := range p.Objects {
+			data := f.objects.data[object.Digest]
+			entries = append(entries, artifact.ObjectEntry{Digest: object.Digest, Kind: f.objects.kinds[object.Digest], Size: int64(len(data))})
 			raw = append(raw, data...)
 			packed += 1 + 32 + int64(len(binary.AppendUvarint(nil, uint64(len(data))))) + int64(len(data))
 		}
@@ -963,4 +963,91 @@ func TestDelivererRelaysWhileAnotherPeerIsDown(t *testing.T) {
 			t.Fatal("relayed closure incomplete on c@node")
 		}
 	})
+}
+
+func TestDelivererReconcilesPinsAfterRestart(t *testing.T) {
+	tests := []struct {
+		name  string
+		acked bool
+	}{
+		{"crash before narrowing a staged pending", false},
+		{"crash after the ack before unpinning", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newDeliveryHarness(t, true, "peer@node")
+			h.sinks["peer@node"].unreachable = true
+			root := h.source.blob([]byte("current"))
+			stale := h.source.blob([]byte("superseded"))
+			h.source.publish(1, root)
+			change, err := syncservice.NewExportedArtifactChange("stub", testManifest().Service.SchemaFingerprint,
+				syncservice.ChangeSnapshot, syncservice.NewRevision(0), syncservice.NewRevision(1), []byte(`{"v":1}`), []artifact.Ref{root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			bound, err := syncservice.BindDelivery(change, "me@self")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.store.stage(t.Context(), "peer@node", "", bound); err != nil {
+				t.Fatal(err)
+			}
+			want := []artifact.Ref{root}
+			if tt.acked {
+				if err := h.store.acknowledge(t.Context(), "peer@node", bound, syncservice.ApplyResult{AckedRevision: bound.SourceRevision}); err != nil {
+					t.Fatal(err)
+				}
+				want = nil
+			}
+			owner := deliveryPinOwnerPrefix + "peer@node"
+			h.source.mu.Lock()
+			h.source.pins[owner] = []artifact.Ref{root, stale}
+			h.source.mu.Unlock()
+			h.start()
+			deadline := time.Now().Add(5 * time.Second)
+			for !slices.Equal(h.source.pinned(owner), want) {
+				if time.Now().After(deadline) {
+					t.Fatalf("delivery pins = %v, want %v", h.source.pinned(owner), want)
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		})
+	}
+}
+
+func TestSharedBatchDropsAfterLastSender(t *testing.T) {
+	s := &deliveryScheduler{batches: map[sharedBatchKey]*sharedBatch{}}
+	key := sharedBatchKeyFor("stub", []artifact.ObjectEntry{{Digest: artifact.Sum([]byte("x")), Kind: artifact.KindBlob, Size: 1}})
+	id := artifact.Sum([]byte("batch"))
+	var dropped []artifact.Digest
+	drop := func(id artifact.Digest) error {
+		dropped = append(dropped, id)
+		return nil
+	}
+	steps := []struct {
+		name      string
+		hold      bool
+		committed artifact.Digest
+		want      []artifact.Digest
+	}{
+		{"first sender holds", true, "", nil},
+		{"second sender holds", true, "", nil},
+		{"first sender commits while the second still reads", false, id, nil},
+		{"second sender fails last and drops the committed batch", false, "", []artifact.Digest{id}},
+		{"a later sender holds", true, "", []artifact.Digest{id}},
+		{"a failed sender alone never drops", false, "", []artifact.Digest{id}},
+	}
+	for _, step := range steps {
+		if step.hold {
+			s.holdBatch(key)
+		} else if err := s.releaseBatch(key, step.committed, drop); err != nil {
+			t.Fatalf("%s: releaseBatch: %v", step.name, err)
+		}
+		if !slices.Equal(dropped, step.want) {
+			t.Fatalf("%s: dropped = %v, want %v", step.name, dropped, step.want)
+		}
+	}
+	if len(s.batches) != 0 {
+		t.Fatalf("batches = %v, want none held", s.batches)
+	}
 }

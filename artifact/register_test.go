@@ -167,9 +167,9 @@ func TestRegisterServesSourceMethods(t *testing.T) {
 		t.Fatalf("have = %v, want [%s]", have.Missing, absent)
 	}
 
-	digests := []Digest{fixture.objects[0].Digest, fixture.objects[1].Digest}
-	built := mustCall[BatchDescriptor](t, d, MethodBatchBuild, BatchBuildParams{Objects: digests})
-	direct, err := s.BuildBatch(t.Context(), digests)
+	entries := []ObjectEntry{fixture.objects[0], fixture.objects[1]}
+	built := mustCall[BatchDescriptor](t, d, MethodBatchBuild, BatchBuildParams{Objects: entries})
+	direct, err := s.BuildBatch(t.Context(), entries)
 	if err != nil || !reflect.DeepEqual(built, direct) {
 		t.Fatalf("batch.build = %+v, direct %+v, %v", built, direct, err)
 	}

@@ -35,8 +35,11 @@ const (
 	MaxHaveDigests = 16384
 	// MaxClosurePage bounds the objects of one closure page.
 	MaxClosurePage = 16384
-	// MaxRoots bounds the artifact roots of one change or pin set.
+	// MaxRoots bounds the artifact roots of one change.
 	MaxRoots = 4096
+	// MaxPinRoots bounds one pin set, which holds an old and a new change's
+	// roots at once while a replacement narrows it.
+	MaxPinRoots = 2 * MaxRoots
 	// MaxIncoming bounds the receive batches one store stages at once.
 	MaxIncoming = 8
 	// WindowSize is the zstd encoder window and the decoder's largest

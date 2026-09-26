@@ -62,7 +62,7 @@ func (c *Client) ArtifactHave(ctx context.Context, digests []artifact.Digest) ([
 }
 
 // BatchBuild asks the source store to build an outbox batch of objects.
-func (c *Client) BatchBuild(ctx context.Context, objects []artifact.Digest) (artifact.BatchDescriptor, error) {
+func (c *Client) BatchBuild(ctx context.Context, objects []artifact.ObjectEntry) (artifact.BatchDescriptor, error) {
 	params := artifact.BatchBuildParams{Objects: objects}
 	if err := params.Validate(); err != nil {
 		return artifact.BatchDescriptor{}, err

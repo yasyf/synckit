@@ -73,6 +73,9 @@ type lane struct {
 
 	mu   sync.Mutex
 	live laneLive
+
+	pinsSettled bool
+	pinnedFor   string
 }
 
 func (l *lane) poke() {
@@ -106,6 +109,19 @@ type deliveryScheduler struct {
 	order    []laneKey
 	now      func() time.Time
 	snapshot func(ctx context.Context, peer string)
+
+	batchMu sync.Mutex
+	batches map[sharedBatchKey]*sharedBatch
+}
+
+type sharedBatchKey struct {
+	service string
+	objects artifact.Digest
+}
+
+type sharedBatch struct {
+	holders   int
+	committed artifact.Digest
 }
 
 func newDeliveryScheduler(
@@ -120,6 +136,7 @@ func newDeliveryScheduler(
 		ctx: ctx, wg: wg, scope: scope, store: store, monitor: monitor, self: self,
 		services: make(map[string]bool),
 		lanes:    make(map[laneKey]*lane),
+		batches:  make(map[sharedBatchKey]*sharedBatch),
 		now:      time.Now,
 		snapshot: func(ctx context.Context, peer string) { tailscaleSnapshot(ctx, scope, peer) },
 	}
@@ -358,12 +375,12 @@ func (s *deliveryScheduler) prepare(ctx context.Context, l *lane) (bool, *syncse
 	}
 	switch {
 	case pending == nil && source == acked:
-		return artifacts, nil, nil
+		return artifacts, nil, s.reconcilePins(ctx, l, artifacts, nil)
 	case pending == nil:
 		bound, err := s.replace(ctx, l, artifacts, "", nil, fresh)
 		return artifacts, &bound, err
 	case source == floor:
-		return artifacts, pending, nil
+		return artifacts, pending, s.reconcilePins(ctx, l, artifacts, pending)
 	}
 	if fresh.Kind != syncservice.ChangeSnapshot {
 		if fresh, err = s.export(ctx, l, artifacts, syncservice.NewRevision(0)); err != nil {
@@ -408,6 +425,7 @@ func (s *deliveryScheduler) replace(
 	}
 	owner := deliveryPinOwnerPrefix + l.peer
 	if artifacts {
+		l.pinsSettled = false
 		if err := l.local.PinsSet(ctx, owner, unionRoots(old, bound.Artifacts)); err != nil {
 			return syncservice.ChangeEnvelope{}, fmt.Errorf("pin staged roots: %w", err)
 		}
@@ -419,8 +437,25 @@ func (s *deliveryScheduler) replace(
 		if err := l.local.PinsSet(ctx, owner, bound.Artifacts); err != nil {
 			return syncservice.ChangeEnvelope{}, fmt.Errorf("pin pending roots: %w", err)
 		}
+		l.pinsSettled, l.pinnedFor = true, bound.ChangeID
 	}
 	return bound, nil
+}
+
+func (s *deliveryScheduler) reconcilePins(ctx context.Context, l *lane, artifacts bool, pending *syncservice.ChangeEnvelope) error {
+	var changeID string
+	var roots []artifact.Ref
+	if pending != nil {
+		changeID, roots = pending.ChangeID, pending.Artifacts
+	}
+	if !artifacts || (l.pinsSettled && l.pinnedFor == changeID) {
+		return nil
+	}
+	if err := l.local.PinsSet(ctx, deliveryPinOwnerPrefix+l.peer, roots); err != nil {
+		return fmt.Errorf("reconcile delivery pins: %w", err)
+	}
+	l.pinsSettled, l.pinnedFor = true, changeID
+	return nil
 }
 
 func unionRoots(old, next []artifact.Ref) []artifact.Ref {
@@ -645,14 +680,23 @@ func (r *deliveryRun) page(ctx context.Context, objects []artifact.ObjectEntry, 
 	return flush()
 }
 
-func (r *deliveryRun) send(ctx context.Context, objects []artifact.ObjectEntry) error {
-	digests := make([]artifact.Digest, len(objects))
+func (r *deliveryRun) send(ctx context.Context, objects []artifact.ObjectEntry) (err error) {
 	var raw int64
-	for i, o := range objects {
-		digests[i] = o.Digest
+	for _, o := range objects {
 		raw += o.Size
 	}
-	batch, err := r.l.local.BatchBuild(ctx, digests)
+	key := sharedBatchKeyFor(r.l.service, objects)
+	r.s.holdBatch(key)
+	var committed artifact.Digest
+	defer func() {
+		err = errors.Join(err, r.s.releaseBatch(key, committed, func(id artifact.Digest) error {
+			if err := r.l.local.BatchDrop(ctx, id); err != nil {
+				return fmt.Errorf("drop batch %s: %w", id, err)
+			}
+			return nil
+		}))
+	}()
+	batch, err := r.l.local.BatchBuild(ctx, objects)
 	if err != nil {
 		return fmt.Errorf("build batch: %w", err)
 	}
@@ -685,14 +729,49 @@ func (r *deliveryRun) send(ctx context.Context, objects []artifact.ObjectEntry) 
 	if _, err := r.peer.BatchCommit(ctx, batch.ID); err != nil {
 		return fmt.Errorf("commit batch %s: %w", batch.ID, err)
 	}
-	if err := r.l.local.BatchDrop(ctx, batch.ID); err != nil {
-		return fmt.Errorf("drop batch %s: %w", batch.ID, err)
-	}
+	committed = batch.ID
 	r.l.update(func(v *laneLive) {
 		v.progress.ObjectsSent += int64(len(objects))
 		v.progress.BytesSent += raw
 	})
 	return nil
+}
+
+func sharedBatchKeyFor(service string, objects []artifact.ObjectEntry) sharedBatchKey {
+	var list strings.Builder
+	for _, o := range objects {
+		fmt.Fprintf(&list, "%s:%s:%d\n", o.Kind, o.Digest, o.Size)
+	}
+	return sharedBatchKey{service: service, objects: artifact.Sum([]byte(list.String()))}
+}
+
+func (s *deliveryScheduler) holdBatch(key sharedBatchKey) {
+	s.batchMu.Lock()
+	defer s.batchMu.Unlock()
+	b := s.batches[key]
+	if b == nil {
+		b = &sharedBatch{}
+		s.batches[key] = b
+	}
+	b.holders++
+}
+
+func (s *deliveryScheduler) releaseBatch(key sharedBatchKey, committed artifact.Digest, drop func(artifact.Digest) error) error {
+	s.batchMu.Lock()
+	defer s.batchMu.Unlock()
+	b := s.batches[key]
+	b.holders--
+	if committed != "" {
+		b.committed = committed
+	}
+	if b.holders > 0 {
+		return nil
+	}
+	delete(s.batches, key)
+	if b.committed == "" {
+		return nil
+	}
+	return drop(b.committed)
 }
 
 func (r *deliveryRun) refused(peer netpolicy.State, err error) error {
@@ -749,7 +828,11 @@ func (r *deliveryRun) apply(ctx context.Context) error {
 		return err
 	}
 	if r.artifacts {
-		return r.l.local.PinsSet(ctx, deliveryPinOwnerPrefix+r.l.peer, nil)
+		r.l.pinsSettled = false
+		if err := r.l.local.PinsSet(ctx, deliveryPinOwnerPrefix+r.l.peer, nil); err != nil {
+			return err
+		}
+		r.l.pinsSettled, r.l.pinnedFor = true, ""
 	}
 	return nil
 }

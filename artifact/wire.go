@@ -192,25 +192,25 @@ type HaveResult struct {
 }
 
 // BatchBuildParams asks the source store to build a batch of Objects in the
-// given order.
+// given order, each packed under the role its closure reference gives it.
 type BatchBuildParams struct {
-	Objects []Digest `json:"objects"`
+	Objects []ObjectEntry `json:"objects"`
 }
 
-// Validate checks the object count and unique valid digests.
+// Validate checks the object count and unique valid entries.
 func (p BatchBuildParams) Validate() error {
 	if len(p.Objects) == 0 || len(p.Objects) > MaxBatchObjects {
 		return fmt.Errorf("%w: batch build of %d objects, want 1..%d", ErrInvalid, len(p.Objects), MaxBatchObjects)
 	}
 	seen := make(map[Digest]struct{}, len(p.Objects))
-	for _, digest := range p.Objects {
-		if err := digest.Validate(); err != nil {
+	for _, object := range p.Objects {
+		if err := object.Validate(); err != nil {
 			return err
 		}
-		if _, dup := seen[digest]; dup {
-			return fmt.Errorf("%w: duplicate batch object %s", ErrInvalid, digest)
+		if _, dup := seen[object.Digest]; dup {
+			return fmt.Errorf("%w: duplicate batch object %s", ErrInvalid, object.Digest)
 		}
-		seen[digest] = struct{}{}
+		seen[object.Digest] = struct{}{}
 	}
 	return nil
 }
@@ -308,5 +308,8 @@ func (p PinsSetParams) Validate() error {
 	if p.Owner == "" || strings.ContainsAny(p.Owner, "\x00\r\n") {
 		return fmt.Errorf("%w: pin owner %q", ErrInvalid, p.Owner)
 	}
-	return ValidateRoots(p.Roots)
+	if len(p.Roots) > MaxPinRoots {
+		return fmt.Errorf("%w: %d pinned roots exceed %d", ErrInvalid, len(p.Roots), MaxPinRoots)
+	}
+	return validateRefs(p.Roots, "pinned root")
 }

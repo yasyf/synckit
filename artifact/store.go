@@ -1,12 +1,12 @@
 package artifact
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,14 +26,13 @@ const (
 	pinsDir        = "pins"
 	outboxDir      = "outbox"
 	incomingDir    = "incoming"
+	committedDir   = "committed"
 	descriptorName = "descriptor.json"
 	dirPerm        = 0o700
 	filePerm       = 0o600
 	openLockWait   = time.Second
 	closureMemos   = 2
 )
-
-var manifestPrefix = []byte(`{"schema":"` + ManifestSchema + `",`)
 
 // ServiceRoot returns the store directory serviceID's resident consumer
 // exclusively owns: <hostregistry.Mesh dir>/artifacts/v1/<serviceID>.
@@ -53,9 +52,11 @@ func ServiceRoot(serviceID string) (string, error) {
 // through OpenReadOnly after pinning its roots via the owning process, so GC
 // cannot remove them mid-read.
 type Reader struct {
-	root   string
-	memoMu sync.Mutex
-	memo   []closureMemo
+	root       string
+	memoMu     sync.Mutex
+	memo       []closureMemo
+	publishMu  sync.Mutex
+	publishing map[Digest]chan struct{}
 }
 
 type closureMemo struct {
@@ -107,7 +108,7 @@ func Open(root string) (*Store, error) {
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("artifact: open %s: %w", root, err), lock.Close())
 	}
-	return &Store{Reader: &Reader{root: root}, lock: lock, encoder: encoder}, nil
+	return &Store{Reader: &Reader{root: root, publishing: map[Digest]chan struct{}{}}, lock: lock, encoder: encoder}, nil
 }
 
 // Close releases store.lock.
@@ -116,7 +117,7 @@ func (s *Store) Close() error {
 }
 
 func createLayout(root string) error {
-	for _, dir := range []string{objectsDir, pinsDir, outboxDir, incomingDir} {
+	for _, dir := range []string{objectsDir, pinsDir, outboxDir, incomingDir, committedDir} {
 		if err := mkdirAll(filepath.Join(root, dir)); err != nil {
 			return err
 		}
@@ -161,8 +162,23 @@ func (r *Reader) objectPath(digest Digest) string {
 	return filepath.Join(r.root, objectsDir, string(digest[:2]), string(digest))
 }
 
+func (r *Reader) inFlight(digest Digest) bool {
+	r.publishMu.Lock()
+	defer r.publishMu.Unlock()
+	_, publishing := r.publishing[digest]
+	return publishing
+}
+
+func (r *Reader) stat(digest Digest) (fs.FileInfo, error) {
+	path := r.objectPath(digest)
+	if r.inFlight(digest) {
+		return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
+	}
+	return os.Stat(path)
+}
+
 func (r *Reader) present(digest Digest) (bool, error) {
-	_, err := os.Stat(r.objectPath(digest))
+	_, err := r.stat(digest)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -173,6 +189,9 @@ func (r *Reader) present(digest Digest) (bool, error) {
 }
 
 func (r *Reader) readObject(digest Digest) ([]byte, error) {
+	if r.inFlight(digest) {
+		return nil, &MissingError{Digest: digest}
+	}
 	data, err := readFile(r.objectPath(digest))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, &MissingError{Digest: digest}
@@ -201,7 +220,29 @@ func (r *Reader) readManifest(digest Digest, size int64) (Manifest, []byte, erro
 	return m, data, nil
 }
 
+func (s *Store) claim(digest Digest) func() {
+	for {
+		s.publishMu.Lock()
+		wait, publishing := s.publishing[digest]
+		if !publishing {
+			done := make(chan struct{})
+			s.publishing[digest] = done
+			s.publishMu.Unlock()
+			return func() {
+				s.publishMu.Lock()
+				delete(s.publishing, digest)
+				s.publishMu.Unlock()
+				close(done)
+			}
+		}
+		s.publishMu.Unlock()
+		<-wait
+	}
+}
+
 func (s *Store) writeObject(digest Digest, data []byte) (bool, error) {
+	release := s.claim(digest)
+	defer release()
 	path := s.objectPath(digest)
 	_, err := os.Stat(path)
 	if err == nil {
@@ -496,17 +537,21 @@ func (r *Reader) Verify(ctx context.Context, roots []Ref) error {
 }
 
 type walker struct {
-	reader  *Reader
-	bound   ClosureBound
-	audit   bool
-	seen    map[Digest]struct{}
-	objects []ObjectEntry
-	bytes   int64
-	missing int
+	reader   *Reader
+	bound    ClosureBound
+	audit    bool
+	emitted  map[Digest]struct{}
+	expanded map[Digest]struct{}
+	objects  []ObjectEntry
+	bytes    int64
+	missing  int
 }
 
 func newWalker(r *Reader, bound ClosureBound, audit bool) *walker {
-	return &walker{reader: r, bound: bound, audit: audit, seen: map[Digest]struct{}{}, objects: []ObjectEntry{}}
+	return &walker{
+		reader: r, bound: bound, audit: audit,
+		emitted: map[Digest]struct{}{}, expanded: map[Digest]struct{}{}, objects: []ObjectEntry{},
+	}
 }
 
 func (w *walker) walk(ctx context.Context, roots []Ref) error {
@@ -518,15 +563,27 @@ func (w *walker) walk(ctx context.Context, roots []Ref) error {
 	return nil
 }
 
+func (w *walker) reached(digest Digest) bool {
+	_, emitted := w.emitted[digest]
+	_, expanded := w.expanded[digest]
+	return emitted || expanded
+}
+
 func (w *walker) visit(ctx context.Context, ref Ref, depth int) error {
-	if _, seen := w.seen[ref.Digest]; seen {
+	if ref.Kind == KindBlob {
+		if _, emitted := w.emitted[ref.Digest]; emitted {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return w.blob(ref)
+	}
+	if _, expanded := w.expanded[ref.Digest]; expanded {
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
 		return err
-	}
-	if ref.Kind == KindBlob {
-		return w.blob(ref)
 	}
 	if depth > w.bound.MaxDepth {
 		return &ClosureError{Bound: BoundDepth, Limit: int64(w.bound.MaxDepth)}
@@ -534,7 +591,7 @@ func (w *walker) visit(ctx context.Context, ref Ref, depth int) error {
 	m, encoded, err := w.reader.readManifest(ref.Digest, ref.Size)
 	var missing *MissingError
 	if w.audit && errors.As(err, &missing) {
-		w.seen[ref.Digest] = struct{}{}
+		w.expanded[ref.Digest] = struct{}{}
 		w.missing++
 		return nil
 	}
@@ -551,14 +608,18 @@ func (w *walker) visit(ctx context.Context, ref Ref, depth int) error {
 			return err
 		}
 	}
+	w.expanded[ref.Digest] = struct{}{}
+	if _, emitted := w.emitted[ref.Digest]; emitted {
+		return nil
+	}
 	return w.emit(ObjectEntry{Digest: ref.Digest, Kind: KindManifest, Size: int64(len(encoded))})
 }
 
 func (w *walker) blob(ref Ref) error {
 	if w.audit {
-		info, err := os.Stat(w.reader.objectPath(ref.Digest))
+		info, err := w.reader.stat(ref.Digest)
 		if errors.Is(err, os.ErrNotExist) {
-			w.seen[ref.Digest] = struct{}{}
+			w.emitted[ref.Digest] = struct{}{}
 			w.missing++
 			return nil
 		}
@@ -579,17 +640,8 @@ func (w *walker) emit(entry ObjectEntry) error {
 	if w.bytes+entry.Size > w.bound.MaxBytes {
 		return &ClosureError{Bound: BoundBytes, Limit: w.bound.MaxBytes}
 	}
-	w.seen[entry.Digest] = struct{}{}
+	w.emitted[entry.Digest] = struct{}{}
 	w.objects = append(w.objects, entry)
 	w.bytes += entry.Size
 	return nil
-}
-
-func sniffKind(data []byte) Kind {
-	if bytes.HasPrefix(data, manifestPrefix) {
-		if _, err := DecodeManifest(data); err == nil {
-			return KindManifest
-		}
-	}
-	return KindBlob
 }

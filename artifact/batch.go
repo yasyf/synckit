@@ -27,7 +27,7 @@ func partName(index int) string {
 // parts and returns the batch's descriptor. Identical inputs name the same
 // batch, and a rebuild of a present batch keeps its parts and refreshes its
 // StagingTTL.
-func (s *Store) BuildBatch(ctx context.Context, objects []Digest) (BatchDescriptor, error) {
+func (s *Store) BuildBatch(ctx context.Context, objects []ObjectEntry) (BatchDescriptor, error) {
 	if len(objects) > MaxBatchObjects {
 		return BatchDescriptor{}, fmt.Errorf("%w: %d objects exceed %d", ErrBatchFull, len(objects), MaxBatchObjects)
 	}
@@ -37,15 +37,18 @@ func (s *Store) BuildBatch(ctx context.Context, objects []Digest) (BatchDescript
 	s.gcMu.RLock()
 	defer s.gcMu.RUnlock()
 	var raw int64
-	for _, digest := range objects {
-		info, err := os.Stat(s.objectPath(digest))
+	for _, object := range objects {
+		info, err := s.stat(object.Digest)
 		if errors.Is(err, os.ErrNotExist) {
-			return BatchDescriptor{}, &MissingError{Digest: digest}
+			return BatchDescriptor{}, &MissingError{Digest: object.Digest}
 		}
 		if err != nil {
-			return BatchDescriptor{}, fmt.Errorf("artifact: stat object %s: %w", digest, err)
+			return BatchDescriptor{}, fmt.Errorf("artifact: stat object %s: %w", object.Digest, err)
 		}
-		raw += info.Size()
+		if info.Size() != object.Size {
+			return BatchDescriptor{}, fmt.Errorf("%w: %s %s holds %d bytes, want %d", ErrInvalid, object.Kind, object.Digest, info.Size(), object.Size)
+		}
+		raw += object.Size
 	}
 	if raw > MaxBatchRaw {
 		return BatchDescriptor{}, fmt.Errorf("%w: %d object bytes exceed %d", ErrBatchFull, raw, MaxBatchRaw)
@@ -67,27 +70,29 @@ func (s *Store) BuildBatch(ctx context.Context, objects []Digest) (BatchDescript
 	return d, nil
 }
 
-func (s *Store) pack(ctx context.Context, dir string, objects []Digest) (BatchDescriptor, error) {
+func (s *Store) pack(ctx context.Context, dir string, objects []ObjectEntry) (BatchDescriptor, error) {
 	parts := &partWriter{dir: dir, buf: make([]byte, 0, PartSize)}
 	s.encoder.Reset(parts)
 	pack := &packWriter{w: s.encoder}
 	if err := pack.begin(); err != nil {
 		return BatchDescriptor{}, err
 	}
-	entries := make([]ObjectEntry, 0, len(objects))
-	for _, digest := range objects {
+	for _, object := range objects {
 		if err := ctx.Err(); err != nil {
 			return BatchDescriptor{}, err
 		}
-		data, err := s.readObject(digest)
+		data, err := s.readObject(object.Digest)
 		if err != nil {
 			return BatchDescriptor{}, err
 		}
-		entry := ObjectEntry{Digest: digest, Kind: sniffKind(data), Size: int64(len(data))}
-		if err := pack.object(entry, data); err != nil {
+		if object.Kind == KindManifest {
+			if _, err := DecodeManifest(data); err != nil {
+				return BatchDescriptor{}, fmt.Errorf("artifact: manifest %s: %w", object.Digest, err)
+			}
+		}
+		if err := pack.object(object, data); err != nil {
 			return BatchDescriptor{}, err
 		}
-		entries = append(entries, entry)
 	}
 	if err := pack.end(); err != nil {
 		return BatchDescriptor{}, err
@@ -98,7 +103,7 @@ func (s *Store) pack(ctx context.Context, dir string, objects []Digest) (BatchDe
 	if err := parts.flush(); err != nil {
 		return BatchDescriptor{}, err
 	}
-	return NewBatchDescriptor(pack.n, entries, parts.parts)
+	return NewBatchDescriptor(pack.n, objects, parts.parts)
 }
 
 func publishStaged(tmp, dir string, d BatchDescriptor) error {
@@ -153,7 +158,8 @@ func (s *Store) DropBatch(ctx context.Context, id Digest) error {
 
 // BeginBatch stages d for receipt and returns the parts already held,
 // ascending. Re-beginning a staged batch refreshes its StagingTTL and
-// resumes it; a new batch is refused while MaxIncoming batches are staged.
+// resumes it, re-beginning a batch committed within StagingTTL reports every
+// part held, and a new batch is refused while MaxIncoming batches are staged.
 func (s *Store) BeginBatch(ctx context.Context, d BatchDescriptor) ([]int, error) {
 	if err := d.Validate(); err != nil {
 		return nil, err
@@ -177,6 +183,18 @@ func (s *Store) BeginBatch(ctx context.Context, d BatchDescriptor) ([]int, error
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("artifact: stat batch %s: %w", d.ID, err)
+	}
+	if _, err := s.committedBatch(d.ID); err == nil {
+		marker := s.committedPath(d.ID)
+		now := time.Now()
+		if err := os.Chtimes(marker, now, now); err != nil {
+			return nil, fmt.Errorf("artifact: touch committed batch %s: %w", d.ID, err)
+		}
+		held := make([]int, len(d.Parts))
+		for index := range held {
+			held[index] = index
+		}
+		return held, nil
 	}
 	entries, err := os.ReadDir(incoming)
 	if err != nil {
@@ -216,6 +234,14 @@ func heldParts(dir string, parts int) ([]int, error) {
 	return held, nil
 }
 
+func (s *Store) committedPath(id Digest) string {
+	return filepath.Join(s.root, committedDir, string(id))
+}
+
+func (s *Store) committedBatch(id Digest) (BatchDescriptor, error) {
+	return durable.ReadFile[BatchDescriptor](s.committedPath(id))
+}
+
 func (s *Store) stagedBatch(id Digest) (string, BatchDescriptor, error) {
 	dir := filepath.Join(s.root, incomingDir, string(id))
 	d, err := durable.ReadFile[BatchDescriptor](filepath.Join(dir, descriptorName))
@@ -226,7 +252,8 @@ func (s *Store) stagedBatch(id Digest) (string, BatchDescriptor, error) {
 }
 
 // PutPart durably writes part index of staged batch id after checking its
-// length and sha256 against the descriptor.
+// length and sha256 against the descriptor. A part of a batch another sender
+// already committed is accepted without being written.
 func (s *Store) PutPart(ctx context.Context, id Digest, index int, data []byte) error {
 	if err := (BatchPutParams{ID: id, Index: index, Data: data}).Validate(); err != nil {
 		return err
@@ -238,6 +265,9 @@ func (s *Store) PutPart(ctx context.Context, id Digest, index int, data []byte) 
 	defer s.gcMu.RUnlock()
 	dir, d, err := s.stagedBatch(id)
 	if err != nil {
+		if _, committedErr := s.committedBatch(id); committedErr == nil {
+			return nil
+		}
 		return err
 	}
 	if index >= len(d.Parts) {
@@ -247,6 +277,9 @@ func (s *Store) PutPart(ctx context.Context, id Digest, index int, data []byte) 
 		return fmt.Errorf("%w: part %d of batch %s does not match its descriptor", ErrInvalid, index, id)
 	}
 	if err := durable.WriteFile(filepath.Join(dir, partName(index)), data, filePerm); err != nil {
+		if _, committedErr := s.committedBatch(id); committedErr == nil {
+			return nil
+		}
 		return fmt.Errorf("artifact: write part %d of batch %s: %w", index, id, err)
 	}
 	return nil
@@ -256,7 +289,9 @@ func (s *Store) PutPart(ctx context.Context, id Digest, index int, data []byte) 
 // verifies every object's kind, digest, and size, every manifest strictly,
 // and that every manifest's children precede it, before storing anything.
 // It then durably creates each absent object in order, touches each present
-// one, and removes the staging.
+// one, records the batch as committed for StagingTTL, and removes the
+// staging. Re-committing a recorded batch touches its objects and reports
+// them present, so a concurrent sender of the same batch finishes too.
 func (s *Store) CommitBatch(ctx context.Context, id Digest) (CommitReport, error) {
 	if err := id.Validate(); err != nil {
 		return CommitReport{}, err
@@ -266,6 +301,9 @@ func (s *Store) CommitBatch(ctx context.Context, id Digest) (CommitReport, error
 	s.incomingMu.Lock()
 	defer s.incomingMu.Unlock()
 	dir, d, err := s.stagedBatch(id)
+	if errors.Is(err, os.ErrNotExist) {
+		return s.recommit(ctx, id, err)
+	}
 	if err != nil {
 		return CommitReport{}, err
 	}
@@ -306,10 +344,41 @@ func (s *Store) CommitBatch(ctx context.Context, id Digest) (CommitReport, error
 	if err != nil {
 		return CommitReport{}, err
 	}
+	marker, err := durable.Marshal(d)
+	if err != nil {
+		return CommitReport{}, fmt.Errorf("artifact: encode batch %s: %w", id, err)
+	}
+	if err := durable.WriteFile(s.committedPath(id), marker, filePerm); err != nil {
+		return CommitReport{}, fmt.Errorf("artifact: record committed batch %s: %w", id, err)
+	}
 	if err := durable.RemoveTree(dir); err != nil {
 		return CommitReport{}, fmt.Errorf("artifact: remove staged batch %s: %w", id, err)
 	}
 	return report, nil
+}
+
+func (s *Store) recommit(ctx context.Context, id Digest, unstaged error) (CommitReport, error) {
+	d, err := s.committedBatch(id)
+	if errors.Is(err, os.ErrNotExist) {
+		return CommitReport{}, unstaged
+	}
+	if err != nil {
+		return CommitReport{}, fmt.Errorf("artifact: read committed batch %s: %w", id, err)
+	}
+	now := time.Now()
+	for _, object := range d.Objects {
+		if err := ctx.Err(); err != nil {
+			return CommitReport{}, err
+		}
+		err := os.Chtimes(s.objectPath(object.Digest), now, now)
+		if errors.Is(err, os.ErrNotExist) {
+			return CommitReport{}, errors.Join(&MissingError{Digest: object.Digest}, durable.Remove(s.committedPath(id)))
+		}
+		if err != nil {
+			return CommitReport{}, fmt.Errorf("artifact: touch object %s: %w", object.Digest, err)
+		}
+	}
+	return CommitReport{Present: len(d.Objects)}, nil
 }
 
 func (s *Store) requireChildren(digest Digest, data []byte, batch map[Digest]struct{}) error {

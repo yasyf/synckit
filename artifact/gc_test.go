@@ -169,11 +169,7 @@ func TestConcurrentWritesSurviveGC(t *testing.T) {
 				closure, err = s.Closure(ctx, []Ref{group}, DefaultClosureBound)
 			}
 			if err == nil {
-				digests := make([]Digest, 0, len(closure.Objects))
-				for _, object := range closure.Objects {
-					digests = append(digests, object.Digest)
-				}
-				_, err = s.BuildBatch(ctx, digests)
+				_, err = s.BuildBatch(ctx, closure.Objects)
 			}
 			refs[worker] = group
 			errs <- err

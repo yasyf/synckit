@@ -2,6 +2,7 @@ package artifact
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -437,5 +438,105 @@ func TestServiceRoot(t *testing.T) {
 	}
 	if _, err := ServiceRoot("../escape"); err == nil {
 		t.Fatal("ServiceRoot(../escape) succeeded")
+	}
+}
+
+func TestInFlightPublicationIsAbsent(t *testing.T) {
+	s := newStore(t)
+	ref, err := s.PutBlob(t.Context(), []byte("published"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := s.claim(ref.Digest)
+	if missing, err := s.Has(t.Context(), []Digest{ref.Digest}); err != nil || !reflect.DeepEqual(missing, []Digest{ref.Digest}) {
+		t.Fatalf("Has(in flight) = %v, %v; want the digest missing", missing, err)
+	}
+	if missing, err := s.Complete(t.Context(), []Ref{ref}); err != nil || missing != 1 {
+		t.Fatalf("Complete(in flight) = %d, %v; want 1 missing", missing, err)
+	}
+	var missingErr *MissingError
+	if err := s.Verify(t.Context(), []Ref{ref}); !errors.As(err, &missingErr) || missingErr.Digest != ref.Digest {
+		t.Fatalf("Verify(in flight) = %v, want MissingError", err)
+	}
+	wrote := make(chan struct{})
+	go func() {
+		defer close(wrote)
+		_, _ = s.PutBlob(context.Background(), []byte("published"))
+	}()
+	select {
+	case <-wrote:
+		t.Fatal("a second writer returned while the object's publication was in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	<-wrote
+	if missing, err := s.Complete(t.Context(), []Ref{ref}); err != nil || missing != 0 {
+		t.Fatalf("Complete(published) = %d, %v; want 0 missing", missing, err)
+	}
+}
+
+func TestClosureExpandsManifestSeenFirstAsBlob(t *testing.T) {
+	s := newStore(t)
+	ctx := t.Context()
+	child := must(s.PutBlob(ctx, []byte("child")))
+	inner := must(s.PutGroup(ctx, "test.inner", []Ref{child}))
+	innerBytes := must(s.readObject(inner.Digest))
+	alias := must(s.PutBlob(ctx, innerBytes))
+	if alias.Digest != inner.Digest {
+		t.Fatalf("alias digest %s != manifest digest %s", alias.Digest, inner.Digest)
+	}
+	wrapper := must(s.PutGroup(ctx, "test.wrap", []Ref{alias}))
+	root := must(s.PutGroup(ctx, "test.outer", []Ref{wrapper, inner}))
+	size := func(ref Ref) int64 { return int64(len(must(s.readObject(ref.Digest)))) }
+
+	closure, err := s.Closure(ctx, []Ref{root}, DefaultClosureBound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ObjectEntry{
+		{Digest: inner.Digest, Kind: KindBlob, Size: int64(len(innerBytes))},
+		{Digest: wrapper.Digest, Kind: KindManifest, Size: size(wrapper)},
+		{Digest: child.Digest, Kind: KindBlob, Size: child.Size},
+		{Digest: root.Digest, Kind: KindManifest, Size: size(root)},
+	}
+	if !reflect.DeepEqual(closure.Objects, want) {
+		t.Fatalf("Closure = %+v, want %+v", closure.Objects, want)
+	}
+
+	d, err := s.BuildBatch(ctx, closure.Objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := newStore(t)
+	if _, err := dst.BeginBatch(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	for index := range d.Parts {
+		if err := dst.PutPart(ctx, d.ID, index, must(s.ReadPart(ctx, d.ID, index))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := dst.CommitBatch(ctx, d.ID); err != nil {
+		t.Fatalf("CommitBatch: %v", err)
+	}
+	if missing, err := dst.Complete(ctx, []Ref{root}); err != nil || missing != 0 {
+		t.Fatalf("receiver Complete = %d, %v; want 0", missing, err)
+	}
+
+	if err := s.SetPins(ctx, "test", []Ref{root}); err != nil {
+		t.Fatal(err)
+	}
+	ageAll(t, s, 2*GCGrace)
+	if _, err := s.GC(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if missing, err := s.Has(ctx, []Digest{child.Digest}); err != nil || len(missing) != 0 {
+		t.Fatalf("GC removed the pinned manifest's child: missing %v, %v", missing, err)
+	}
+	if err := os.Remove(s.objectPath(child.Digest)); err != nil {
+		t.Fatal(err)
+	}
+	if missing, err := s.Complete(ctx, []Ref{root}); err != nil || missing != 1 {
+		t.Fatalf("Complete without the child = %d, %v; want 1 missing", missing, err)
 	}
 }

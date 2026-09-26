@@ -15,6 +15,8 @@ import (
 	"github.com/yasyf/daemonkit/durable"
 )
 
+var manifestPrefix = []byte(`{"schema":"` + ManifestSchema + `",`)
+
 type storedObject struct {
 	digest Digest
 	size   int64
@@ -22,15 +24,15 @@ type storedObject struct {
 }
 
 // GC removes every object outside the union of pin closures that has not
-// been written or touched within GCGrace, and every outbox or incoming batch
-// untouched for StagingTTL. An object younger than GCGrace keeps its whole
-// closure, so no surviving manifest ever loses a child.
+// been written or touched within GCGrace, and every outbox, incoming, or
+// committed batch untouched for StagingTTL. An object younger than GCGrace
+// keeps its whole closure, so no surviving manifest ever loses a child.
 func (s *Store) GC(ctx context.Context) (GCReport, error) {
 	s.gcMu.Lock()
 	defer s.gcMu.Unlock()
 	now := time.Now()
 	var report GCReport
-	for _, dir := range []string{outboxDir, incomingDir} {
+	for _, dir := range []string{outboxDir, incomingDir, committedDir} {
 		removed, err := s.sweepStaging(filepath.Join(s.root, dir), now.Add(-StagingTTL))
 		if err != nil {
 			return GCReport{}, err
@@ -68,7 +70,7 @@ func (s *Store) GC(ctx context.Context) (GCReport, error) {
 		}
 	}
 	for _, object := range objects {
-		if _, kept := w.seen[object.digest]; kept || object.young {
+		if w.reached(object.digest) || object.young {
 			continue
 		}
 		if err := durable.Remove(s.objectPath(object.digest)); err != nil {
@@ -149,7 +151,8 @@ func (s *Store) isManifest(digest Digest) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return sniffKind(data) == KindManifest, nil
+	_, err = DecodeManifest(data)
+	return err == nil, nil
 }
 
 func readPrefix(path string, n int) (prefix []byte, err error) {
