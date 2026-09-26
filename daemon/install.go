@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -122,9 +123,43 @@ func install(ctx context.Context) error {
 		return err
 	}
 	for _, agent := range planned {
+		if err := retireDriftedAgent(ctx, agent); err != nil {
+			return err
+		}
 		if err := applyAgent(ctx, agent); err != nil {
 			return fmt.Errorf("apply agent %q: %w", agent.Label, err)
 		}
+	}
+	return nil
+}
+
+// retireDriftedAgent removes an agent whose published plist differs from the
+// one about to be applied. launchd.Apply writes the new plist before it boots
+// the old job out, so a bootout that fails there leaves a byte-exact plist over
+// the old generation, which every later Apply only kickstarts. Removing first
+// keeps the stale plist, and with it the pending reload, on disk until launchd
+// has let the old job go.
+func retireDriftedAgent(ctx context.Context, agent launchd.Agent) error {
+	path, err := agent.PlistPath()
+	if err != nil {
+		return fmt.Errorf("resolve agent %q plist: %w", agent.Label, err)
+	}
+	published, err := os.ReadFile(path) //nolint:gosec // exact agent-owned plist path
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read agent %q plist: %w", agent.Label, err)
+	}
+	desired, err := agent.Plist()
+	if err != nil {
+		return fmt.Errorf("render agent %q plist: %w", agent.Label, err)
+	}
+	if bytes.Equal(published, desired) {
+		return nil
+	}
+	if err := removeAgent(ctx, agent.Label); err != nil {
+		return fmt.Errorf("retire drifted agent %q: %w", agent.Label, err)
 	}
 	return nil
 }

@@ -693,6 +693,7 @@ func TestInstallReloadsOnlyAHelperWhoseProgramChangedInPlace(t *testing.T) {
 		},
 	}
 	reload := []string{"bootout", "enable", "bootstrap", "kickstart"}
+	retireThenReload := append([]string{"bootout"}, reload...)
 	kickstart := []string{"print", "kickstart"}
 	helper := labelPrefix + ".helper.reposync"
 	for _, tt := range tests {
@@ -710,7 +711,7 @@ func TestInstallReloadsOnlyAHelperWhoseProgramChangedInPlace(t *testing.T) {
 			}{
 				{"first install", "#!/bin/sh\necho one\n", map[string][]string{helper: reload, reconcileAgentLabel: reload}},
 				{"same program", "#!/bin/sh\necho one\n", map[string][]string{helper: kickstart, reconcileAgentLabel: kickstart}},
-				{"program replaced in place", "#!/bin/sh\necho two\n", map[string][]string{helper: reload, reconcileAgentLabel: kickstart}},
+				{"program replaced in place", "#!/bin/sh\necho two\n", map[string][]string{helper: retireThenReload, reconcileAgentLabel: kickstart}},
 			}
 			for _, step := range steps {
 				if err := os.WriteFile(source, []byte(step.program), 0o755); err != nil { //nolint:gosec // executable test stub
@@ -731,6 +732,108 @@ func TestInstallReloadsOnlyAHelperWhoseProgramChangedInPlace(t *testing.T) {
 				if !strings.Contains(string(plist), hex.EncodeToString(digest[:])) {
 					t.Fatalf("%s: helper plist carries no digest of its program\n%s", step.name, plist)
 				}
+			}
+		})
+	}
+}
+
+var errLaunchctlInterrupted = errors.New("launchctl interrupted")
+
+type launchdJobs struct {
+	loaded              map[string][]byte
+	failLabel, failVerb string
+}
+
+func (j *launchdJobs) run(_ context.Context, _ string, args ...string) (string, int, error) {
+	verb, target := args[0], args[len(args)-1]
+	label := strings.TrimSuffix(filepath.Base(target), ".plist")
+	if label == j.failLabel && verb == j.failVerb {
+		j.failLabel, j.failVerb = "", ""
+		return "", 0, errLaunchctlInterrupted
+	}
+	_, loaded := j.loaded[label]
+	switch verb {
+	case "print", "kickstart":
+		if !loaded {
+			return "", 113, nil
+		}
+	case "bootout":
+		if !loaded {
+			return "", 3, nil
+		}
+		delete(j.loaded, label)
+	case "enable":
+	case "bootstrap":
+		plist, err := os.ReadFile(target) //nolint:gosec // test-owned plist
+		if err != nil {
+			return "", 0, err
+		}
+		j.loaded[label] = plist
+	default:
+		return "", 0, fmt.Errorf("unexpected launchctl %q", verb)
+	}
+	return "", 0, nil
+}
+
+func useLaunchdJobs(t *testing.T) *launchdJobs {
+	t.Helper()
+	jobs := &launchdJobs{loaded: map[string][]byte{}}
+	runner, ensure := launchctl, ensureServeAgent
+	launchctl = jobs.run
+	ensureServeAgent = func(context.Context) error { return nil }
+	t.Cleanup(func() { launchctl, ensureServeAgent = runner, ensure })
+	return jobs
+}
+
+func TestInstallKeepsAnInterruptedHelperReloadPendingUntilTheOldJobBootsOut(t *testing.T) {
+	helper := labelPrefix + ".helper.reposync"
+	upgraded := "#!/bin/sh\necho two\n"
+	for _, verb := range []string{"bootout", "enable", "bootstrap", "kickstart"} {
+		t.Run(verb, func(t *testing.T) {
+			home := useHome(t)
+			useMesh(t)
+			source := filepath.Join(resolvedTempDir(t), "reposync")
+			if err := os.Symlink(source, filepath.Join(usePathBinaries(t), "reposync")); err != nil {
+				t.Fatal(err)
+			}
+			jobs := useLaunchdJobs(t)
+			writeManifest(t, "reposync")
+			plistPath := filepath.Join(home, "Library", "LaunchAgents", helper+".plist")
+			published := func() []byte {
+				t.Helper()
+				plist, err := os.ReadFile(plistPath) //nolint:gosec // test-owned plist
+				if err != nil {
+					t.Fatal(err)
+				}
+				return plist
+			}
+
+			if err := os.WriteFile(source, []byte("#!/bin/sh\necho one\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+				t.Fatal(err)
+			}
+			if err := install(t.Context()); err != nil {
+				t.Fatalf("first install: %v", err)
+			}
+			if err := os.WriteFile(source, []byte(upgraded), 0o755); err != nil { //nolint:gosec // executable test stub
+				t.Fatal(err)
+			}
+			jobs.failLabel, jobs.failVerb = helper, verb
+			if err := install(t.Context()); !errors.Is(err, errLaunchctlInterrupted) {
+				t.Fatalf("interrupted upgrade: err = %v, want %v", err, errLaunchctlInterrupted)
+			}
+			if running, ok := jobs.loaded[helper]; ok && !bytes.Equal(running, published()) {
+				t.Fatalf("interrupted upgrade published a plist launchd is not running\npublished:\n%s\nrunning:\n%s", published(), running)
+			}
+
+			if err := install(t.Context()); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if running := jobs.loaded[helper]; !bytes.Equal(running, published()) {
+				t.Fatalf("retry left launchd running a stale generation\npublished:\n%s\nrunning:\n%s", published(), running)
+			}
+			digest := sha256.Sum256([]byte(upgraded))
+			if !strings.Contains(string(published()), hex.EncodeToString(digest[:])) {
+				t.Fatalf("retry published no digest of the upgraded program\n%s", published())
 			}
 		})
 	}
