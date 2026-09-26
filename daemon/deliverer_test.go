@@ -167,6 +167,7 @@ type fakeSource struct {
 	batches   map[artifact.Digest][][]byte
 	block     chan struct{}
 	onRead    func()
+	onDrop    func() error
 }
 
 func newFakeSource(artifacts bool) *fakeSource {
@@ -291,6 +292,11 @@ func (f *fakeSource) dispatcher() *rpc.Dispatcher {
 		return artifact.BatchReadResult{Data: f.batches[p.ID][p.Index]}, nil
 	})
 	register(d, &f.counter, artifact.MethodBatchDrop, func(p artifact.BatchRef) (any, error) {
+		if f.onDrop != nil {
+			if err := f.onDrop(); err != nil {
+				return nil, err
+			}
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		delete(f.batches, p.ID)
@@ -1103,6 +1109,29 @@ func TestDelivererSupersedesAfterTheFinalBatch(t *testing.T) {
 				t.Error(err)
 			}
 		})
+	}
+	h.start()
+	h.await("peer@node", "ack of the superseding revision", acked(3))
+	if got := sink.count(syncservice.MethodApplyV2); got != 1 {
+		t.Fatalf("applies = %d, want 1: the superseded revision must not be applied", got)
+	}
+}
+
+func TestDelivererSupersedesDespiteAFailedBatchCleanup(t *testing.T) {
+	h := newDeliveryHarness(t, true, "peer@node")
+	sink := h.sinks["peer@node"]
+	root := h.source.blob([]byte("payload"))
+	h.source.publish(2, root)
+	var once sync.Once
+	h.source.onDrop = func() (err error) {
+		once.Do(func() {
+			h.source.publish(3, root)
+			if kickErr := h.sched.Kick("stub", "peer@node"); kickErr != nil {
+				t.Error(kickErr)
+			}
+			err = errors.New("drop failed")
+		})
+		return err
 	}
 	h.start()
 	h.await("peer@node", "ack of the superseding revision", acked(3))

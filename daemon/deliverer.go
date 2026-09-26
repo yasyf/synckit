@@ -856,33 +856,42 @@ func (r *deliveryRun) page(ctx context.Context, objects []artifact.ObjectEntry, 
 	return flush()
 }
 
-func (r *deliveryRun) send(ctx context.Context, objects []artifact.ObjectEntry) (err error) {
+func (r *deliveryRun) send(ctx context.Context, objects []artifact.ObjectEntry) error {
+	key := sharedBatchKeyFor(r.l.service, objects)
+	r.s.holdBatch(key)
+	committed, err := r.commit(ctx, objects)
+	cleanup := r.s.releaseBatch(key, committed, func(id artifact.Digest) error {
+		if err := r.l.local.BatchDrop(ctx, id); err != nil {
+			return fmt.Errorf("drop batch %s: %w", id, err)
+		}
+		return nil
+	})
+	switch {
+	case err != nil:
+		return errors.Join(err, cleanup)
+	case cleanup != nil && r.superseded():
+		slog.WarnContext(ctx, "delivery: superseded after a batch cleanup failed", "manifest", r.l.service, "peer", r.l.peer, "err", cleanup)
+		return errSuperseded
+	}
+	return cleanup
+}
+
+func (r *deliveryRun) commit(ctx context.Context, objects []artifact.ObjectEntry) (artifact.Digest, error) {
 	var raw int64
 	for _, o := range objects {
 		raw += o.Size
 	}
-	key := sharedBatchKeyFor(r.l.service, objects)
-	r.s.holdBatch(key)
-	var committed artifact.Digest
-	defer func() {
-		err = errors.Join(err, r.s.releaseBatch(key, committed, func(id artifact.Digest) error {
-			if err := r.l.local.BatchDrop(ctx, id); err != nil {
-				return fmt.Errorf("drop batch %s: %w", id, err)
-			}
-			return nil
-		}))
-	}()
 	batch, err := r.l.local.BatchBuild(ctx, objects)
 	if err != nil {
-		return fmt.Errorf("build batch: %w", err)
+		return "", fmt.Errorf("build batch: %w", err)
 	}
 	sender, err := r.admit(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	begin, err := r.peer.BatchBegin(ctx, batch, sender)
 	if err := r.refused(begin.Peer, err); err != nil {
-		return err
+		return "", err
 	}
 	have := make(map[int]bool, len(begin.HaveParts))
 	for _, index := range begin.HaveParts {
@@ -894,31 +903,30 @@ func (r *deliveryRun) send(ctx context.Context, objects []artifact.ObjectEntry) 
 		}
 		data, err := r.l.local.BatchRead(ctx, batch.ID, index)
 		if err != nil {
-			return fmt.Errorf("read part %d of %s: %w", index, batch.ID, err)
+			return "", fmt.Errorf("read part %d of %s: %w", index, batch.ID, err)
 		}
 		local, err := r.admit(ctx)
 		if err != nil {
-			return err
+			return "", err
 		}
 		put, err := r.peer.BatchPut(ctx, batch.ID, index, data, local)
 		r.l.update(func(v *laneLive) { v.progress.WireBytesSent += int64(len(data)) })
 		if err := r.refused(put.Peer, err); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if _, err := r.admit(ctx); err != nil {
-		return err
+		return "", err
 	}
 	if _, err := r.peer.BatchCommit(ctx, batch.ID); err != nil {
-		return fmt.Errorf("commit batch %s: %w", batch.ID, err)
+		return "", fmt.Errorf("commit batch %s: %w", batch.ID, err)
 	}
-	committed = batch.ID
 	r.sentBatches++
 	r.l.update(func(v *laneLive) {
 		v.progress.ObjectsSent += int64(len(objects))
 		v.progress.BytesSent += raw
 	})
-	return nil
+	return batch.ID, nil
 }
 
 func sharedBatchKeyFor(service string, objects []artifact.ObjectEntry) sharedBatchKey {
