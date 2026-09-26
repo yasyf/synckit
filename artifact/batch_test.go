@@ -16,17 +16,17 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-func closureDigests(t *testing.T, s *Store, roots []Ref) []Digest {
+func closureObjects(t *testing.T, s *Store, roots []Ref) []ObjectEntry {
 	t.Helper()
 	closure, err := s.Closure(t.Context(), roots, DefaultClosureBound)
 	if err != nil {
 		t.Fatalf("Closure: %v", err)
 	}
-	digests := make([]Digest, 0, len(closure.Objects))
-	for _, object := range closure.Objects {
-		digests = append(digests, object.Digest)
-	}
-	return digests
+	return closure.Objects
+}
+
+func blobEntry(ref Ref) ObjectEntry {
+	return ObjectEntry(ref)
 }
 
 func putParts(t *testing.T, dst *Store, d BatchDescriptor, parts [][]byte, skip []int) int {
@@ -73,7 +73,7 @@ func sourceBatch(t *testing.T, seed, size int) (*Store, []Ref, BatchDescriptor) 
 		t.Fatalf("PutGroup: %v", err)
 	}
 	roots := []Ref{group}
-	d, err := src.BuildBatch(t.Context(), closureDigests(t, src, roots))
+	d, err := src.BuildBatch(t.Context(), closureObjects(t, src, roots))
 	if err != nil {
 		t.Fatalf("BuildBatch: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestBatchRoundTrip(t *testing.T) {
 	if len(d.Parts) != 4 {
 		t.Fatalf("parts = %d, want 4 for 3 MiB of random content", len(d.Parts))
 	}
-	again, err := src.BuildBatch(ctx, closureDigests(t, src, roots))
+	again, err := src.BuildBatch(ctx, closureObjects(t, src, roots))
 	if err != nil || !reflect.DeepEqual(again, d) {
 		t.Fatalf("rebuild = %+v, %v; want the identical descriptor", again.ID, err)
 	}
@@ -137,31 +137,31 @@ func TestBatchRoundTrip(t *testing.T) {
 
 func TestBuildBatchRefusesPastBounds(t *testing.T) {
 	s := newStore(t)
-	tooMany := make([]Digest, MaxBatchObjects+1)
+	tooMany := make([]ObjectEntry, MaxBatchObjects+1)
 	for i := range tooMany {
-		tooMany[i] = Sum([]byte(fmt.Sprint(i)))
+		tooMany[i] = ObjectEntry{Digest: Sum([]byte(fmt.Sprint(i))), Kind: KindBlob, Size: 1}
 	}
 	if _, err := s.BuildBatch(t.Context(), tooMany); !errors.Is(err, ErrBatchFull) {
 		t.Fatalf("BuildBatch(%d objects) err = %v, want ErrBatchFull", len(tooMany), err)
 	}
-	digests := make([]Digest, 0, MaxBatchRaw/ChunkSize+1)
+	objects := make([]ObjectEntry, 0, MaxBatchRaw/ChunkSize+1)
 	for i := range MaxBatchRaw / ChunkSize {
 		ref, err := s.PutBlob(t.Context(), randomBytes(100+i, ChunkSize))
 		if err != nil {
 			t.Fatalf("PutBlob: %v", err)
 		}
-		digests = append(digests, ref.Digest)
+		objects = append(objects, blobEntry(ref))
 	}
 	extra, err := s.PutBlob(t.Context(), []byte{1})
 	if err != nil {
 		t.Fatalf("PutBlob: %v", err)
 	}
-	if _, err := s.BuildBatch(t.Context(), append(digests, extra.Digest)); !errors.Is(err, ErrBatchFull) {
+	if _, err := s.BuildBatch(t.Context(), append(objects, blobEntry(extra))); !errors.Is(err, ErrBatchFull) {
 		t.Fatalf("BuildBatch(32 MiB + 1 B) err = %v, want ErrBatchFull", err)
 	}
 	var missing *MissingError
 	absent := Sum([]byte("absent"))
-	if _, err := s.BuildBatch(t.Context(), []Digest{extra.Digest, absent}); !errors.As(err, &missing) || missing.Digest != absent {
+	if _, err := s.BuildBatch(t.Context(), []ObjectEntry{blobEntry(extra), {Digest: absent, Kind: KindBlob, Size: 1}}); !errors.As(err, &missing) || missing.Digest != absent {
 		t.Fatalf("BuildBatch(absent) err = %v, want MissingError", err)
 	}
 }
@@ -416,7 +416,7 @@ func TestBeginBatchAdmission(t *testing.T) {
 		if err != nil {
 			t.Fatalf("PutBlob: %v", err)
 		}
-		d, err := src.BuildBatch(t.Context(), []Digest{ref.Digest})
+		d, err := src.BuildBatch(t.Context(), []ObjectEntry{blobEntry(ref)})
 		if err != nil {
 			t.Fatalf("BuildBatch: %v", err)
 		}
@@ -451,7 +451,7 @@ func TestGCSweepsExpiredStaging(t *testing.T) {
 		if err != nil {
 			t.Fatalf("PutBlob: %v", err)
 		}
-		d, err := s.BuildBatch(t.Context(), []Digest{ref.Digest})
+		d, err := s.BuildBatch(t.Context(), []ObjectEntry{blobEntry(ref)})
 		if err != nil {
 			t.Fatalf("BuildBatch: %v", err)
 		}

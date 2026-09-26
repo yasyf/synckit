@@ -2,6 +2,7 @@ package syncservice
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -184,7 +185,7 @@ func TestApplyV2ReadinessPinsAndAck(t *testing.T) {
 			store := &fakeAcceptStore{missing: tt.missing, pins: map[string][]artifact.Ref{"synckit.accepted/host-b": held}, log: &log}
 			consumer := &fakeArtifactConsumer{result: tt.result, log: &log}
 			dispatcher := rpc.NewDispatcher()
-			registerArtifactConsumer(dispatcher, consumer, store)
+			registerArtifactConsumer(dispatcher, consumer, store, staticMonitor{state: connectedState})
 			change := artifactChange(t, 3)
 
 			got, err := NewClient(directTransport{dispatcher}).ApplyV2(t.Context(), change)
@@ -228,7 +229,7 @@ func TestArtifactConsumerRefusesArtifactsOnV1(t *testing.T) {
 	var log []string
 	consumer := &artifactV1Consumer{fakeArtifactConsumer{log: &log}}
 	dispatcher := rpc.NewDispatcher()
-	registerArtifactConsumer(dispatcher, consumer, &fakeAcceptStore{pins: map[string][]artifact.Ref{}, log: &log})
+	registerArtifactConsumer(dispatcher, consumer, &fakeAcceptStore{pins: map[string][]artifact.Ref{}, log: &log}, staticMonitor{state: connectedState})
 	params, err := structParams(artifactChange(t, 3))
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +269,7 @@ func (*artifactV1Consumer) Export(_ context.Context, request ExportRequest) (Cha
 func TestExportV2ReturnsArtifactRoots(t *testing.T) {
 	var log []string
 	dispatcher := rpc.NewDispatcher()
-	registerArtifactConsumer(dispatcher, &fakeArtifactConsumer{log: &log}, &fakeAcceptStore{pins: map[string][]artifact.Ref{}, log: &log})
+	registerArtifactConsumer(dispatcher, &fakeArtifactConsumer{log: &log}, &fakeAcceptStore{pins: map[string][]artifact.Ref{}, log: &log}, staticMonitor{state: connectedState})
 	request := ExportRequest{ServiceID: "fake", SchemaFingerprint: testSchema, SinceRevision: NewRevision(0)}
 
 	change, err := NewClient(directTransport{dispatcher}).ExportV2(t.Context(), request)
@@ -296,7 +297,7 @@ func TestArtifactConsumerCapabilities(t *testing.T) {
 			var log []string
 			consumer := &capabilityConsumer{fakeArtifactConsumer: fakeArtifactConsumer{log: &log}, methods: tt.methods}
 			dispatcher := rpc.NewDispatcher()
-			registerArtifactConsumer(dispatcher, consumer, &fakeAcceptStore{pins: map[string][]artifact.Ref{}, log: &log})
+			registerArtifactConsumer(dispatcher, consumer, &fakeAcceptStore{pins: map[string][]artifact.Ref{}, log: &log}, staticMonitor{state: connectedState})
 
 			got, err := NewClient(directTransport{dispatcher}).Capabilities(t.Context())
 			if err != nil || got.Name != "fake" || !reflect.DeepEqual(got.Methods, tt.want) {
@@ -324,6 +325,8 @@ func withoutMethods(methods []string, drop string) []string {
 	}
 	return kept
 }
+
+var connectedState = netpolicy.State{Status: netpolicy.StatusConnected}
 
 type staticMonitor struct{ state netpolicy.State }
 
@@ -368,13 +371,12 @@ func TestRegisterArtifactConsumerWithStore(t *testing.T) {
 			var log []string
 			consumer := &fakeArtifactConsumer{result: tt.result, log: &log}
 			dispatcher := rpc.NewDispatcher()
-			cellular := netpolicy.State{Status: netpolicy.StatusConnected, Cellular: true}
-			RegisterArtifactConsumer(dispatcher, consumer, store, staticMonitor{state: cellular})
+			RegisterArtifactConsumer(dispatcher, consumer, store, staticMonitor{state: connectedState})
 			client := NewClient(directTransport{dispatcher})
 
 			state, err := client.NetStatus(t.Context())
-			if err != nil || state != cellular {
-				t.Fatalf("NetStatus() = %+v, %v; want %+v", state, err, cellular)
+			if err != nil || state != connectedState {
+				t.Fatalf("NetStatus() = %+v, %v; want %+v", state, err, connectedState)
 			}
 			change, err := NewExportedArtifactChange("fake", testSchema, ChangeSnapshot, NewRevision(0), NewRevision(3), []byte(`{}`), tt.roots)
 			if err != nil {
@@ -406,6 +408,50 @@ func TestRegisterArtifactConsumerWithStore(t *testing.T) {
 			}
 			if !reflect.DeepEqual(accepted, tt.wantAccepted) {
 				t.Errorf("accepted pins = %s, want %s", refNames(accepted), refNames(tt.wantAccepted))
+			}
+		})
+	}
+}
+
+func TestApplyV2RefusesBeforeDecodingWhileReceiverRestricted(t *testing.T) {
+	var log []string
+	dispatcher := rpc.NewDispatcher()
+	cellular := netpolicy.State{Status: netpolicy.StatusConnected, Cellular: true}
+	registerArtifactConsumer(dispatcher, &fakeArtifactConsumer{log: &log}, &fakeAcceptStore{pins: map[string][]artifact.Ref{}, log: &log}, staticMonitor{state: cellular})
+	response := dispatcher.Dispatch(t.Context(), &rpc.Request{Method: MethodApplyV2, Params: map[string]any{"kind": 7}})
+	if !response.OK {
+		t.Fatalf("apply.v2 = %+v, want the typed refusal", response)
+	}
+	var result ApplyResult
+	if err := json.Unmarshal(response.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Paused == nil || result.Paused.Code != artifact.PauseReceiverCellular || len(log) != 0 {
+		t.Fatalf("apply.v2 = %+v with log %v, want a receiver-cellular refusal and no store or consumer call", result, log)
+	}
+}
+
+func TestArtifactChangesMustBeSnapshots(t *testing.T) {
+	tests := []struct {
+		name    string
+		kind    ChangeKind
+		base    uint64
+		roots   []artifact.Ref
+		wantErr bool
+	}{
+		{"snapshot with artifacts", ChangeSnapshot, 0, applyRoots, false},
+		{"delta with artifacts", ChangeDelta, 1, applyRoots, true},
+		{"delta without artifacts", ChangeDelta, 1, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			change, err := NewExportedChange("fake", testSchema, tt.kind, NewRevision(tt.base), NewRevision(2), []byte(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			change.Artifacts = tt.roots
+			if err := change.Validate(false); (err != nil) != tt.wantErr {
+				t.Fatalf("Validate = %v, want error %t", err, tt.wantErr)
 			}
 		})
 	}

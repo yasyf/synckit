@@ -35,8 +35,12 @@ const (
 	MaxHaveDigests = 16384
 	// MaxClosurePage bounds the objects of one closure page.
 	MaxClosurePage = 16384
-	// MaxRoots bounds the artifact roots of one change or pin set.
-	MaxRoots = 4096
+	// MaxRoots bounds the artifact roots of one change.
+	MaxRoots = 8192
+	// MaxPinRoots bounds one pin set: twice MaxRoots, so the union of a
+	// staged root list and its replacement fits while a pin set is widened
+	// and then narrowed.
+	MaxPinRoots = 2 * MaxRoots
 	// MaxIncoming bounds the receive batches one store stages at once.
 	MaxIncoming = 8
 	// WindowSize is the zstd encoder window and the decoder's largest
@@ -46,8 +50,9 @@ const (
 	// its last write.
 	StagingTTL = 24 * time.Hour
 	// GCGrace is how long an unreachable object survives GC after its last
-	// write or touch.
-	GCGrace = time.Hour
+	// write or touch. It equals StagingTTL, so the objects a partial
+	// transfer has committed live as long as the staging they arrived in.
+	GCGrace = StagingTTL
 )
 
 const (
@@ -57,6 +62,9 @@ const (
 	BatchSchema = "synckit.artifact.batch.v1"
 	// BatchCodec names the compression every batch part stream uses.
 	BatchCodec = "zstd"
+	// GroupMedia labels the interior manifests PutGroup adds when a group
+	// has more than MaxDeps deps.
+	GroupMedia = "synckit.group"
 )
 
 const (
@@ -213,6 +221,17 @@ func (m Manifest) Validate() error {
 		return fmt.Errorf("%w: %d deps exceed %d", ErrInvalid, len(m.Deps), MaxDeps)
 	}
 	return validateRefs(m.Deps, "dep")
+}
+
+func (m Manifest) children() []Digest {
+	children := make([]Digest, 0, len(m.Chunks)+len(m.Deps))
+	for _, chunk := range m.Chunks {
+		children = append(children, chunk.Digest)
+	}
+	for _, dep := range m.Deps {
+		children = append(children, dep.Digest)
+	}
+	return children
 }
 
 // Encode validates m and returns its canonical encoding, whose Sum is the

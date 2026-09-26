@@ -26,14 +26,16 @@ type acceptStore interface {
 }
 
 // RegisterArtifactConsumer binds svc's v1 and v2 sync methods and store's
-// artifact methods on d. apply.v2 computes root readiness from store and
-// refuses an acknowledgement while any root closure is incomplete.
+// artifact methods on d. apply.v2 returns the typed refusal, before decoding
+// the change, while monitor's live State is not unrestricted; it computes
+// root readiness from store and refuses an acknowledgement while any root
+// closure is incomplete.
 func RegisterArtifactConsumer(d *rpc.Dispatcher, svc ArtifactConsumer, store *artifact.Store, monitor netpolicy.Monitor) {
 	artifact.Register(d, store, monitor)
-	registerArtifactConsumer(d, svc, store)
+	registerArtifactConsumer(d, svc, store, monitor)
 }
 
-func registerArtifactConsumer(d *rpc.Dispatcher, svc ArtifactConsumer, store acceptStore) {
+func registerArtifactConsumer(d *rpc.Dispatcher, svc ArtifactConsumer, store acceptStore, monitor netpolicy.Monitor) {
 	RegisterConsumer(d, svc)
 	d.Register(MethodCapabilities, func(ctx context.Context, _ map[string]any) (any, error) {
 		caps, err := svc.Capabilities(ctx)
@@ -60,6 +62,9 @@ func registerArtifactConsumer(d *rpc.Dispatcher, svc ArtifactConsumer, store acc
 		return change, nil
 	})
 	d.RegisterExclusive(MethodApplyV2, func(ctx context.Context, p map[string]any) (any, error) {
+		if refusal := artifact.LiveRefusal(monitor); refusal != nil {
+			return ApplyResult{AckedRevision: NewRevision(0), Paused: refusal}, nil
+		}
 		var change ChangeEnvelope
 		if err := decodeParams(p, &change); err != nil {
 			return nil, err

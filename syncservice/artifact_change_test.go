@@ -213,7 +213,9 @@ func TestClientArtifactPayloadGolden(t *testing.T) {
 			_, _ = c.ArtifactClosure(ctx, artifact.ClosureParams{Roots: testRoots, After: 16384, Limit: 16384})
 		}, `{"method":"synckit.artifact.closure.v1","params":{"after":16384,"limit":16384,"roots":` + refs + `}}`},
 		{"have", func() { _, _ = c.ArtifactHave(ctx, []artifact.Digest{blobDigest}) }, `{"method":"synckit.artifact.have.v1","params":{"digests":["` + string(blobDigest) + `"]}}`},
-		{"batch build", func() { _, _ = c.BatchBuild(ctx, []artifact.Digest{blobDigest}) }, `{"method":"synckit.artifact.batch.build.v1","params":{"objects":["` + string(blobDigest) + `"]}}`},
+		{"batch build", func() {
+			_, _ = c.BatchBuild(ctx, []artifact.ObjectEntry{{Digest: blobDigest, Kind: artifact.KindBlob, Size: 1}})
+		}, `{"method":"synckit.artifact.batch.build.v1","params":{"objects":[{"digest":"` + string(blobDigest) + `","kind":"blob","size":1}]}}`},
 		{"batch read", func() { _, _ = c.BatchRead(ctx, partID, 2) }, `{"method":"synckit.artifact.batch.read.v1","params":{"id":"` + string(partID) + `","index":2}}`},
 		{"batch drop", func() { _ = c.BatchDrop(ctx, partID) }, `{"method":"synckit.artifact.batch.drop.v1","params":{"id":"` + string(partID) + `"}}`},
 		{"batch put", func() { _, _ = c.BatchPut(ctx, partID, 1, []byte("hi"), sender) }, `{"method":"synckit.artifact.batch.put.v1","params":{"data":"aGk=","id":"` + string(partID) + `","index":1,"sender":` + senderJSON + `}}`},

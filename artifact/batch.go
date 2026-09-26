@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,37 +20,33 @@ var ErrBatchFull = errors.New("artifact: batch full")
 
 var errIncomingFull = fmt.Errorf("artifact: %d incoming batches already staged", MaxIncoming)
 
+var flushBarrier = fullSyncDir
+
 func partName(index int) string {
 	return fmt.Sprintf("%04d.part", index)
 }
 
-// BuildBatch packs objects, in order, into a zstd stream split into outbox
-// parts and returns the batch's descriptor. Identical inputs name the same
-// batch, and a rebuild of a present batch keeps its parts and refreshes its
-// StagingTTL.
-func (s *Store) BuildBatch(ctx context.Context, objects []Digest) (BatchDescriptor, error) {
+// BuildBatch packs objects, in order and as their declared kinds, into a
+// zstd stream split into outbox parts and returns the batch's descriptor.
+// Every object's stored bytes must match its declared size, and a declared
+// manifest must decode strictly. Identical inputs name the same batch, and a
+// rebuild of a present batch keeps its parts and refreshes its StagingTTL.
+func (s *Store) BuildBatch(ctx context.Context, objects []ObjectEntry) (BatchDescriptor, error) {
 	if len(objects) > MaxBatchObjects {
 		return BatchDescriptor{}, fmt.Errorf("%w: %d objects exceed %d", ErrBatchFull, len(objects), MaxBatchObjects)
 	}
 	if err := (BatchBuildParams{Objects: objects}).Validate(); err != nil {
 		return BatchDescriptor{}, err
 	}
-	s.gcMu.RLock()
-	defer s.gcMu.RUnlock()
 	var raw int64
-	for _, digest := range objects {
-		info, err := os.Stat(s.objectPath(digest))
-		if errors.Is(err, os.ErrNotExist) {
-			return BatchDescriptor{}, &MissingError{Digest: digest}
-		}
-		if err != nil {
-			return BatchDescriptor{}, fmt.Errorf("artifact: stat object %s: %w", digest, err)
-		}
-		raw += info.Size()
+	for _, object := range objects {
+		raw += object.Size
 	}
 	if raw > MaxBatchRaw {
 		return BatchDescriptor{}, fmt.Errorf("%w: %d object bytes exceed %d", ErrBatchFull, raw, MaxBatchRaw)
 	}
+	s.gcMu.RLock()
+	defer s.gcMu.RUnlock()
 	s.encMu.Lock()
 	defer s.encMu.Unlock()
 	outbox := filepath.Join(s.root, outboxDir)
@@ -67,27 +64,27 @@ func (s *Store) BuildBatch(ctx context.Context, objects []Digest) (BatchDescript
 	return d, nil
 }
 
-func (s *Store) pack(ctx context.Context, dir string, objects []Digest) (BatchDescriptor, error) {
+func (s *Store) pack(ctx context.Context, dir string, objects []ObjectEntry) (BatchDescriptor, error) {
 	parts := &partWriter{dir: dir, buf: make([]byte, 0, PartSize)}
 	s.encoder.Reset(parts)
 	pack := &packWriter{w: s.encoder}
 	if err := pack.begin(); err != nil {
 		return BatchDescriptor{}, err
 	}
-	entries := make([]ObjectEntry, 0, len(objects))
-	for _, digest := range objects {
+	for _, entry := range objects {
 		if err := ctx.Err(); err != nil {
 			return BatchDescriptor{}, err
 		}
-		data, err := s.readObject(digest)
+		data, err := s.readObject(entry.Digest)
 		if err != nil {
 			return BatchDescriptor{}, err
 		}
-		entry := ObjectEntry{Digest: digest, Kind: sniffKind(data), Size: int64(len(data))}
+		if err := checkStored(entry, data); err != nil {
+			return BatchDescriptor{}, err
+		}
 		if err := pack.object(entry, data); err != nil {
 			return BatchDescriptor{}, err
 		}
-		entries = append(entries, entry)
 	}
 	if err := pack.end(); err != nil {
 		return BatchDescriptor{}, err
@@ -98,7 +95,20 @@ func (s *Store) pack(ctx context.Context, dir string, objects []Digest) (BatchDe
 	if err := parts.flush(); err != nil {
 		return BatchDescriptor{}, err
 	}
-	return NewBatchDescriptor(pack.n, entries, parts.parts)
+	return NewBatchDescriptor(pack.n, slices.Clone(objects), parts.parts)
+}
+
+func checkStored(entry ObjectEntry, data []byte) error {
+	if int64(len(data)) != entry.Size {
+		return fmt.Errorf("%w: %s %s holds %d bytes, want %d", ErrInvalid, entry.Kind, entry.Digest, len(data), entry.Size)
+	}
+	if entry.Kind != KindManifest {
+		return nil
+	}
+	if _, err := DecodeManifest(data); err != nil {
+		return fmt.Errorf("artifact: manifest %s: %w", entry.Digest, err)
+	}
+	return nil
 }
 
 func publishStaged(tmp, dir string, d BatchDescriptor) error {
@@ -255,8 +265,10 @@ func (s *Store) PutPart(ctx context.Context, id Digest, index int, data []byte) 
 // CommitBatch decodes staged batch id through the bounded decoder and
 // verifies every object's kind, digest, and size, every manifest strictly,
 // and that every manifest's children precede it, before storing anything.
-// It then durably creates each absent object in order, touches each present
-// one, and removes the staging.
+// It then touches each present object and lands each absent one in the
+// batch's staging with a plain fsync, flushes them all with one barrier,
+// and only then renames them into place, children strictly before their
+// manifests, before removing the staging.
 func (s *Store) CommitBatch(ctx context.Context, id Digest) (CommitReport, error) {
 	if err := id.Validate(); err != nil {
 		return CommitReport{}, err
@@ -289,21 +301,42 @@ func (s *Store) CommitBatch(ctx context.Context, id Digest) (CommitReport, error
 	if err != nil {
 		return CommitReport{}, err
 	}
+	landing := filepath.Join(dir, landingDir)
+	if err := durable.RemoveTree(landing); err != nil {
+		return CommitReport{}, fmt.Errorf("artifact: clear landing of batch %s: %w", id, err)
+	}
+	if err := os.Mkdir(landing, dirPerm); err != nil {
+		return CommitReport{}, fmt.Errorf("artifact: create landing of batch %s: %w", id, err)
+	}
 	var report CommitReport
+	levels := map[Digest]int{}
+	var landed []Digest
 	err = s.scanStaged(ctx, dir, d, func(entry ObjectEntry, data []byte) error {
-		stored, err := s.writeObject(entry.Digest, data)
+		present, err := s.touch(entry.Digest)
 		if err != nil {
 			return err
 		}
-		if !stored {
+		if present {
 			report.Present++
 			return nil
 		}
+		level, err := landingLevel(entry, data, levels)
+		if err != nil {
+			return err
+		}
+		if err := land(filepath.Join(landing, string(entry.Digest)), data); err != nil {
+			return err
+		}
+		levels[entry.Digest] = level
+		landed = append(landed, entry.Digest)
 		report.Stored++
 		report.Bytes += entry.Size
 		return nil
 	})
 	if err != nil {
+		return CommitReport{}, err
+	}
+	if err := s.publishLanded(landing, landed, levels); err != nil {
 		return CommitReport{}, err
 	}
 	if err := durable.RemoveTree(dir); err != nil {
@@ -312,19 +345,100 @@ func (s *Store) CommitBatch(ctx context.Context, id Digest) (CommitReport, error
 	return report, nil
 }
 
+func landingLevel(entry ObjectEntry, data []byte, levels map[Digest]int) (int, error) {
+	if entry.Kind != KindManifest {
+		return 0, nil
+	}
+	m, err := DecodeManifest(data)
+	if err != nil {
+		return 0, fmt.Errorf("artifact: manifest %s: %w", entry.Digest, err)
+	}
+	level := 0
+	for _, child := range m.children() {
+		if childLevel, landed := levels[child]; landed {
+			level = max(level, childLevel+1)
+		}
+	}
+	return level, nil
+}
+
+func land(path string, data []byte) (err error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, filePerm) //nolint:gosec // G304: path is under the batch staging, named by a validated digest.
+	if err != nil {
+		return fmt.Errorf("artifact: land %s: %w", filepath.Base(path), err)
+	}
+	defer func() { err = errors.Join(err, file.Close()) }()
+	if _, err := file.Write(data); err != nil {
+		return fmt.Errorf("artifact: land %s: %w", filepath.Base(path), err)
+	}
+	if err := syncData(file); err != nil {
+		return fmt.Errorf("artifact: fsync landed %s: %w", filepath.Base(path), err)
+	}
+	return nil
+}
+
+func (s *Store) publishLanded(landing string, landed []Digest, levels map[Digest]int) error {
+	if len(landed) == 0 {
+		return nil
+	}
+	if err := flushBarrier(landing); err != nil {
+		return fmt.Errorf("artifact: flush landed objects: %w", err)
+	}
+	height := 0
+	for _, level := range levels {
+		height = max(height, level)
+	}
+	for level := range height + 1 {
+		dirs := map[string]struct{}{}
+		for _, digest := range landed {
+			if levels[digest] != level {
+				continue
+			}
+			target := s.objectPath(digest)
+			if err := os.Rename(filepath.Join(landing, string(digest)), target); err != nil {
+				return fmt.Errorf("artifact: publish object %s: %w", digest, err)
+			}
+			dirs[filepath.Dir(target)] = struct{}{}
+		}
+		for dir := range dirs {
+			if err := syncDir(dir); err != nil {
+				return err
+			}
+		}
+		if err := flushBarrier(landing); err != nil {
+			return fmt.Errorf("artifact: flush published objects: %w", err)
+		}
+	}
+	return nil
+}
+
+func syncDir(dir string) (err error) {
+	d, err := os.Open(dir) //nolint:gosec // G304: dir is an object prefix directory under the store root.
+	if err != nil {
+		return fmt.Errorf("artifact: open %s: %w", dir, err)
+	}
+	defer func() { err = errors.Join(err, d.Close()) }()
+	if err := syncData(d); err != nil {
+		return fmt.Errorf("artifact: fsync %s: %w", dir, err)
+	}
+	return nil
+}
+
+func fullSyncDir(dir string) (err error) {
+	d, err := os.Open(dir) //nolint:gosec // G304: dir is a batch landing directory under the store root.
+	if err != nil {
+		return fmt.Errorf("artifact: open %s: %w", dir, err)
+	}
+	defer func() { err = errors.Join(err, d.Close()) }()
+	return fullSync(d)
+}
+
 func (s *Store) requireChildren(digest Digest, data []byte, batch map[Digest]struct{}) error {
 	m, err := DecodeManifest(data)
 	if err != nil {
 		return fmt.Errorf("artifact: manifest %s: %w", digest, err)
 	}
-	children := make([]Digest, 0, len(m.Chunks)+len(m.Deps))
-	for _, chunk := range m.Chunks {
-		children = append(children, chunk.Digest)
-	}
-	for _, dep := range m.Deps {
-		children = append(children, dep.Digest)
-	}
-	for _, child := range children {
+	for _, child := range m.children() {
 		if _, earlier := batch[child]; earlier {
 			continue
 		}

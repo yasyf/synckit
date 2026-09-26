@@ -167,9 +167,9 @@ func TestRegisterServesSourceMethods(t *testing.T) {
 		t.Fatalf("have = %v, want [%s]", have.Missing, absent)
 	}
 
-	digests := []Digest{fixture.objects[0].Digest, fixture.objects[1].Digest}
-	built := mustCall[BatchDescriptor](t, d, MethodBatchBuild, BatchBuildParams{Objects: digests})
-	direct, err := s.BuildBatch(t.Context(), digests)
+	batchObjects := []ObjectEntry{fixture.objects[0], fixture.objects[1]}
+	built := mustCall[BatchDescriptor](t, d, MethodBatchBuild, BatchBuildParams{Objects: batchObjects})
+	direct, err := s.BuildBatch(t.Context(), batchObjects)
 	if err != nil || !reflect.DeepEqual(built, direct) {
 		t.Fatalf("batch.build = %+v, direct %+v, %v", built, direct, err)
 	}
@@ -189,5 +189,21 @@ func TestRegisterServesSourceMethods(t *testing.T) {
 	}
 	if _, err := call[struct{}](t, d, MethodPinsSet, PinsSetParams{Owner: "", Roots: fixture.roots}); err == nil {
 		t.Fatal("pins.set with an empty owner succeeded")
+	}
+}
+
+func TestHaveRefusesBeforeDecodingWhileReceiverRestricted(t *testing.T) {
+	d := rpc.NewDispatcher()
+	Register(d, newStore(t), &fakeMonitor{state: cellular})
+	response := d.Dispatch(t.Context(), &rpc.Request{Method: MethodHave, Params: map[string]any{"digests": "not a list"}})
+	if !response.OK {
+		t.Fatalf("have = %+v, want the typed refusal", response)
+	}
+	var result HaveResult
+	if err := json.Unmarshal(response.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Paused == nil || result.Paused.Code != PauseReceiverCellular || len(result.Missing) != 0 {
+		t.Fatalf("have = %+v, want a receiver-cellular refusal", result)
 	}
 }

@@ -10,10 +10,11 @@ import (
 )
 
 // Register binds every artifact method on d to s, each dispatched
-// concurrently. batch.begin and batch.put evaluate monitor's live State
-// against the sender's declared State on every call and, unless both are
-// unrestricted, return the typed refusal without writing; both report the
-// receiver's live State.
+// concurrently. have returns the typed refusal, before decoding its params,
+// while monitor's live State is not unrestricted. batch.begin and batch.put
+// evaluate monitor's live State against the sender's declared State on
+// every call and, unless both are unrestricted, return the typed refusal
+// without writing; both report the receiver's live State.
 func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
 	d.Register(MethodNetStatus, func(context.Context, map[string]any) (any, error) {
 		state, _ := monitor.Current()
@@ -22,7 +23,17 @@ func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
 	handle(d, MethodClosure, func(ctx context.Context, p ClosureParams) (any, error) {
 		return s.closurePage(ctx, p)
 	})
-	handle(d, MethodHave, func(ctx context.Context, p HaveParams) (any, error) {
+	d.Register(MethodHave, func(ctx context.Context, raw map[string]any) (any, error) {
+		if refusal := LiveRefusal(monitor); refusal != nil {
+			return HaveResult{Missing: []Digest{}, Paused: refusal}, nil
+		}
+		var p HaveParams
+		if err := decodeParams(raw, &p); err != nil {
+			return nil, err
+		}
+		if err := p.Validate(); err != nil {
+			return nil, err
+		}
 		missing, err := s.Has(ctx, p.Digests)
 		if err != nil {
 			return nil, err

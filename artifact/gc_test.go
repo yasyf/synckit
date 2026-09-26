@@ -169,11 +169,7 @@ func TestConcurrentWritesSurviveGC(t *testing.T) {
 				closure, err = s.Closure(ctx, []Ref{group}, DefaultClosureBound)
 			}
 			if err == nil {
-				digests := make([]Digest, 0, len(closure.Objects))
-				for _, object := range closure.Objects {
-					digests = append(digests, object.Digest)
-				}
-				_, err = s.BuildBatch(ctx, digests)
+				_, err = s.BuildBatch(ctx, closure.Objects)
 			}
 			refs[worker] = group
 			errs <- err
@@ -210,5 +206,59 @@ func TestConcurrentWritesSurviveGC(t *testing.T) {
 	}
 	if err := s.Verify(ctx, refs); err != nil {
 		t.Fatalf("Verify pinned refs after GC: %v", err)
+	}
+}
+
+func TestGCKeepsAPartialTransferForGCGrace(t *testing.T) {
+	tests := []struct {
+		name        string
+		age         time.Duration
+		dropRoot    bool
+		wantRemoved int
+	}{
+		{"absent root younger than grace", 2 * time.Hour, true, 0},
+		{"absent root past grace", GCGrace + time.Hour, true, 4},
+		{"present root with an absent chunk", GCGrace + time.Hour, false, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newStore(t)
+			root, err := s.Put(t.Context(), bytes.NewReader(randomBytes(11, 4*ChunkSize)), "test/blob")
+			if err != nil {
+				t.Fatal(err)
+			}
+			m, err := s.Manifest(t.Context(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			doomed := root.Digest
+			if !tt.dropRoot {
+				doomed = m.Chunks[0].Digest
+			}
+			if err := os.Remove(s.objectPath(doomed)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetPins(t.Context(), "synckit.accepted/origin", []Ref{root}); err != nil {
+				t.Fatal(err)
+			}
+			old := time.Now().Add(-tt.age)
+			for _, chunk := range m.Chunks {
+				if chunk.Digest == doomed {
+					continue
+				}
+				if err := os.Chtimes(s.objectPath(chunk.Digest), old, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !tt.dropRoot {
+				if err := os.Chtimes(s.objectPath(root.Digest), old, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+			report, err := s.GC(t.Context())
+			if err != nil || report.Removed != tt.wantRemoved {
+				t.Fatalf("GC = %+v, %v; want %d removed", report, err, tt.wantRemoved)
+			}
+		})
 	}
 }

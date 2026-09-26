@@ -295,6 +295,10 @@ func TestClosureIsDeterministicChildrenFirst(t *testing.T) {
 func TestClosureBounds(t *testing.T) {
 	s := newStore(t)
 	fixture := buildClosureFixture(t, s)
+	var firstRoot int64
+	for _, object := range fixture.objects[:4] {
+		firstRoot += object.Size
+	}
 	tests := []struct {
 		name  string
 		bound ClosureBound
@@ -302,7 +306,7 @@ func TestClosureBounds(t *testing.T) {
 	}{
 		{"objects", ClosureBound{MaxObjects: 3, MaxDepth: 32, MaxBytes: 1 << 30}, ClosureError{Bound: BoundObjects, Limit: 3}},
 		{"depth", ClosureBound{MaxObjects: 100, MaxDepth: 1, MaxBytes: 1 << 30}, ClosureError{Bound: BoundDepth, Limit: 1}},
-		{"bytes", ClosureBound{MaxObjects: 100, MaxDepth: 32, MaxBytes: fixture.bytes - 1}, ClosureError{Bound: BoundBytes, Limit: fixture.bytes - 1}},
+		{"bytes", ClosureBound{MaxObjects: 100, MaxDepth: 32, MaxBytes: firstRoot - 1}, ClosureError{Bound: BoundBytes, Limit: firstRoot - 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
