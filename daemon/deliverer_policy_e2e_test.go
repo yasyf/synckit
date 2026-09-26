@@ -246,3 +246,151 @@ func TestE2ESupersedeMidBacklogDeliversTheNewRootFirst(t *testing.T) {
 		t.Fatalf("urgent root sent at %d, the backlog's last root at %d; want the urgent root first", at, last)
 	}
 }
+
+func TestE2EApplyReprobeRechecksTheLiveLocalState(t *testing.T) {
+	m := newE2EMesh(t, "a@node", "b@node")
+	peerStateMaxAge = 0
+	a, b := m.hosts["a@node"], m.hosts["b@node"]
+	a.consumer.publish(1, a.put(t, randomBytes(t, 4<<10)))
+	link := m.link("a@node", "b@node")
+	var committed atomic.Bool
+	var once sync.Once
+	link.setHook(func(request *rpc.Request) error {
+		switch {
+		case request.Method == artifact.MethodBatchCommit:
+			committed.Store(true)
+		case request.Method == artifact.MethodNetStatus && committed.Load():
+			once.Do(func() {
+				a.monitor.set(netpolicy.State{Status: netpolicy.StatusConnected, Expensive: true, ObservedAt: time.Now()})
+			})
+		}
+		return nil
+	})
+	d := m.deliver("a@node", "b@node")
+	status := d.await(t, "b@node", "pause or ack", func(s delivery.PeerStatus) bool {
+		return pausedWith(delivery.PauseLocalExpensive)(s) || acked(1)(s)
+	})
+	if !pausedWith(delivery.PauseLocalExpensive)(status) {
+		t.Fatalf("status = %+v, want a local-expensive pause before apply.v2", status)
+	}
+	if got := link.count(syncservice.MethodApplyV2); got != 0 {
+		t.Fatalf("apply.v2 ran %d times after the reprobe, want 0", got)
+	}
+	requireNoApplies(t, b)
+}
+
+func TestE2EKickSupersedesAtTheNextBatchBoundary(t *testing.T) {
+	m := newE2EMesh(t, "a@node", "b@node")
+	batchObjectLimit = 1
+	artifactMaxWait = time.Hour
+	a, b := m.hosts["a@node"], m.hosts["b@node"]
+	backlog := make([]artifact.Ref, 6)
+	for i := range backlog {
+		backlog[i] = a.put(t, randomBytes(t, 4<<10))
+	}
+	urgentContent := randomBytes(t, 4<<10)
+	urgent := a.put(t, urgentContent)
+	urgentClosure, err := a.store.Closure(t.Context(), []artifact.Ref{urgent}, artifact.DefaultClosureBound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.consumer.publish(1, backlog...)
+
+	link := m.link("a@node", "b@node")
+	var mu sync.Mutex
+	var begun []artifact.Digest
+	running, release := make(chan struct{}), make(chan struct{})
+	var commits atomic.Int64
+	link.setHook(func(request *rpc.Request) error {
+		switch request.Method {
+		case artifact.MethodBatchBegin:
+			object := request.Params["batch"].(map[string]any)["objects"].([]any)[0]
+			mu.Lock()
+			begun = append(begun, artifact.Digest(object.(map[string]any)["digest"].(string)))
+			mu.Unlock()
+		case artifact.MethodBatchCommit:
+			if commits.Add(1) == 3 {
+				close(running)
+				<-release
+			}
+		}
+		return nil
+	})
+	d := m.deliver("a@node", "b@node")
+	<-running
+	a.consumer.publish(2, append([]artifact.Ref{urgent}, backlog...)...)
+	if err := d.sched.Kick("stub", "b@node"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	deadline := time.Now().Add(60 * time.Second)
+	var next artifact.Digest
+	for next == "" {
+		mu.Lock()
+		if len(begun) > 3 {
+			next = begun[3]
+		}
+		mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the batch after the kick")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !slices.ContainsFunc(urgentClosure.Objects, func(o artifact.ObjectEntry) bool { return o.Digest == next }) {
+		t.Fatalf("batch after the kick carried %s, want an object of the urgent root; the old backlog kept going", next)
+	}
+	d.await(t, "b@node", "ack of the superseding change", acked(2))
+	b.requireContent(t, urgent, urgentContent)
+}
+
+func TestE2EDeliversTheChildrenOfADigestReachedAsBothKinds(t *testing.T) {
+	m := newE2EMesh(t, "a@node", "b@node")
+	a, b := m.hosts["a@node"], m.hosts["b@node"]
+	leafContent := randomBytes(t, 4<<10)
+	leaf := a.put(t, leafContent)
+	inner, err := a.store.PutGroup(t.Context(), "test/group", []artifact.Ref{leaf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := a.store.Manifest(t.Context(), inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := manifest.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := a.put(t, encoded)
+	root, err := a.store.PutGroup(t.Context(), "test/group", []artifact.Ref{file, inner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.consumer.publish(1, root)
+	d := m.deliver("a@node", "b@node")
+	d.await(t, "b@node", "ack", acked(1))
+	b.requireContent(t, leaf, leafContent)
+	b.requireContent(t, file, encoded)
+}
+
+func TestE2EKickBeforeEveryFirstBatchStillShipsOne(t *testing.T) {
+	m := newE2EMesh(t, "a@node", "b@node")
+	artifactMaxWait = time.Hour
+	a, b := m.hosts["a@node"], m.hosts["b@node"]
+	content := randomBytes(t, 4<<10)
+	root := a.put(t, content)
+	a.consumer.publish(1, root)
+	ready := make(chan struct{})
+	var sched atomic.Pointer[deliveryScheduler]
+	m.link("a@node", "b@node").setHook(func(request *rpc.Request) error {
+		if request.Method != artifact.MethodHave {
+			return nil
+		}
+		<-ready
+		return sched.Load().Kick("stub", "b@node")
+	})
+	d := m.deliver("a@node", "b@node")
+	sched.Store(d.sched)
+	close(ready)
+	d.await(t, "b@node", "ack despite a kick before every first batch", acked(1))
+	b.requireContent(t, root, content)
+}

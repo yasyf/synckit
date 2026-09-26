@@ -92,7 +92,9 @@ func TestClosureBoundAppliesPerRoot(t *testing.T) {
 	}{
 		{"each root within the bound", []Ref{first, second}, 6, false},
 		{"one root past the bound", []Ref{wide}, 0, true},
-		{"shared objects count once", []Ref{first, group(blobs[0], blobs[1], blobs[4])}, 5, false},
+		{"shared objects count once in the union", []Ref{first, group(blobs[0], blobs[4])}, 5, false},
+		{"shared objects still count toward each root", []Ref{first, group(blobs[0], blobs[1], blobs[4])}, 0, true},
+		{"a root past the bound behind a smaller one", []Ref{first, wide}, 0, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

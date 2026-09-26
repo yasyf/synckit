@@ -3,6 +3,7 @@ package artifact
 import (
 	"bytes"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -68,6 +69,86 @@ func TestBatchShipsDeclaredKinds(t *testing.T) {
 				t.Fatalf("BuildBatch = %v, want ErrInvalid", err)
 			}
 		})
+	}
+}
+
+type dualKindFixture struct {
+	leaf, inner, file, root Ref
+	objects                 []ObjectEntry
+}
+
+func buildDualKindFixture(t *testing.T, s *Store) dualKindFixture {
+	t.Helper()
+	ctx := t.Context()
+	leaf, err := s.PutBlob(ctx, []byte("leaf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner, err := s.PutGroup(ctx, "test.group", []Ref{leaf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := s.readObject(inner.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := s.Put(ctx, bytes.NewReader(encoded), "test.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := s.PutGroup(ctx, "test.group", []Ref{file, inner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := func(ref Ref, kind Kind) ObjectEntry {
+		data, err := s.readObject(ref.Digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ObjectEntry{Digest: ref.Digest, Kind: kind, Size: int64(len(data))}
+	}
+	return dualKindFixture{
+		leaf: leaf, inner: inner, file: file, root: root,
+		objects: []ObjectEntry{
+			stored(leaf, KindBlob), stored(inner, KindManifest), stored(file, KindManifest), stored(root, KindManifest),
+		},
+	}
+}
+
+func TestDigestReachedAsBothKindsKeepsItsManifestChildren(t *testing.T) {
+	src, dst := newStore(t), newStore(t)
+	ctx := t.Context()
+	fixture := buildDualKindFixture(t, src)
+	closure, err := src.Closure(ctx, []Ref{fixture.root}, DefaultClosureBound)
+	if err != nil || !reflect.DeepEqual(closure.Objects, fixture.objects) {
+		t.Fatalf("Closure = %+v, %v; want %+v", closure.Objects, err, fixture.objects)
+	}
+
+	partial := newStore(t)
+	for _, object := range fixture.objects[1:] {
+		data, err := src.readObject(object.Digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeRawBlob(t, partial, data)
+	}
+	if missing, err := partial.Complete(ctx, []Ref{fixture.root}); err != nil || missing != 1 {
+		t.Fatalf("Complete without the leaf = %d, %v; want 1 missing", missing, err)
+	}
+
+	d := stageBatch(t, src, dst, closure.Objects)
+	if _, err := dst.CommitBatch(ctx, d.ID); err != nil {
+		t.Fatalf("CommitBatch: %v", err)
+	}
+	if missing, err := dst.Complete(ctx, []Ref{fixture.root}); err != nil || missing != 0 {
+		t.Fatalf("Complete after the batch = %d, %v; want 0 missing", missing, err)
+	}
+	encoded, err := src.readObject(fixture.inner.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing, err := dst.Has(ctx, []Digest{fixture.leaf.Digest}); err != nil || len(missing) != 0 || !bytes.Equal(readAll(t, dst, fixture.file), encoded) {
+		t.Fatalf("receiver lacks %v, %v; want the leaf and the file reading back as the inner manifest's bytes", missing, err)
 	}
 }
 

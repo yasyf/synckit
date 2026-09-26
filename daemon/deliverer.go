@@ -118,6 +118,12 @@ func (l *lane) due() time.Time {
 	return l.dirtyAt.Add(artifactMaxWait)
 }
 
+func (l *lane) dirty() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return !l.dirtyAt.IsZero()
+}
+
 func (l *lane) update(fn func(*laneLive)) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -508,19 +514,19 @@ func (s *deliveryScheduler) deliverPending(ctx context.Context, l *lane) error {
 }
 
 type deliveryRun struct {
-	s          *deliveryScheduler
-	l          *lane
-	peer       *syncservice.Client
-	artifacts  bool
-	change     syncservice.ChangeEnvelope
-	localState netpolicy.State
-	peerState  netpolicy.State
-	peerAt     time.Time
+	s           *deliveryScheduler
+	l           *lane
+	peer        *syncservice.Client
+	artifacts   bool
+	change      syncservice.ChangeEnvelope
+	peerState   netpolicy.State
+	peerAt      time.Time
+	sentBatches int
 }
 
 func (r *deliveryRun) observeLocal() netpolicy.State {
 	state, changed := r.s.monitor.Current()
-	r.l.wake, r.localState = changed, state
+	r.l.wake = changed
 	r.l.update(func(v *laneLive) { v.localNetwork = &state })
 	return state
 }
@@ -531,34 +537,34 @@ func (r *deliveryRun) observePeer(state netpolicy.State) {
 }
 
 func (r *deliveryRun) gate(ctx context.Context) error {
-	local := r.observeLocal()
 	caps, err := r.peer.Capabilities(ctx)
 	if err != nil {
-		return unreachable(local, err)
+		return unreachable(r.observeLocal(), err)
 	}
 	if !artifactCapable(caps.Methods) {
+		r.observeLocal()
 		return &pauseError{reason: delivery.PausePeerIncompatible}
 	}
-	if err := r.probe(ctx, local); err != nil {
+	if err := r.probe(ctx); err != nil {
 		return err
 	}
-	return r.evaluate(local)
+	return r.evaluate(r.observeLocal())
 }
 
 func (r *deliveryRun) admit(ctx context.Context) (netpolicy.State, error) {
-	local := r.observeLocal()
 	if r.s.now().Sub(r.peerAt) >= peerStateMaxAge {
-		if err := r.probe(ctx, local); err != nil {
-			return local, err
+		if err := r.probe(ctx); err != nil {
+			return netpolicy.State{}, err
 		}
 	}
+	local := r.observeLocal()
 	return local, r.evaluate(local)
 }
 
-func (r *deliveryRun) probe(ctx context.Context, local netpolicy.State) error {
+func (r *deliveryRun) probe(ctx context.Context) error {
 	state, err := r.peer.NetStatus(ctx)
 	if err != nil {
-		return unreachable(local, err)
+		return unreachable(r.observeLocal(), err)
 	}
 	r.observePeer(state)
 	return nil
@@ -572,8 +578,7 @@ func (r *deliveryRun) evaluate(local netpolicy.State) error {
 }
 
 func (r *deliveryRun) superseded() bool {
-	due := r.l.due()
-	return !due.IsZero() && !r.s.now().Before(due)
+	return r.sentBatches > 0 && r.l.dirty()
 }
 
 func unreachable(local netpolicy.State, err error) error {
@@ -793,6 +798,7 @@ func (r *deliveryRun) send(ctx context.Context, objects []artifact.ObjectEntry) 
 	if err := r.l.local.BatchDrop(ctx, batch.ID); err != nil {
 		return fmt.Errorf("drop batch %s: %w", batch.ID, err)
 	}
+	r.sentBatches++
 	r.l.update(func(v *laneLive) {
 		v.progress.ObjectsSent += int64(len(objects))
 		v.progress.BytesSent += raw

@@ -81,6 +81,26 @@ func TestGCKeepsPinnedAndYoungClosures(t *testing.T) {
 	}
 }
 
+func TestGCKeepsTheChildrenOfADigestReachedAsBothKinds(t *testing.T) {
+	s := newStore(t)
+	ctx := t.Context()
+	fixture := buildDualKindFixture(t, s)
+	if err := s.SetPins(ctx, "owner", []Ref{fixture.root}); err != nil {
+		t.Fatal(err)
+	}
+	ageAll(t, s, GCGrace+time.Minute)
+	report, err := s.GC(ctx)
+	if err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	if want := (GCReport{Marked: len(fixture.objects)}); report != want {
+		t.Fatalf("GC = %+v, want %+v", report, want)
+	}
+	if missing, err := s.Complete(ctx, []Ref{fixture.root}); err != nil || missing != 0 {
+		t.Fatalf("Complete after GC = %d, %v; want 0 missing", missing, err)
+	}
+}
+
 func TestPins(t *testing.T) {
 	s := newStore(t)
 	ctx := t.Context()

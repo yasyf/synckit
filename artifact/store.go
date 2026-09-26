@@ -196,10 +196,17 @@ func (r *Reader) readManifest(digest Digest, size int64) (Manifest, []byte, erro
 	if err != nil {
 		return Manifest{}, nil, fmt.Errorf("artifact: manifest %s: %w", digest, err)
 	}
-	if size >= 0 && m.Size != size {
-		return Manifest{}, nil, fmt.Errorf("%w: manifest %s holds %d bytes, ref says %d", ErrInvalid, digest, m.Size, size)
+	if err := checkManifestSize(digest, m, size); err != nil {
+		return Manifest{}, nil, err
 	}
 	return m, data, nil
+}
+
+func checkManifestSize(digest Digest, m Manifest, size int64) error {
+	if size >= 0 && m.Size != size {
+		return fmt.Errorf("%w: manifest %s holds %d bytes, ref says %d", ErrInvalid, digest, m.Size, size)
+	}
+	return nil
 }
 
 func (s *Store) touch(digest Digest) (bool, error) {
@@ -442,9 +449,10 @@ func (r *Reader) Has(ctx context.Context, digests []Digest) ([]Digest, error) {
 }
 
 // Closure walks roots in priority order, depth first with every child before
-// its manifest and each manifest's chunks before its deps, and fails with a
-// MissingError on an absent manifest or a ClosureError when the objects one
-// root first reaches pass bound: the bound applies per root, not to the
+// its manifest and each manifest's chunks before its deps, listing each
+// digest once and as a manifest whenever any root reaches it as one. It fails
+// with a MissingError on an absent manifest or a ClosureError when any one
+// root's complete closure passes bound: the bound applies per root, not to the
 // union.
 func (r *Reader) Closure(ctx context.Context, roots []Ref, bound ClosureBound) (Closure, error) {
 	closure, err := r.closure(ctx, roots, bound)
@@ -478,7 +486,7 @@ func (r *Reader) closure(ctx context.Context, roots []Ref, bound ClosureBound) (
 	if err := w.walk(ctx, roots); err != nil {
 		return Closure{}, err
 	}
-	closure := Closure{Objects: w.objects, Bytes: w.bytes}
+	closure := w.order(roots)
 	r.memoMu.Lock()
 	r.memo = append([]closureMemo{{key: key, closure: closure}}, r.memo[:min(len(r.memo), closureMemos-1)]...)
 	r.memoMu.Unlock()
@@ -496,7 +504,7 @@ func (r *Reader) Complete(ctx context.Context, roots []Ref) (int, error) {
 	if err := w.walk(ctx, roots); err != nil {
 		return 0, err
 	}
-	return w.missing, nil
+	return len(w.missing), nil
 }
 
 // Verify re-hashes every object of roots' closure, failing with a
@@ -521,25 +529,43 @@ func (r *Reader) Verify(ctx context.Context, roots []Ref) error {
 	return nil
 }
 
+type reach uint8
+
+const (
+	reachedBlob reach = 1 << iota
+	reachedManifest
+)
+
+func reachOf(kind Kind) reach {
+	if kind == KindManifest {
+		return reachedManifest
+	}
+	return reachedBlob
+}
+
 type walker struct {
-	reader      *Reader
-	bound       ClosureBound
-	audit       bool
-	seen        map[Digest]struct{}
-	objects     []ObjectEntry
-	bytes       int64
-	missing     int
-	rootObjects int
-	rootBytes   int64
+	reader       *Reader
+	bound        ClosureBound
+	audit        bool
+	manifests    map[Digest]Manifest
+	stored       map[Digest]int64
+	missing      map[Digest]struct{}
+	scope        map[Digest]reach
+	scopeObjects int
+	scopeBytes   int64
 }
 
 func newWalker(r *Reader, bound ClosureBound, audit bool) *walker {
-	return &walker{reader: r, bound: bound, audit: audit, seen: map[Digest]struct{}{}, objects: []ObjectEntry{}}
+	return &walker{
+		reader: r, bound: bound, audit: audit,
+		manifests: map[Digest]Manifest{}, stored: map[Digest]int64{}, missing: map[Digest]struct{}{},
+		scope: map[Digest]reach{},
+	}
 }
 
 func (w *walker) walk(ctx context.Context, roots []Ref) error {
 	for _, root := range roots {
-		w.rootObjects, w.rootBytes = 0, 0
+		w.scope, w.scopeObjects, w.scopeBytes = map[Digest]reach{}, 0, 0
 		if err := w.visit(ctx, root, 1); err != nil {
 			return err
 		}
@@ -548,27 +574,36 @@ func (w *walker) walk(ctx context.Context, roots []Ref) error {
 }
 
 func (w *walker) visit(ctx context.Context, ref Ref, depth int) error {
-	if _, seen := w.seen[ref.Digest]; seen {
+	reached := w.scope[ref.Digest]
+	if reached&reachOf(ref.Kind) != 0 {
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	w.scope[ref.Digest] = reached | reachOf(ref.Kind)
+	if _, absent := w.missing[ref.Digest]; absent {
+		return nil
+	}
 	if ref.Kind == KindBlob {
-		return w.blob(ref)
+		return w.blob(ref, reached == 0)
 	}
 	if depth > w.bound.MaxDepth {
 		return &ClosureError{Bound: BoundDepth, Limit: int64(w.bound.MaxDepth)}
 	}
-	m, encoded, err := w.reader.readManifest(ref.Digest, ref.Size)
+	m, err := w.manifest(ref)
 	var missing *MissingError
 	if w.audit && errors.As(err, &missing) {
-		w.seen[ref.Digest] = struct{}{}
-		w.missing++
+		w.missing[ref.Digest] = struct{}{}
 		return nil
 	}
 	if err != nil {
 		return err
+	}
+	if reached == 0 {
+		if err := w.count(w.stored[ref.Digest]); err != nil {
+			return err
+		}
 	}
 	for _, chunk := range m.Chunks {
 		if err := w.visit(ctx, Ref{Digest: chunk.Digest, Kind: KindBlob, Size: chunk.Size}, depth); err != nil {
@@ -580,40 +615,85 @@ func (w *walker) visit(ctx context.Context, ref Ref, depth int) error {
 			return err
 		}
 	}
-	return w.emit(ObjectEntry{Digest: ref.Digest, Kind: KindManifest, Size: int64(len(encoded))})
+	return nil
 }
 
-func (w *walker) blob(ref Ref) error {
-	if w.audit {
-		info, err := os.Stat(w.reader.objectPath(ref.Digest))
-		if errors.Is(err, os.ErrNotExist) {
-			w.seen[ref.Digest] = struct{}{}
-			w.missing++
-			return nil
-		}
+func (w *walker) manifest(ref Ref) (Manifest, error) {
+	m, read := w.manifests[ref.Digest]
+	if !read {
+		decoded, encoded, err := w.reader.readManifest(ref.Digest, -1)
 		if err != nil {
-			return fmt.Errorf("artifact: stat object %s: %w", ref.Digest, err)
+			return Manifest{}, err
 		}
-		if info.Size() != ref.Size {
-			return fmt.Errorf("%w: blob %s holds %d bytes, ref says %d", ErrInvalid, ref.Digest, info.Size(), ref.Size)
-		}
+		m = decoded
+		w.manifests[ref.Digest] = m
+		w.stored[ref.Digest] = int64(len(encoded))
 	}
-	return w.emit(ObjectEntry{Digest: ref.Digest, Kind: KindBlob, Size: ref.Size})
+	return m, checkManifestSize(ref.Digest, m, ref.Size)
 }
 
-func (w *walker) emit(entry ObjectEntry) error {
-	if w.rootObjects >= w.bound.MaxObjects {
+func (w *walker) blob(ref Ref, first bool) error {
+	size, known := w.stored[ref.Digest]
+	if !known {
+		size = ref.Size
+		if w.audit {
+			info, err := os.Stat(w.reader.objectPath(ref.Digest))
+			if errors.Is(err, os.ErrNotExist) {
+				w.missing[ref.Digest] = struct{}{}
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("artifact: stat object %s: %w", ref.Digest, err)
+			}
+			size = info.Size()
+		}
+		w.stored[ref.Digest] = size
+	}
+	if w.audit && size != ref.Size {
+		return fmt.Errorf("%w: blob %s holds %d bytes, ref says %d", ErrInvalid, ref.Digest, size, ref.Size)
+	}
+	if !first {
+		return nil
+	}
+	return w.count(size)
+}
+
+func (w *walker) count(size int64) error {
+	if w.scopeObjects >= w.bound.MaxObjects {
 		return &ClosureError{Bound: BoundObjects, Limit: int64(w.bound.MaxObjects)}
 	}
-	if w.rootBytes+entry.Size > w.bound.MaxBytes {
+	if w.scopeBytes+size > w.bound.MaxBytes {
 		return &ClosureError{Bound: BoundBytes, Limit: w.bound.MaxBytes}
 	}
-	w.seen[entry.Digest] = struct{}{}
-	w.objects = append(w.objects, entry)
-	w.bytes += entry.Size
-	w.rootObjects++
-	w.rootBytes += entry.Size
+	w.scopeObjects++
+	w.scopeBytes += size
 	return nil
+}
+
+func (w *walker) order(roots []Ref) Closure {
+	closure := Closure{Objects: []ObjectEntry{}}
+	listed := map[Digest]struct{}{}
+	var list func(Digest)
+	list = func(digest Digest) {
+		if _, done := listed[digest]; done {
+			return
+		}
+		listed[digest] = struct{}{}
+		kind := KindBlob
+		if m, ok := w.manifests[digest]; ok {
+			kind = KindManifest
+			for _, child := range m.children() {
+				list(child)
+			}
+		}
+		size := w.stored[digest]
+		closure.Objects = append(closure.Objects, ObjectEntry{Digest: digest, Kind: kind, Size: size})
+		closure.Bytes += size
+	}
+	for _, root := range roots {
+		list(root.Digest)
+	}
+	return closure
 }
 
 func sniffKind(data []byte) Kind {
