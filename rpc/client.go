@@ -11,8 +11,7 @@ import (
 )
 
 // laneCloseGrace bounds releasing one retired or closed business lane; every
-// daemonkit verb refuses a context without a deadline, and a lane being dropped
-// has no caller deadline left to borrow.
+// daemonkit verb refuses a context without a deadline.
 const laneCloseGrace = 5 * time.Second
 
 // callBudget is the deadline a Call rides when its caller states none. The
@@ -142,7 +141,7 @@ func (c *Client) Close() error {
 }
 
 func closeLane(parent context.Context, lane *daemonkit.Business) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), laneCloseGrace)
+	ctx, cancel := context.WithTimeout(parent, laneCloseGrace)
 	defer cancel()
 	_ = lane.Close(ctx)
 }
