@@ -59,12 +59,16 @@ func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
 		if !live.Unrestricted() {
 			return BatchBeginResult{HaveParts: []int{}, Peer: live, Paused: PausedFor(netpolicy.Evaluate(live, live))}, nil
 		}
-		p, err := decode[BatchBeginParams](raw)
+		sender, err := decodeSender(raw)
 		if err != nil {
 			return nil, err
 		}
-		if verdict := netpolicy.Evaluate(live, p.Sender); !verdict.Allowed {
+		if verdict := netpolicy.Evaluate(live, sender); !verdict.Allowed {
 			return BatchBeginResult{HaveParts: []int{}, Peer: live, Paused: PausedFor(verdict)}, nil
+		}
+		p, err := decode[BatchBeginParams](raw)
+		if err != nil {
+			return nil, err
 		}
 		held, err := s.BeginBatch(ctx, p.Batch)
 		if err != nil {
@@ -77,12 +81,16 @@ func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
 		if !live.Unrestricted() {
 			return BatchPutResult{Peer: live, Paused: PausedFor(netpolicy.Evaluate(live, live))}, nil
 		}
-		p, err := decode[BatchPutParams](raw)
+		sender, err := decodeSender(raw)
 		if err != nil {
 			return nil, err
 		}
-		if verdict := netpolicy.Evaluate(live, p.Sender); !verdict.Allowed {
+		if verdict := netpolicy.Evaluate(live, sender); !verdict.Allowed {
 			return BatchPutResult{Peer: live, Paused: PausedFor(verdict)}, nil
+		}
+		p, err := decode[BatchPutParams](raw)
+		if err != nil {
+			return nil, err
 		}
 		if err := s.PutPart(ctx, p.ID, p.Index, p.Data); err != nil {
 			return nil, err
@@ -113,6 +121,14 @@ func decode[P interface{ Validate() error }](raw map[string]any) (P, error) {
 		return params, err
 	}
 	return params, params.Validate()
+}
+
+func decodeSender(raw map[string]any) (netpolicy.State, error) {
+	var p struct {
+		Sender netpolicy.State `json:"sender"`
+	}
+	err := decodeParams(map[string]any{"sender": raw["sender"]}, &p)
+	return p.Sender, err
 }
 
 func decodeParams(params map[string]any, target any) error {
