@@ -1,28 +1,15 @@
 package daemon
 
 import (
-	"context"
-
-	"github.com/yasyf/daemonkit"
-
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/internal/servespec"
 	"github.com/yasyf/synckit/internal/synctransport"
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 )
 
-// daemonClient reaches the resident synckitd over its business lane. Open
-// validates the spec here rather than on the first call inside a retry loop.
-func daemonClient() (*rpc.Client, error) {
-	client, err := daemonkit.Open(clientSpec())
-	if err != nil {
-		return nil, err
-	}
-	return rpc.NewClient(rpc.ClientConfig{
-		Open: func(context.Context) (*daemonkit.Business, error) { return client.Business(), nil },
-	}), nil
-}
+func daemonClient() (*rpc.Client, error) { return servespec.Dial() }
 
 // dialTransport is the seam serve and reconcile use to reach a consumer's typed
 // sync service. Tests override it to inject an in-process transport.
