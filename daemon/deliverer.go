@@ -137,12 +137,6 @@ func (l *lane) snapshot() laneLive {
 	return l.live
 }
 
-func (l *lane) settled() bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.dirtyAt.IsZero() && !l.live.running
-}
-
 type deliveryTiming struct {
 	backoffBase     time.Duration
 	backoffMax      time.Duration
@@ -238,12 +232,8 @@ func (s *deliveryScheduler) status(ctx context.Context, serviceID string) ([]del
 		if serviceID != "" && key.service != serviceID {
 			continue
 		}
-		record := deliveryRecord{ServiceID: key.service, Peer: key.peer, Acked: syncservice.NewRevision(0)}
-		if index := slices.IndexFunc(records, func(r deliveryRecord) bool { return r.ServiceID == key.service && r.Peer == key.peer }); index >= 0 {
-			record = records[index]
-		}
 		live := s.lanes[key].snapshot()
-		out = append(out, peerStatus(record, &live))
+		out = append(out, peerStatus(laneRecord(records, key), &live))
 		covered[key] = true
 	}
 	for _, record := range records {
@@ -255,6 +245,24 @@ func (s *deliveryScheduler) status(ctx context.Context, serviceID string) ([]del
 		return compareLaneKeys(laneKey{a.ServiceID, a.Peer}, laneKey{b.ServiceID, b.Peer})
 	})
 	return out, nil
+}
+
+func (s *deliveryScheduler) settledStatus(ctx context.Context, l *lane) (delivery.PeerStatus, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	records, err := s.store.records(ctx, l.service)
+	if err != nil {
+		return delivery.PeerStatus{}, false, err
+	}
+	return peerStatus(laneRecord(records, l.laneKey), &l.live), l.dirtyAt.IsZero() && !l.live.running, nil
+}
+
+func laneRecord(records []deliveryRecord, key laneKey) deliveryRecord {
+	index := slices.IndexFunc(records, func(r deliveryRecord) bool { return r.ServiceID == key.service && r.Peer == key.peer })
+	if index < 0 {
+		return deliveryRecord{ServiceID: key.service, Peer: key.peer, Acked: syncservice.NewRevision(0)}
+	}
+	return records[index]
 }
 
 func peerStatus(record deliveryRecord, live *laneLive) delivery.PeerStatus {
