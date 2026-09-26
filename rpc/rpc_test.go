@@ -207,6 +207,7 @@ func TestExclusiveDispatchSerializes(t *testing.T) {
 func TestReplyErrorRecognizesAnUnknownMethod(t *testing.T) {
 	dispatcher := NewDispatcher()
 	dispatcher.Register("fail", func(context.Context, map[string]any) (any, error) { return nil, errors.New("boom") })
+	dispatcher.Register("prefixed", func(context.Context, map[string]any) (any, error) { return nil, errors.New("unknown method 'x'") })
 	tests := []struct {
 		name    string
 		message string
@@ -218,6 +219,10 @@ func TestReplyErrorRecognizesAnUnknownMethod(t *testing.T) {
 		{"unquoted method", "unknown method delivery.status", false},
 		{"trailing text", `unknown method "delivery.status" here`, false},
 		{"bare prefix", "unknown method", false},
+		{"single-quoted rune", "unknown method 'x'", false},
+		{"raw string", "unknown method `delivery.status`", false},
+		{"non-canonical escape", `unknown method "\x64elivery.status"`, false},
+		{"handler error with the prefix", dispatcher.Dispatch(t.Context(), &Request{Method: "prefixed"}).Error, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

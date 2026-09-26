@@ -51,11 +51,12 @@ type Response struct {
 
 // ReplyError turns the Error of a failed Response into an error. The reply a
 // dispatcher sends for a method it lacks wraps ErrUnknownMethod and keeps the
-// method name; every other reply is an opaque remote failure.
+// method name; every other reply, a handler error that merely shares its prefix
+// included, is an opaque remote failure.
 func ReplyError(message string) error {
-	if method, ok := strings.CutPrefix(message, unknownMethodPrefix); ok {
-		if _, err := strconv.Unquote(method); err == nil {
-			return fmt.Errorf("%w %s", ErrUnknownMethod, method)
+	if quoted, ok := strings.CutPrefix(message, unknownMethodPrefix); ok {
+		if method, err := strconv.Unquote(quoted); err == nil && strconv.Quote(method) == quoted {
+			return fmt.Errorf("%w %s", ErrUnknownMethod, quoted)
 		}
 	}
 	return errors.New(message)
