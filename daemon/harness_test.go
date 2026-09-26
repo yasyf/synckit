@@ -379,6 +379,24 @@ func TestHarnessReceiverCellularPausesUntilResumed(t *testing.T) {
 	b.requireContent(t, root, content)
 }
 
+func TestHarnessWaitIdleNeverReportsAnAttemptInFlight(t *testing.T) {
+	m := newMesh(t, "a@node", "b@node")
+	a := m.hosts["a@node"]
+	a.catalog.publish(1, a.put(t, randomBytes(t, artifact.ChunkSize)))
+	a.monitor.set(cellular)
+	m.start(t)
+
+	for range 50 {
+		var wake sync.WaitGroup
+		wake.Go(func() { a.monitor.set(cellular) })
+		status := m.waitIdle(t, "a@node", "b@node")
+		wake.Wait()
+		if status.State != delivery.StatePaused || status.PauseReason != delivery.PauseLocalCellular || status.NextAttemptAt.IsZero() {
+			t.Fatalf("WaitIdle() = %+v while a stays cellular, want a settled local-cellular pause with its next attempt scheduled", status)
+		}
+	}
+}
+
 func TestNewHarnessRejectsInvalidConfig(t *testing.T) {
 	host := func(name string, services ...string) daemon.HarnessHost {
 		h := daemon.HarnessHost{Name: name, StateDir: t.TempDir(), Monitor: &monitor{changed: make(chan struct{})}, Services: map[string]syncservice.Transport{}}

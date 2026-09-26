@@ -158,12 +158,10 @@ func (h *Harness) WaitIdle(ctx context.Context, host, service, peer string) (del
 	ticker := time.NewTicker(harnessPoll)
 	defer ticker.Stop()
 	for {
-		settled := l.settled()
-		statuses, err := s.status(ctx, service)
+		status, settled, err := s.settledStatus(ctx, l)
 		if err != nil {
 			return delivery.PeerStatus{}, err
 		}
-		status := statuses[slices.IndexFunc(statuses, func(p delivery.PeerStatus) bool { return p.Peer == peer })]
 		if settled && (status.State == delivery.StateIdle || status.State == delivery.StatePaused) {
 			return status, nil
 		}
