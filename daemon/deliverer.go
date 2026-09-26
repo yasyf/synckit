@@ -70,6 +70,7 @@ type laneLive struct {
 	peerNetwork   *netpolicy.State
 	down          bool
 	downSince     time.Time
+	running       bool
 }
 
 type lane struct {
@@ -110,7 +111,7 @@ func (l *lane) clean() {
 	}
 }
 
-func (l *lane) due() time.Time {
+func (l *lane) due(maxWait time.Duration) time.Time {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.dirtyAt.IsZero() {
@@ -119,7 +120,7 @@ func (l *lane) due() time.Time {
 	if !l.artifacts.Load() {
 		return l.dirtyAt
 	}
-	return l.dirtyAt.Add(artifactMaxWait)
+	return l.dirtyAt.Add(maxWait)
 }
 
 func (l *lane) dirty() bool {
@@ -140,17 +141,31 @@ func (l *lane) snapshot() laneLive {
 	return l.live
 }
 
+func (l *lane) settled() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.dirtyAt.IsZero() && !l.live.running
+}
+
+type deliveryTiming struct {
+	backoffBase     time.Duration
+	backoffMax      time.Duration
+	pauseRecheck    time.Duration
+	artifactMaxWait time.Duration
+}
+
 type deliveryScheduler struct {
 	ctx      context.Context
 	wg       *sync.WaitGroup
-	scope    processScope
 	store    *deliveryStore
 	monitor  netpolicy.Monitor
 	self     string
 	services map[string]bool
 	lanes    map[laneKey]*lane
 	order    []laneKey
+	timing   deliveryTiming
 	now      func() time.Time
+	dial     func(m manifest.Manifest, peer string) syncservice.Transport
 	snapshot func(ctx context.Context, peer string)
 
 	batchMu sync.Mutex
@@ -176,11 +191,18 @@ func newDeliveryScheduler(
 	self string,
 ) *deliveryScheduler {
 	return &deliveryScheduler{
-		ctx: ctx, wg: wg, scope: scope, store: store, monitor: monitor, self: self,
+		ctx: ctx, wg: wg, store: store, monitor: monitor, self: self,
 		services: make(map[string]bool),
 		lanes:    make(map[laneKey]*lane),
 		batches:  make(map[sharedBatchKey]*sharedBatch),
-		now:      time.Now,
+		timing: deliveryTiming{
+			backoffBase: deliveryBackoffBase, backoffMax: deliveryBackoffMax,
+			pauseRecheck: pauseRecheck, artifactMaxWait: artifactMaxWait,
+		},
+		now: time.Now,
+		dial: func(m manifest.Manifest, peer string) syncservice.Transport {
+			return dialTransport(scope, m, peer, self)
+		},
 		snapshot: func(ctx context.Context, peer string) { tailscaleSnapshot(ctx, scope, peer) },
 	}
 }
@@ -306,7 +328,7 @@ func (s *deliveryScheduler) work(l *lane) {
 					l.update(func(v *laneLive) { v.lastError = err.Error() })
 				}
 			case due == nil:
-				coalesce.Reset(l.due().Sub(s.now()))
+				coalesce.Reset(l.due(s.timing.artifactMaxWait).Sub(s.now()))
 				due = coalesce.C
 			}
 			continue
@@ -318,7 +340,7 @@ func (s *deliveryScheduler) work(l *lane) {
 		coalesce.Stop()
 		retry, wake, due = nil, nil, nil
 		attempt := s.now()
-		l.update(func(v *laneLive) { v.lastAttemptAt, v.nextAttemptAt = attempt, time.Time{} })
+		l.update(func(v *laneLive) { v.lastAttemptAt, v.nextAttemptAt, v.running = attempt, time.Time{}, true })
 		err := s.deliverOnce(s.ctx, l)
 		if s.ctx.Err() != nil {
 			return
@@ -327,10 +349,10 @@ func (s *deliveryScheduler) work(l *lane) {
 		switch {
 		case errors.As(err, &paused):
 			s.pause(l, paused)
-			timer.Reset(pauseRecheck)
+			timer.Reset(s.timing.pauseRecheck)
 			retry, wake = timer.C, l.wake
 		case err != nil:
-			delay = min(max(2*delay, deliveryBackoffBase), deliveryBackoffMax)
+			delay = min(max(2*delay, s.timing.backoffBase), s.timing.backoffMax)
 			s.fail(l, err, delay)
 			timer.Reset(delay)
 			retry = timer.C
@@ -349,7 +371,7 @@ func (s *deliveryScheduler) pause(l *lane, paused *pauseError) {
 		if entered {
 			v.pauseSince = now
 		}
-		v.state, v.pauseReason, v.nextAttemptAt = delivery.StatePaused, paused.reason, now.Add(pauseRecheck)
+		v.state, v.pauseReason, v.nextAttemptAt, v.running = delivery.StatePaused, paused.reason, now.Add(s.timing.pauseRecheck), false
 		v.lastError = ""
 		if paused.cause != nil {
 			v.lastError = paused.cause.Error()
@@ -360,7 +382,7 @@ func (s *deliveryScheduler) pause(l *lane, paused *pauseError) {
 	})
 	switch {
 	case down:
-		s.logDown(l, paused, pauseRecheck)
+		s.logDown(l, paused, s.timing.pauseRecheck)
 	case entered:
 		slog.InfoContext(s.ctx, "delivery: paused", "manifest", l.service, "peer", l.peer, "reason", paused.reason)
 	}
@@ -370,7 +392,7 @@ func (s *deliveryScheduler) fail(l *lane, err error, delay time.Duration) {
 	now := s.now()
 	var down bool
 	l.update(func(v *laneLive) {
-		v.state, v.pauseReason, v.pauseSince = delivery.StateBackoff, "", time.Time{}
+		v.state, v.pauseReason, v.pauseSince, v.running = delivery.StateBackoff, "", time.Time{}, false
 		v.lastError, v.nextAttemptAt = err.Error(), now.Add(delay)
 		if !v.down {
 			v.down, v.downSince, down = true, now, true
@@ -389,7 +411,7 @@ func (s *deliveryScheduler) settle(l *lane) {
 		if v.down {
 			recovered, downFor = true, now.Sub(v.downSince)
 		}
-		v.down, v.state, v.pauseReason, v.pauseSince, v.lastError = false, "", "", time.Time{}, ""
+		v.down, v.state, v.pauseReason, v.pauseSince, v.lastError, v.running = false, "", "", time.Time{}, "", false
 	})
 	if recovered {
 		slog.InfoContext(s.ctx, "delivery: peer recovered", "manifest", l.service, "peer", l.peer, "down_for", downFor)
@@ -548,7 +570,7 @@ func (s *deliveryScheduler) deliverPending(ctx context.Context, l *lane) error {
 	if err != nil || pending == nil {
 		return err
 	}
-	peer := syncservice.NewClient(dialTransport(s.scope, l.m, l.peer, s.self))
+	peer := syncservice.NewClient(s.dial(l.m, l.peer))
 	defer func() { _ = peer.Close() }()
 	run := &deliveryRun{s: s, l: l, peer: peer, artifacts: artifacts, change: *pending}
 	if artifacts {

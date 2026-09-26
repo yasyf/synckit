@@ -19,9 +19,9 @@ func TestE2EMaxWaitIgnoresLaterKicks(t *testing.T) {
 	m := newE2EMesh(t, "a@node", "b@node")
 	a := m.hosts["a@node"]
 	a.consumer.publish(1, a.put(t, randomBytes(t, 4<<10)))
+	artifactMaxWait = 400 * time.Millisecond
 	d := m.deliver("a@node", "b@node")
 	d.await(t, "b@node", "first ack", acked(1))
-	artifactMaxWait = 400 * time.Millisecond
 
 	a.consumer.publish(2, a.put(t, randomBytes(t, 4<<10)))
 	stop, started := make(chan struct{}), make(chan time.Time, 1)
