@@ -63,7 +63,7 @@ func TestReconcileOne(t *testing.T) {
 	ctx := t.Context()
 	res := reconcileOne(
 		ctx, testProcessScope(t), testManifest(),
-		&hostregistry.Registry{Self: "me@self"}, newDeliveryStore(t.TempDir()),
+		&hostregistry.Registry{Self: "me@self"},
 	)
 	if res.Err != "" {
 		t.Fatalf("reconcileOne err = %q, want none", res.Err)
