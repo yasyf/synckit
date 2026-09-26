@@ -6,6 +6,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`artifact` stores large sync payloads by content address.**
+  `Open` takes a per-service store under `ServiceRoot(serviceID)` and holds its
+  `store.lock` until `Close`. `Put` splits content into 1 MiB chunks, so an
+  append rewrites only the last chunk and the manifest. `PutGroup`, `Has`,
+  `Closure`, `Complete`, and `Verify` work over whole root closures. `SetPins`
+  and `GC` keep pinned closures and sweep the rest after `GCGrace`. Batches ship
+  as zstd-compressed SKP1 packs in parts of at most 1 MiB; `CommitBatch` checks
+  every object's kind, digest, and size and stores nothing when any check fails.
+  `Register` serves the store over RPC, and on every `batch.begin` and
+  `batch.put` the receiver checks its own live network state before writing.
+- **`netpolicy` gates bulk transfer on network cost.** `Monitor` reports
+  whether this host's route is connected, expensive, constrained, cellular, or
+  manually marked metered, and `Evaluate` allows a transfer only when both ends
+  are unrestricted. `synckitd net status [--json]` prints the local state and
+  each mesh peer's verdict. `synckitd net metered on|off` sets the manual
+  override.
+- **syncservice v2 for artifact consumers.** `ChangeEnvelope.Artifacts` names a
+  change's roots, and `BindDelivery` hashes them into the `ChangeID`, so changes
+  with different root sets always get different IDs. A change without artifacts
+  keeps its v1 ID byte for byte. `RegisterArtifactConsumer` serves `export.v2`,
+  `apply.v2`, and the store's artifact methods. `apply.v2` checks root
+  completeness in the receiver's own store and refuses a consumer's
+  acknowledgement while any root closure is missing (`ErrIncompleteAck`). `Fence`
+  and `Receipt` give consumers replay, stale, and need-snapshot decisions, and
+  `ApplyResult` gains `Stale`, `HeldDigest`, and `Partial`. The v1 export and
+  apply paths refuse any change that carries artifacts.
+- **Delivery v2 and delivery status.** `synckitd serve` runs one worker per
+  service and peer. Kicks that arrive during a run coalesce into at most one
+  more run. While a peer is offline, a newer export supersedes the pending
+  change, so one pending change remains. Before sending anything, the worker
+  checks both hosts' network state. It then ships only the objects the peer
+  lacks and resumes an interrupted batch from the parts the peer already holds.
+  The change counts as delivered only after the peer acknowledges it with every
+  root complete. Pauses report a reason code such as `local-cellular`, `peer-unreachable`, or
+  `peer-incompatible`, and resume when the network changes. Errors back off from
+  30 s to 5 min. The new `delivery` package exposes `Status` and `Kick`, served
+  by the daemon's `delivery.status` and `delivery.kick` methods. A revision is
+  durable on a peer only once `PeerStatus.Acked` reaches it.
+
+### Changed
+
+- **Delivery state moves to v2, with no downgrade.** synckitd now keeps
+  delivery state in `delivery-v2.json` under the mesh directory, with pending
+  change envelopes in `delivery-v2/pending/`. On first start it migrates
+  `delivery-v1.json` once. The migration keeps each acknowledged revision, drops
+  the v1 pending change, which the next export re-stages, and removes the v1
+  file.
+  An older synckitd cannot read the v2 state, so do not downgrade after
+  upgrading.
+- **`synckitd reconcile` asks the running daemon to deliver.** The CLI no longer
+  delivers itself. It sends `delivery.kick` to synckitd and fails when the
+  daemon is not running.
+
 ## [0.39.2] - 2026-08-31
 
 ### Fixed
