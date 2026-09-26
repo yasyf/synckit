@@ -54,6 +54,7 @@ func newRoot(build string) *cobra.Command {
 		newInstallCmd(),
 		newUninstallCmd(),
 		newConsentCmd(),
+		newNetCmd(),
 		newRPCServeV1Cmd(),
 	)
 	return root
