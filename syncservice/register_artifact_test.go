@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/yasyf/synckit/artifact"
+	"github.com/yasyf/synckit/netpolicy"
 	"github.com/yasyf/synckit/rpc"
 )
 
@@ -322,4 +323,90 @@ func withoutMethods(methods []string, drop string) []string {
 		}
 	}
 	return kept
+}
+
+type staticMonitor struct{ state netpolicy.State }
+
+func (m staticMonitor) Current() (netpolicy.State, <-chan struct{}) { return m.state, nil }
+
+func (staticMonitor) Close() error { return nil }
+
+func TestRegisterArtifactConsumerWithStore(t *testing.T) {
+	present := []byte("present root")
+	absent := artifact.Ref{Digest: artifact.Sum([]byte("absent root")), Kind: artifact.KindBlob, Size: 11}
+	presentRef := artifact.Ref{Digest: artifact.Sum(present), Kind: artifact.KindBlob, Size: int64(len(present))}
+	ack := func(change ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: change.SourceRevision} }
+	partial := func(ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: NewRevision(0), Partial: true} }
+	tests := []struct {
+		name         string
+		roots        []artifact.Ref
+		result       func(ChangeEnvelope) ApplyResult
+		wantErr      string
+		wantReady    []artifact.Ref
+		wantAccepted []artifact.Ref
+	}{
+		{name: "complete ack", roots: []artifact.Ref{presentRef}, result: ack, wantReady: []artifact.Ref{presentRef}, wantAccepted: []artifact.Ref{presentRef}},
+		{
+			name: "absent root refuses ack", roots: []artifact.Ref{presentRef, absent}, result: ack,
+			wantErr: fmt.Sprintf("%s: %v: 1 of 2 roots ready", MethodApplyV2, ErrIncompleteAck), wantReady: []artifact.Ref{presentRef},
+		},
+		{
+			name: "absent root partial", roots: []artifact.Ref{presentRef, absent}, result: partial,
+			wantReady: []artifact.Ref{presentRef}, wantAccepted: []artifact.Ref{presentRef, absent},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, err := artifact.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			if _, err := store.PutBlob(t.Context(), present); err != nil {
+				t.Fatal(err)
+			}
+			var log []string
+			consumer := &fakeArtifactConsumer{result: tt.result, log: &log}
+			dispatcher := rpc.NewDispatcher()
+			cellular := netpolicy.State{Status: netpolicy.StatusConnected, Cellular: true}
+			RegisterArtifactConsumer(dispatcher, consumer, store, staticMonitor{state: cellular})
+			client := NewClient(directTransport{dispatcher})
+
+			state, err := client.NetStatus(t.Context())
+			if err != nil || state != cellular {
+				t.Fatalf("NetStatus() = %+v, %v; want %+v", state, err, cellular)
+			}
+			change, err := NewExportedArtifactChange("fake", testSchema, ChangeSnapshot, NewRevision(0), NewRevision(3), []byte(`{}`), tt.roots)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if change, err = BindDelivery(change, "host-b"); err != nil {
+				t.Fatal(err)
+			}
+			got, err := client.ApplyV2(t.Context(), change)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("ApplyV2() = %+v, %v; want error %q", got, err, tt.wantErr)
+				}
+			} else if want := tt.result(change); err != nil || got != want {
+				t.Fatalf("ApplyV2() = %+v, %v; want %+v", got, err, want)
+			}
+			if !reflect.DeepEqual(consumer.ready, tt.wantReady) {
+				t.Errorf("consumer ready = %s, want %s", refNames(consumer.ready), refNames(tt.wantReady))
+			}
+			pins, err := store.Pins(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var accepted []artifact.Ref
+			for _, pin := range pins {
+				if pin.Owner == "synckit.accepted/host-b" {
+					accepted = pin.Roots
+				}
+			}
+			if !reflect.DeepEqual(accepted, tt.wantAccepted) {
+				t.Errorf("accepted pins = %s, want %s", refNames(accepted), refNames(tt.wantAccepted))
+			}
+		})
+	}
 }

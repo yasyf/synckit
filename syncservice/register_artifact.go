@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/yasyf/synckit/artifact"
+	"github.com/yasyf/synckit/netpolicy"
 	"github.com/yasyf/synckit/rpc"
 )
 
@@ -22,6 +23,14 @@ var ErrIncompleteAck = errors.New("syncservice: consumer acknowledged a change w
 type acceptStore interface {
 	Complete(ctx context.Context, roots []artifact.Ref) (int, error)
 	SetPins(ctx context.Context, owner string, roots []artifact.Ref) error
+}
+
+// RegisterArtifactConsumer binds svc's v1 and v2 sync methods and store's
+// artifact methods on d. apply.v2 computes root readiness from store and
+// refuses an acknowledgement while any root closure is incomplete.
+func RegisterArtifactConsumer(d *rpc.Dispatcher, svc ArtifactConsumer, store *artifact.Store, monitor netpolicy.Monitor) {
+	artifact.Register(d, store, monitor)
+	registerArtifactConsumer(d, svc, store)
 }
 
 func registerArtifactConsumer(d *rpc.Dispatcher, svc ArtifactConsumer, store acceptStore) {
