@@ -63,6 +63,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registered since the daemon started, and kicks delivery. The command fails
   when the daemon is not running.
 
+### Fixed
+
+- **`synckitd install` restarts a helper whose program was replaced in place.**
+  An upgraded helper keeps its program path, so its LaunchAgent plist used to
+  stay byte-identical and launchd kept running the old build. Each agent's
+  environment now carries `SYNCKIT_PROGRAM_SHA256`, the digest of its program:
+  a changed program changes the plist, so launchd reloads the job, while an
+  unchanged program leaves the job running.
+
 ## [0.39.2] - 2026-08-31
 
 ### Fixed

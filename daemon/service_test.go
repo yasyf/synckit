@@ -3,10 +3,13 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -487,6 +490,9 @@ func TestServiceAgentsStageOnlyUnbundledHelperPrograms(t *testing.T) {
 				t.Fatal(err)
 			}
 			stagedPath := filepath.Join(resolvedTempDir(t), "staged-reposync")
+			if err := os.WriteFile(stagedPath, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+				t.Fatal(err)
+			}
 			var calls []string
 			useStaging(t, func(label, got string) (string, error) {
 				if label == reconcileAgentLabel {
@@ -544,6 +550,9 @@ func TestServiceAgentsFailWhenHelperStagingFails(t *testing.T) {
 	usePathBinaries(t, "reposync")
 	stageErr := errors.New("stage failed")
 	staged := filepath.Join(resolvedTempDir(t), "synckitd")
+	if err := os.WriteFile(staged, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+		t.Fatal(err)
+	}
 	useStaging(t, func(label, _ string) (string, error) {
 		if label == reconcileAgentLabel {
 			return staged, nil
@@ -632,6 +641,98 @@ func TestInstallEnsuresServeBeforeApplyingEveryPlannedAgent(t *testing.T) {
 	}
 	if !slices.Equal(recorded, []string{helper, reconcileAgentLabel}) {
 		t.Fatalf("record = %#v", recorded)
+	}
+}
+
+type launchctlRecorder map[string][]string
+
+func (r launchctlRecorder) run(_ context.Context, _ string, args ...string) (string, int, error) {
+	label := strings.TrimSuffix(filepath.Base(args[len(args)-1]), ".plist")
+	r[label] = append(r[label], args[0])
+	return "", 0, nil
+}
+
+func useLaunchctl(t *testing.T) launchctlRecorder {
+	t.Helper()
+	calls := launchctlRecorder{}
+	runner, ensure := launchctl, ensureServeAgent
+	launchctl = calls.run
+	ensureServeAgent = func(context.Context) error { return nil }
+	t.Cleanup(func() { launchctl, ensureServeAgent = runner, ensure })
+	return calls
+}
+
+func TestInstallReloadsOnlyAHelperWhoseProgramChangedInPlace(t *testing.T) {
+	tests := []struct {
+		name   string
+		source func(t *testing.T, binDir string) string
+	}{
+		{
+			name: "plain executable",
+			source: func(t *testing.T, binDir string) string {
+				target := filepath.Join(resolvedTempDir(t), "reposync")
+				if err := os.Symlink(target, filepath.Join(binDir, "reposync")); err != nil {
+					t.Fatal(err)
+				}
+				return target
+			},
+		},
+		{
+			name: "bundled executable",
+			source: func(t *testing.T, binDir string) string {
+				macos := filepath.Join(resolvedTempDir(t), "Reposync.app", "Contents", "MacOS")
+				if err := os.MkdirAll(macos, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(macos, "reposync")
+				if err := os.Symlink(target, filepath.Join(binDir, "reposync")); err != nil {
+					t.Fatal(err)
+				}
+				return target
+			},
+		},
+	}
+	reload := []string{"bootout", "enable", "bootstrap", "kickstart"}
+	kickstart := []string{"print", "kickstart"}
+	helper := labelPrefix + ".helper.reposync"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := useHome(t)
+			useMesh(t)
+			source := tt.source(t, usePathBinaries(t))
+			calls := useLaunchctl(t)
+			writeManifest(t, "reposync")
+
+			steps := []struct {
+				name    string
+				program string
+				want    map[string][]string
+			}{
+				{"first install", "#!/bin/sh\necho one\n", map[string][]string{helper: reload, reconcileAgentLabel: reload}},
+				{"same program", "#!/bin/sh\necho one\n", map[string][]string{helper: kickstart, reconcileAgentLabel: kickstart}},
+				{"program replaced in place", "#!/bin/sh\necho two\n", map[string][]string{helper: reload, reconcileAgentLabel: kickstart}},
+			}
+			for _, step := range steps {
+				if err := os.WriteFile(source, []byte(step.program), 0o755); err != nil { //nolint:gosec // executable test stub
+					t.Fatal(err)
+				}
+				clear(calls)
+				if err := install(t.Context()); err != nil {
+					t.Fatalf("%s: %v", step.name, err)
+				}
+				if !maps.EqualFunc(calls, step.want, slices.Equal[[]string]) {
+					t.Fatalf("%s: launchctl = %#v, want %#v", step.name, calls, step.want)
+				}
+				plist, err := os.ReadFile(filepath.Join(home, "Library", "LaunchAgents", helper+".plist")) //nolint:gosec // test-owned plist
+				if err != nil {
+					t.Fatal(err)
+				}
+				digest := sha256.Sum256([]byte(step.program))
+				if !strings.Contains(string(plist), hex.EncodeToString(digest[:])) {
+					t.Fatalf("%s: helper plist carries no digest of its program\n%s", step.name, plist)
+				}
+			}
+		})
 	}
 }
 
