@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ type fakeAcceptStore struct {
 	missing map[artifact.Digest]int
 	pins    map[string][]artifact.Ref
 	log     *[]string
+	fail    func(roots []artifact.Ref) error
 }
 
 func (s *fakeAcceptStore) Complete(_ context.Context, roots []artifact.Ref) (int, error) {
@@ -30,6 +32,11 @@ func (s *fakeAcceptStore) Complete(_ context.Context, roots []artifact.Ref) (int
 
 func (s *fakeAcceptStore) SetPins(_ context.Context, owner string, roots []artifact.Ref) error {
 	*s.log = append(*s.log, fmt.Sprintf("pin %s %s", owner, refNames(roots)))
+	if s.fail != nil {
+		if err := s.fail(roots); err != nil {
+			return err
+		}
+	}
 	if len(roots) == 0 {
 		delete(s.pins, owner)
 		return nil
@@ -38,9 +45,18 @@ func (s *fakeAcceptStore) SetPins(_ context.Context, owner string, roots []artif
 	return nil
 }
 
+func (s *fakeAcceptStore) Pins(context.Context) ([]artifact.PinSet, error) {
+	pins := make([]artifact.PinSet, 0, len(s.pins))
+	for owner, roots := range s.pins {
+		pins = append(pins, artifact.PinSet{Owner: owner, Roots: roots})
+	}
+	return pins, nil
+}
+
 type fakeArtifactConsumer struct {
 	fakeConsumer
 	result func(ChangeEnvelope) ApplyResult
+	err    error
 	ready  []artifact.Ref
 	log    *[]string
 }
@@ -52,6 +68,9 @@ func (*fakeArtifactConsumer) ExportArtifacts(_ context.Context, request ExportRe
 func (f *fakeArtifactConsumer) ApplyArtifacts(_ context.Context, change ChangeEnvelope, ready []artifact.Ref) (ApplyResult, error) {
 	f.ready = ready
 	*f.log = append(*f.log, "apply "+refNames(ready))
+	if f.err != nil {
+		return ApplyResult{}, f.err
+	}
 	return f.result(change), nil
 }
 
@@ -86,6 +105,7 @@ func TestApplyV2ReadinessPinsAndAck(t *testing.T) {
 	a, b, c := string(applyRoots[0].Digest)[:4], string(applyRoots[1].Digest)[:4], string(applyRoots[2].Digest)[:4]
 	all := refNames(applyRoots)
 	held := []artifact.Ref{{Digest: artifact.Sum([]byte("held")), Kind: artifact.KindBlob, Size: 4}}
+	union := refNames(append(slices.Clone(held), applyRoots...))
 	acked := func(change ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: change.SourceRevision} }
 	tests := []struct {
 		name         string
@@ -102,11 +122,10 @@ func TestApplyV2ReadinessPinsAndAck(t *testing.T) {
 			wantReady:    all,
 			wantAccepted: applyRoots,
 			wantLog: []string{
-				"pin synckit.accepting/host-b " + all,
+				"pin synckit.accepted/host-b " + union,
 				"complete " + a, "complete " + b, "complete " + c,
 				"apply " + all,
 				"pin synckit.accepted/host-b " + all,
-				"pin synckit.accepting/host-b []",
 			},
 		},
 		{
@@ -116,11 +135,10 @@ func TestApplyV2ReadinessPinsAndAck(t *testing.T) {
 			wantReady:    "[" + a + " " + c + "]",
 			wantAccepted: applyRoots,
 			wantLog: []string{
-				"pin synckit.accepting/host-b " + all,
+				"pin synckit.accepted/host-b " + union,
 				"complete " + a, "complete " + b, "complete " + c,
 				"apply [" + a + " " + c + "]",
 				"pin synckit.accepted/host-b " + all,
-				"pin synckit.accepting/host-b []",
 			},
 		},
 		{
@@ -129,9 +147,9 @@ func TestApplyV2ReadinessPinsAndAck(t *testing.T) {
 			result:       acked,
 			wantErr:      ErrIncompleteAck.Error() + ": 2 of 3 roots ready",
 			wantReady:    "[" + a + " " + b + "]",
-			wantAccepted: held,
+			wantAccepted: append(slices.Clone(held), applyRoots...),
 			wantLog: []string{
-				"pin synckit.accepting/host-b " + all,
+				"pin synckit.accepted/host-b " + union,
 				"complete " + a, "complete " + b, "complete " + c,
 				"apply [" + a + " " + b + "]",
 			},
@@ -144,10 +162,10 @@ func TestApplyV2ReadinessPinsAndAck(t *testing.T) {
 			wantReady:    all,
 			wantAccepted: held,
 			wantLog: []string{
-				"pin synckit.accepting/host-b " + all,
+				"pin synckit.accepted/host-b " + union,
 				"complete " + a, "complete " + b, "complete " + c,
 				"apply " + all,
-				"pin synckit.accepting/host-b []",
+				"pin synckit.accepted/host-b " + refNames(held),
 			},
 		},
 		{
@@ -158,10 +176,10 @@ func TestApplyV2ReadinessPinsAndAck(t *testing.T) {
 			wantReady:    all,
 			wantAccepted: held,
 			wantLog: []string{
-				"pin synckit.accepting/host-b " + all,
+				"pin synckit.accepted/host-b " + union,
 				"complete " + a, "complete " + b, "complete " + c,
 				"apply " + all,
-				"pin synckit.accepting/host-b []",
+				"pin synckit.accepted/host-b " + refNames(held),
 			},
 		},
 		{
@@ -171,10 +189,10 @@ func TestApplyV2ReadinessPinsAndAck(t *testing.T) {
 			wantReady:    "[" + b + " " + c + "]",
 			wantAccepted: held,
 			wantLog: []string{
-				"pin synckit.accepting/host-b " + all,
+				"pin synckit.accepted/host-b " + union,
 				"complete " + a, "complete " + b, "complete " + c,
 				"apply [" + b + " " + c + "]",
-				"pin synckit.accepting/host-b []",
+				"pin synckit.accepted/host-b " + refNames(held),
 			},
 		},
 	}
@@ -219,8 +237,45 @@ func TestApplyV2FalseAckIsIncompleteAck(t *testing.T) {
 	if !errors.Is(err, ErrIncompleteAck) {
 		t.Fatalf("applyArtifacts() = %v, want ErrIncompleteAck", err)
 	}
-	if got := refNames(store.pins["synckit.accepting/host-b"]); got != refNames(applyRoots) {
-		t.Fatalf("incoming pins after a refused ack = %s, want every root still pinned", got)
+	if got := refNames(store.pins["synckit.accepted/host-b"]); got != refNames(applyRoots) {
+		t.Fatalf("accepted pins after a refused ack = %s, want every root still pinned", got)
+	}
+}
+
+func TestApplyV2KeepsInterruptedAcceptancePinned(t *testing.T) {
+	var log []string
+	prior := []artifact.Ref{{Digest: artifact.Sum([]byte("held")), Kind: artifact.KindBlob, Size: 4}}
+	store := &fakeAcceptStore{pins: map[string][]artifact.Ref{"synckit.accepted/host-b": prior}, log: &log}
+	canceled := errors.New("narrowing canceled")
+	store.fail = func(roots []artifact.Ref) error {
+		if refNames(roots) == refNames(applyRoots) {
+			return canceled
+		}
+		return nil
+	}
+	consumer := &fakeArtifactConsumer{
+		result: func(change ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: change.SourceRevision} },
+		log:    &log,
+	}
+	if _, err := applyArtifacts(t.Context(), consumer, store, artifactChange(t, 3)); !errors.Is(err, canceled) {
+		t.Fatalf("applyArtifacts(B) = %v, want the narrowing failure", err)
+	}
+	store.fail = nil
+	nextRoots := []artifact.Ref{{Digest: artifact.Sum([]byte("next")), Kind: artifact.KindBlob, Size: 4}}
+	next, err := NewExportedArtifactChange("fake", testSchema, ChangeSnapshot, NewRevision(0), NewRevision(4), []byte(`{"n":1}`), nextRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next, err = BindDelivery(next, "host-b"); err != nil {
+		t.Fatal(err)
+	}
+	consumer.err = errors.New("apply C failed")
+	if _, err := applyArtifacts(t.Context(), consumer, store, next); !errors.Is(err, consumer.err) {
+		t.Fatalf("applyArtifacts(C) = %v, want the consumer failure", err)
+	}
+	want := slices.Concat(prior, applyRoots, nextRoots)
+	if got := store.pins["synckit.accepted/host-b"]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("accepted pins after an interrupted B and a failed C = %s, want %s", refNames(got), refNames(want))
 	}
 }
 
@@ -349,6 +404,7 @@ func TestRegisterArtifactConsumerWithStore(t *testing.T) {
 		{
 			name: "absent root refuses ack", roots: []artifact.Ref{presentRef, absent}, result: ack,
 			wantErr: fmt.Sprintf("%s: %v: 1 of 2 roots ready", MethodApplyV2, ErrIncompleteAck), wantReady: []artifact.Ref{presentRef},
+			wantAccepted: []artifact.Ref{presentRef, absent},
 		},
 		{
 			name: "absent root partial", roots: []artifact.Ref{presentRef, absent}, result: partial,
