@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/internal/serviceidentity"
 )
 
@@ -25,7 +26,21 @@ const (
 	MethodExport = "synckit.syncservice.export.v1"
 	// MethodApply applies one immutable exported payload and acknowledges it.
 	MethodApply = "synckit.syncservice.apply.v1"
+	// MethodExportV2 exports one change that may carry artifact roots.
+	MethodExportV2 = "synckit.syncservice.export.v2"
+	// MethodApplyV2 applies one change once the receiver's own store holds
+	// every artifact root closure it acknowledges.
+	MethodApplyV2 = "synckit.syncservice.apply.v2"
 )
+
+const (
+	changeDomainV1 = "synckit.syncservice.change.v1"
+	changeDomainV2 = "synckit.syncservice.change.v2"
+)
+
+// ErrArtifactsOnV1 refuses a change carrying artifact roots on a v1 method,
+// so an old peer can never silently strip them.
+var ErrArtifactsOnV1 = errors.New("syncservice: artifact change on a v1 method")
 
 // MaxTransferPayload is the largest opaque service payload accepted by v1.
 const MaxTransferPayload = 8 << 20
@@ -66,22 +81,33 @@ type ExportRequest struct {
 }
 
 // ChangeEnvelope is one immutable, digest-bound service-owned payload.
+// Artifacts lists the payload's artifact roots in consumer priority order;
+// the exporter derives them deterministically from the payload, and
+// BindDelivery binds them into ChangeID.
 type ChangeEnvelope struct {
-	ServiceID         string     `json:"service_id"`
-	SchemaFingerprint string     `json:"schema_fingerprint"`
-	Origin            string     `json:"origin"`
-	ChangeID          string     `json:"change_id"`
-	Kind              ChangeKind `json:"kind"`
-	BaseRevision      Revision   `json:"base_revision"`
-	SourceRevision    Revision   `json:"source_revision"`
-	PayloadDigest     string     `json:"payload_digest"`
-	Payload           []byte     `json:"payload"`
+	ServiceID         string         `json:"service_id"`
+	SchemaFingerprint string         `json:"schema_fingerprint"`
+	Origin            string         `json:"origin"`
+	ChangeID          string         `json:"change_id"`
+	Kind              ChangeKind     `json:"kind"`
+	BaseRevision      Revision       `json:"base_revision"`
+	SourceRevision    Revision       `json:"source_revision"`
+	PayloadDigest     string         `json:"payload_digest"`
+	Payload           []byte         `json:"payload"`
+	Artifacts         []artifact.Ref `json:"artifacts,omitempty"`
 }
 
 // ApplyResult acknowledges one source revision or requests a full snapshot.
+// The v2 fields report a receiver that already holds a receipt at or past
+// the source revision (Stale, with that receipt's HeldDigest), or one that
+// recorded the change without every artifact root complete (Partial, with
+// AckedRevision still the prior receipt).
 type ApplyResult struct {
 	AckedRevision Revision `json:"acked_revision"`
 	NeedSnapshot  bool     `json:"need_snapshot,omitempty"`
+	Stale         bool     `json:"stale,omitempty"`
+	HeldDigest    string   `json:"held_digest,omitempty"`
+	Partial       bool     `json:"partial,omitempty"`
 }
 
 // NewExportedChange constructs and validates one source-owned change.
@@ -97,6 +123,23 @@ func NewExportedChange(
 		Kind: kind, BaseRevision: baseRevision, SourceRevision: sourceRevision,
 		PayloadDigest: hex.EncodeToString(digest[:]), Payload: append([]byte(nil), payload...),
 	}
+	return change, change.Validate(false)
+}
+
+// NewExportedArtifactChange constructs and validates one source-owned change
+// carrying roots, the artifact roots derived from payload in priority order.
+func NewExportedArtifactChange(
+	serviceID, schemaFingerprint string,
+	kind ChangeKind,
+	baseRevision, sourceRevision Revision,
+	payload []byte,
+	roots []artifact.Ref,
+) (ChangeEnvelope, error) {
+	change, err := NewExportedChange(serviceID, schemaFingerprint, kind, baseRevision, sourceRevision, payload)
+	if err != nil {
+		return ChangeEnvelope{}, err
+	}
+	change.Artifacts = append([]artifact.Ref(nil), roots...)
 	return change, change.Validate(false)
 }
 
@@ -141,6 +184,9 @@ func (e ChangeEnvelope) Validate(requireDelivery bool) error {
 	if e.PayloadDigest != hex.EncodeToString(digest[:]) {
 		return errors.New("syncservice: payload digest mismatch")
 	}
+	if err := artifact.ValidateRoots(e.Artifacts); err != nil {
+		return fmt.Errorf("syncservice: artifacts: %w", err)
+	}
 	if requireDelivery {
 		if e.Origin == "" || !exactDigest(e.ChangeID) {
 			return errors.New("syncservice: delivery origin and change id are required")
@@ -151,7 +197,10 @@ func (e ChangeEnvelope) Validate(requireDelivery bool) error {
 	return nil
 }
 
-// BindDelivery adds the authenticated origin and deterministic change identity.
+// BindDelivery adds the authenticated origin and deterministic change
+// identity. A change without artifacts hashes the v1 domain; one with
+// artifacts hashes the v2 domain over the same inputs plus the root count and
+// each root's kind, digest, and size in order.
 func BindDelivery(change ChangeEnvelope, origin string) (ChangeEnvelope, error) {
 	if err := change.Validate(false); err != nil {
 		return ChangeEnvelope{}, err
@@ -160,17 +209,32 @@ func BindDelivery(change ChangeEnvelope, origin string) (ChangeEnvelope, error) 
 		return ChangeEnvelope{}, errors.New("syncservice: delivery origin is invalid")
 	}
 	change.Origin = origin
-	h := sha256.New()
-	for _, value := range []string{
-		"synckit.syncservice.change.v1", change.ServiceID, change.SchemaFingerprint,
+	values := []string{
+		changeDomainV1, change.ServiceID, change.SchemaFingerprint,
 		origin, string(change.Kind), string(change.BaseRevision), string(change.SourceRevision), change.PayloadDigest,
-	} {
+	}
+	if len(change.Artifacts) > 0 {
+		values[0] = changeDomainV2
+		values = append(values, strconv.Itoa(len(change.Artifacts)))
+		for _, root := range change.Artifacts {
+			values = append(values, string(root.Kind)+":"+string(root.Digest)+":"+strconv.FormatInt(root.Size, 10))
+		}
+	}
+	h := sha256.New()
+	for _, value := range values {
 		_, _ = h.Write([]byte(strconv.Itoa(len(value))))
 		_, _ = h.Write([]byte{':'})
 		_, _ = h.Write([]byte(value))
 	}
 	change.ChangeID = hex.EncodeToString(h.Sum(nil))
 	return change, change.Validate(true)
+}
+
+func (e ChangeEnvelope) refuseArtifacts() error {
+	if len(e.Artifacts) > 0 {
+		return ErrArtifactsOnV1
+	}
+	return nil
 }
 
 // ValidateServiceSchema checks an exact service ID and schema fingerprint pair.
@@ -230,4 +294,18 @@ type SyncConsumer interface {
 	Export(ctx context.Context, request ExportRequest) (ChangeEnvelope, error)
 	// Apply merges one immutable source change and returns its exact acknowledgement.
 	Apply(ctx context.Context, change ChangeEnvelope) (ApplyResult, error)
+}
+
+// ArtifactConsumer is a SyncConsumer whose changes carry artifact roots over
+// the v2 export and apply methods.
+type ArtifactConsumer interface {
+	SyncConsumer
+	// ExportArtifacts returns an immutable change whose Artifacts are derived
+	// deterministically from its payload.
+	ExportArtifacts(ctx context.Context, request ExportRequest) (ChangeEnvelope, error)
+	// ApplyArtifacts applies change given ready, the roots whose closures the
+	// receiver's own store holds. It must re-derive the roots from the payload
+	// and refuse a change whose Artifacts differ, and may acknowledge
+	// SourceRevision only when every root is ready.
+	ApplyArtifacts(ctx context.Context, change ChangeEnvelope, ready []artifact.Ref) (ApplyResult, error)
 }

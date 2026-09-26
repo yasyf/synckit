@@ -32,10 +32,13 @@ func RegisterConsumer(d *rpc.Dispatcher, svc SyncConsumer) {
 			return nil, err
 		}
 		change, err := svc.Export(ctx, request)
-		if err == nil {
-			err = change.Validate(false)
+		if err != nil {
+			return nil, err
 		}
-		return change, err
+		if err := change.Validate(false); err != nil {
+			return nil, err
+		}
+		return change, change.refuseArtifacts()
 	})
 	d.RegisterExclusive(MethodApply, func(ctx context.Context, p map[string]any) (any, error) {
 		var change ChangeEnvelope
@@ -43,6 +46,9 @@ func RegisterConsumer(d *rpc.Dispatcher, svc SyncConsumer) {
 			return nil, err
 		}
 		if err := change.Validate(true); err != nil {
+			return nil, err
+		}
+		if err := change.refuseArtifacts(); err != nil {
 			return nil, err
 		}
 		return svc.Apply(ctx, change)
