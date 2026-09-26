@@ -71,9 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment now carries `SYNCKIT_PROGRAM_SHA256`, the digest of its program:
   a changed program changes the plist, so launchd reloads the job, while an
   unchanged program leaves the job running. Install boots a job with a
-  changed plist out before it writes the new one, so a reload that fails
-  partway leaves the old plist in place and the next install retries it,
-  instead of recording the new build while the old one keeps running.
+  changed plist out before it writes the new one. If that boot-out fails,
+  the old plist and the old job stay in place; if a later step of the reload
+  fails, the new plist is on disk and the old job is already gone. Either way
+  the next install finishes the reload, instead of recording the new build
+  while the old one keeps running.
 
 ## [0.39.2] - 2026-08-31
 

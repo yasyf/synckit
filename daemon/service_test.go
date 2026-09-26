@@ -787,9 +787,19 @@ func useLaunchdJobs(t *testing.T) *launchdJobs {
 
 func TestInstallKeepsAnInterruptedHelperReloadPendingUntilTheOldJobBootsOut(t *testing.T) {
 	helper := labelPrefix + ".helper.reposync"
-	upgraded := "#!/bin/sh\necho two\n"
-	for _, verb := range []string{"bootout", "enable", "bootstrap", "kickstart"} {
-		t.Run(verb, func(t *testing.T) {
+	original, upgraded := "#!/bin/sh\necho one\n", "#!/bin/sh\necho two\n"
+	tests := []struct {
+		verb        string
+		wantLoaded  bool
+		wantProgram string
+	}{
+		{"bootout", true, original},
+		{"enable", false, upgraded},
+		{"bootstrap", false, upgraded},
+		{"kickstart", true, upgraded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.verb, func(t *testing.T) {
 			home := useHome(t)
 			useMesh(t)
 			source := filepath.Join(resolvedTempDir(t), "reposync")
@@ -807,8 +817,12 @@ func TestInstallKeepsAnInterruptedHelperReloadPendingUntilTheOldJobBootsOut(t *t
 				}
 				return plist
 			}
+			publishes := func(program string) bool {
+				digest := sha256.Sum256([]byte(program))
+				return strings.Contains(string(published()), hex.EncodeToString(digest[:]))
+			}
 
-			if err := os.WriteFile(source, []byte("#!/bin/sh\necho one\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+			if err := os.WriteFile(source, []byte(original), 0o755); err != nil { //nolint:gosec // executable test stub
 				t.Fatal(err)
 			}
 			if err := install(t.Context()); err != nil {
@@ -817,12 +831,19 @@ func TestInstallKeepsAnInterruptedHelperReloadPendingUntilTheOldJobBootsOut(t *t
 			if err := os.WriteFile(source, []byte(upgraded), 0o755); err != nil { //nolint:gosec // executable test stub
 				t.Fatal(err)
 			}
-			jobs.failLabel, jobs.failVerb = helper, verb
+			jobs.failLabel, jobs.failVerb = helper, tt.verb
 			if err := install(t.Context()); !errors.Is(err, errLaunchctlInterrupted) {
 				t.Fatalf("interrupted upgrade: err = %v, want %v", err, errLaunchctlInterrupted)
 			}
-			if running, ok := jobs.loaded[helper]; ok && !bytes.Equal(running, published()) {
+			running, loaded := jobs.loaded[helper]
+			if loaded != tt.wantLoaded {
+				t.Fatalf("interrupted upgrade: loaded = %t, want %t", loaded, tt.wantLoaded)
+			}
+			if loaded && !bytes.Equal(running, published()) {
 				t.Fatalf("interrupted upgrade published a plist launchd is not running\npublished:\n%s\nrunning:\n%s", published(), running)
+			}
+			if !publishes(tt.wantProgram) {
+				t.Fatalf("interrupted upgrade published no digest of %q\n%s", tt.wantProgram, published())
 			}
 
 			if err := install(t.Context()); err != nil {
@@ -831,8 +852,7 @@ func TestInstallKeepsAnInterruptedHelperReloadPendingUntilTheOldJobBootsOut(t *t
 			if running := jobs.loaded[helper]; !bytes.Equal(running, published()) {
 				t.Fatalf("retry left launchd running a stale generation\npublished:\n%s\nrunning:\n%s", published(), running)
 			}
-			digest := sha256.Sum256([]byte(upgraded))
-			if !strings.Contains(string(published()), hex.EncodeToString(digest[:])) {
+			if !publishes(upgraded) {
 				t.Fatalf("retry published no digest of the upgraded program\n%s", published())
 			}
 		})

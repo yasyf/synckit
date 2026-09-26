@@ -138,7 +138,9 @@ func install(ctx context.Context) error {
 // the old job out, so a bootout that fails there leaves a byte-exact plist over
 // the old generation, which every later Apply only kickstarts. Removing first
 // keeps the stale plist, and with it the pending reload, on disk until launchd
-// has let the old job go.
+// has let the old job go. A reload step that fails after that strands no old
+// generation, since Apply reloads a job launchd reports unloaded even under a
+// byte-exact plist.
 func retireDriftedAgent(ctx context.Context, agent launchd.Agent) error {
 	path, err := agent.PlistPath()
 	if err != nil {
