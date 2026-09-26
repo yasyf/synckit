@@ -101,13 +101,15 @@ type ChangeEnvelope struct {
 // The v2 fields report a receiver that already holds a receipt at or past
 // the source revision (Stale, with that receipt's HeldDigest), or one that
 // recorded the change without every artifact root complete (Partial, with
-// AckedRevision still the prior receipt).
+// AckedRevision still the prior receipt). Paused is set, and nothing was
+// applied, when the v2 receiver's live network State refused the call.
 type ApplyResult struct {
-	AckedRevision Revision `json:"acked_revision"`
-	NeedSnapshot  bool     `json:"need_snapshot,omitempty"`
-	Stale         bool     `json:"stale,omitempty"`
-	HeldDigest    string   `json:"held_digest,omitempty"`
-	Partial       bool     `json:"partial,omitempty"`
+	AckedRevision Revision              `json:"acked_revision"`
+	NeedSnapshot  bool                  `json:"need_snapshot,omitempty"`
+	Stale         bool                  `json:"stale,omitempty"`
+	HeldDigest    string                `json:"held_digest,omitempty"`
+	Partial       bool                  `json:"partial,omitempty"`
+	Paused        *artifact.PausedError `json:"paused,omitempty"`
 }
 
 // NewExportedChange constructs and validates one source-owned change.
@@ -176,6 +178,9 @@ func (e ChangeEnvelope) Validate(requireDelivery bool) error {
 	}
 	if e.Kind == ChangeSnapshot && base != 0 {
 		return errors.New("syncservice: snapshot base revision must be zero")
+	}
+	if e.Kind == ChangeDelta && len(e.Artifacts) > 0 {
+		return errors.New("syncservice: a change carrying artifacts must be a snapshot")
 	}
 	if len(e.Payload) == 0 || len(e.Payload) > MaxTransferPayload || !json.Valid(e.Payload) {
 		return errors.New("syncservice: payload must be bounded valid JSON")

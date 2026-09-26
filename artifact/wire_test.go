@@ -138,6 +138,7 @@ func TestParamsValidate(t *testing.T) {
 		{"build", BatchBuildParams{Objects: []ObjectEntry{{Digest: digestOne, Kind: KindBlob, Size: 1}, {Digest: digestTwo, Kind: KindManifest, Size: 9}}}, true},
 		{"build empty", BatchBuildParams{}, false},
 		{"build duplicate", BatchBuildParams{Objects: []ObjectEntry{{Digest: digestOne, Kind: KindBlob, Size: 1}, {Digest: digestOne, Kind: KindManifest, Size: 9}}}, false},
+		{"build duplicate kind", BatchBuildParams{Objects: []ObjectEntry{{Digest: digestOne, Kind: KindBlob, Size: 1}, {Digest: digestOne, Kind: KindBlob, Size: 1}}}, false},
 		{"build bad digest", BatchBuildParams{Objects: []ObjectEntry{{Digest: "x", Kind: KindBlob, Size: 1}}}, false},
 		{"build bad kind", BatchBuildParams{Objects: []ObjectEntry{{Digest: digestOne, Kind: "tree", Size: 1}}}, false},
 		{"pins at the union bound", PinsSetParams{Owner: "o", Roots: distinctRoots(MaxPinRoots)}, true},

@@ -7,7 +7,11 @@ import (
 
 func fenceChange(t *testing.T, kind ChangeKind, base, source uint64, payload string) ChangeEnvelope {
 	t.Helper()
-	change, err := NewExportedArtifactChange("fake", testSchema, kind, NewRevision(base), NewRevision(source), []byte(payload), testRoots)
+	roots := testRoots
+	if kind == ChangeDelta {
+		roots = nil
+	}
+	change, err := NewExportedArtifactChange("fake", testSchema, kind, NewRevision(base), NewRevision(source), []byte(payload), roots)
 	if err != nil {
 		t.Fatal(err)
 	}

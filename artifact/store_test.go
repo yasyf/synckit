@@ -296,6 +296,10 @@ func TestClosureIsDeterministicChildrenFirst(t *testing.T) {
 func TestClosureBounds(t *testing.T) {
 	s := newStore(t)
 	fixture := buildClosureFixture(t, s)
+	var firstRoot int64
+	for _, object := range fixture.objects[:4] {
+		firstRoot += object.Size
+	}
 	tests := []struct {
 		name  string
 		bound ClosureBound
@@ -303,7 +307,7 @@ func TestClosureBounds(t *testing.T) {
 	}{
 		{"objects", ClosureBound{MaxObjects: 3, MaxDepth: 32, MaxBytes: 1 << 30}, ClosureError{Bound: BoundObjects, Limit: 3}},
 		{"depth", ClosureBound{MaxObjects: 100, MaxDepth: 1, MaxBytes: 1 << 30}, ClosureError{Bound: BoundDepth, Limit: 1}},
-		{"bytes", ClosureBound{MaxObjects: 100, MaxDepth: 32, MaxBytes: fixture.bytes - 1}, ClosureError{Bound: BoundBytes, Limit: fixture.bytes - 1}},
+		{"bytes", ClosureBound{MaxObjects: 100, MaxDepth: 32, MaxBytes: firstRoot - 1}, ClosureError{Bound: BoundBytes, Limit: firstRoot - 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -494,9 +498,9 @@ func TestClosureExpandsManifestSeenFirstAsBlob(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []ObjectEntry{
-		{Digest: inner.Digest, Kind: KindBlob, Size: int64(len(innerBytes))},
-		{Digest: wrapper.Digest, Kind: KindManifest, Size: size(wrapper)},
 		{Digest: child.Digest, Kind: KindBlob, Size: child.Size},
+		{Digest: inner.Digest, Kind: KindManifest, Size: int64(len(innerBytes))},
+		{Digest: wrapper.Digest, Kind: KindManifest, Size: size(wrapper)},
 		{Digest: root.Digest, Kind: KindManifest, Size: size(root)},
 	}
 	if !reflect.DeepEqual(closure.Objects, want) {
@@ -540,3 +544,4 @@ func TestClosureExpandsManifestSeenFirstAsBlob(t *testing.T) {
 		t.Fatalf("Complete without the child = %d, %v; want 1 missing", missing, err)
 	}
 }
+

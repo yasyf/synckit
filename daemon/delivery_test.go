@@ -18,6 +18,9 @@ const (
 
 func boundChange(t *testing.T, kind syncservice.ChangeKind, base, source uint64, payload string, roots ...artifact.Ref) syncservice.ChangeEnvelope {
 	t.Helper()
+	if kind == syncservice.ChangeDelta {
+		roots = nil
+	}
 	change, err := syncservice.NewExportedArtifactChange(
 		testService, strings.Repeat("a", 64), kind,
 		syncservice.NewRevision(base), syncservice.NewRevision(source), []byte(payload), roots,
@@ -51,7 +54,7 @@ func pendingFiles(t *testing.T, store *deliveryStore) []string {
 
 func TestDeliveryStoreStagesAndAcknowledges(t *testing.T) {
 	store := newDeliveryStore(t.TempDir())
-	change := boundChange(t, syncservice.ChangeDelta, 0, 5, `{"repos":{}}`, blobRef("a"))
+	change := boundChange(t, syncservice.ChangeSnapshot, 0, 5, `{"repos":{}}`, blobRef("a"))
 	if err := store.stage(t.Context(), testPeer, "", change); err != nil {
 		t.Fatal(err)
 	}

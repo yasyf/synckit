@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yasyf/synckit/artifact"
@@ -22,6 +23,9 @@ var (
 	deliveryBackoffBase = 30 * time.Second
 	deliveryBackoffMax  = 5 * time.Minute
 	pauseRecheck        = 60 * time.Second
+	artifactMaxWait     = 10 * time.Second
+	peerStateMaxAge     = 2 * time.Minute
+	batchObjectLimit    = artifact.MaxBatchObjects
 )
 
 const (
@@ -29,7 +33,10 @@ const (
 	snapshotTimeout        = 15 * time.Second
 )
 
-var errIncomplete = errors.New("delivery: peer has not completed every artifact root")
+var (
+	errIncomplete = errors.New("delivery: peer has not completed every artifact root")
+	errSuperseded = errors.New("delivery: a newer kick superseded the transfer")
+)
 
 type pauseError struct {
 	reason delivery.PauseReason
@@ -66,23 +73,58 @@ type laneLive struct {
 
 type lane struct {
 	laneKey
-	m     manifest.Manifest
-	local *syncservice.Client
-	kick  chan struct{}
-	wake  <-chan struct{}
+	m         manifest.Manifest
+	local     *syncservice.Client
+	kick      chan struct{}
+	wake      <-chan struct{}
+	artifacts atomic.Bool
 
-	mu   sync.Mutex
-	live laneLive
+	mu      sync.Mutex
+	dirtyAt time.Time
+	live    laneLive
 
 	pinsSettled bool
 	pinnedFor   string
 }
 
-func (l *lane) poke() {
+func (l *lane) poke(now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.dirtyAt.IsZero() {
+		l.dirtyAt = now
+	}
 	select {
 	case l.kick <- struct{}{}:
 	default:
 	}
+}
+
+func (l *lane) clean() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.dirtyAt = time.Time{}
+	select {
+	case <-l.kick:
+	default:
+	}
+}
+
+func (l *lane) due() time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.dirtyAt.IsZero() {
+		return time.Time{}
+	}
+	if !l.artifacts.Load() {
+		return l.dirtyAt
+	}
+	return l.dirtyAt.Add(artifactMaxWait)
+}
+
+func (l *lane) dirty() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return !l.dirtyAt.IsZero()
 }
 
 func (l *lane) update(fn func(*laneLive)) {
@@ -158,7 +200,7 @@ func (s *deliveryScheduler) add(m manifest.Manifest, local *syncservice.Client, 
 func (s *deliveryScheduler) start() {
 	for _, key := range s.order {
 		l := s.lanes[key]
-		l.poke()
+		l.poke(s.now())
 		s.wg.Go(func() { s.work(l) })
 	}
 }
@@ -170,7 +212,7 @@ func (s *deliveryScheduler) Kick(serviceID, peer string) error {
 	matched := false
 	for _, key := range s.order {
 		if (serviceID == "" || key.service == serviceID) && (peer == "" || key.peer == peer) {
-			s.lanes[key].poke()
+			s.lanes[key].poke(s.now())
 			matched = true
 		}
 	}
@@ -244,28 +286,35 @@ func (s *deliveryScheduler) work(l *lane) {
 	timer := time.NewTimer(time.Hour)
 	timer.Stop()
 	defer timer.Stop()
-	var retry <-chan time.Time
+	coalesce := time.NewTimer(time.Hour)
+	coalesce.Stop()
+	defer coalesce.Stop()
+	var retry, due <-chan time.Time
 	var wake <-chan struct{}
 	var delay time.Duration
 	for {
-		remote := true
 		select {
 		case <-s.ctx.Done():
 			return
 		case <-l.kick:
-			remote = retry == nil
+			switch {
+			case retry != nil:
+				if _, _, err := s.prepare(s.ctx, l); err != nil && s.ctx.Err() == nil {
+					slog.WarnContext(s.ctx, "delivery: stage failed", "manifest", l.service, "peer", l.peer, "err", err)
+					l.update(func(v *laneLive) { v.lastError = err.Error() })
+				}
+			case due == nil:
+				coalesce.Reset(l.due().Sub(s.now()))
+				due = coalesce.C
+			}
+			continue
+		case <-due:
 		case <-retry:
 		case <-wake:
 		}
-		if !remote {
-			if _, _, err := s.prepare(s.ctx, l); err != nil && s.ctx.Err() == nil {
-				slog.WarnContext(s.ctx, "delivery: stage failed", "manifest", l.service, "peer", l.peer, "err", err)
-				l.update(func(v *laneLive) { v.lastError = err.Error() })
-			}
-			continue
-		}
 		timer.Stop()
-		retry, wake = nil, nil
+		coalesce.Stop()
+		retry, wake, due = nil, nil, nil
 		attempt := s.now()
 		l.update(func(v *laneLive) { v.lastAttemptAt, v.nextAttemptAt = attempt, time.Time{} })
 		err := s.deliverOnce(s.ctx, l)
@@ -357,6 +406,7 @@ func (s *deliveryScheduler) prepare(ctx context.Context, l *lane) (bool, *syncse
 		return false, nil, fmt.Errorf("local capabilities for %q: %w", l.service, err)
 	}
 	artifacts := slices.Contains(caps.Methods, syncservice.MethodExportV2)
+	l.artifacts.Store(artifacts)
 	record, pending, err := s.store.load(ctx, l.service, l.peer)
 	if err != nil {
 		return false, nil, err
@@ -469,6 +519,17 @@ func unionRoots(old, next []artifact.Ref) []artifact.Ref {
 }
 
 func (s *deliveryScheduler) deliverOnce(ctx context.Context, l *lane) error {
+	for {
+		l.clean()
+		err := s.deliverPending(ctx, l)
+		if !errors.Is(err, errSuperseded) {
+			return err
+		}
+		slog.InfoContext(ctx, "delivery: superseded mid-transfer; restaging", "manifest", l.service, "peer", l.peer)
+	}
+}
+
+func (s *deliveryScheduler) deliverPending(ctx context.Context, l *lane) error {
 	artifacts, pending, err := s.prepare(ctx, l)
 	if err != nil || pending == nil {
 		return err
@@ -488,51 +549,86 @@ func (s *deliveryScheduler) deliverOnce(ctx context.Context, l *lane) error {
 }
 
 type deliveryRun struct {
-	s          *deliveryScheduler
-	l          *lane
-	peer       *syncservice.Client
-	artifacts  bool
-	change     syncservice.ChangeEnvelope
-	localState netpolicy.State
-	peerState  netpolicy.State
+	s           *deliveryScheduler
+	l           *lane
+	peer        *syncservice.Client
+	artifacts   bool
+	change      syncservice.ChangeEnvelope
+	peerState   netpolicy.State
+	peerAt      time.Time
+	sentBatches int
 }
 
 func (r *deliveryRun) observeLocal() netpolicy.State {
 	state, changed := r.s.monitor.Current()
-	r.l.wake, r.localState = changed, state
+	r.l.wake = changed
 	r.l.update(func(v *laneLive) { v.localNetwork = &state })
 	return state
 }
 
 func (r *deliveryRun) observePeer(state netpolicy.State) {
-	r.peerState = state
+	r.peerState, r.peerAt = state, r.s.now()
 	r.l.update(func(v *laneLive) { v.peerNetwork = &state })
 }
 
 func (r *deliveryRun) gate(ctx context.Context) error {
-	local := r.observeLocal()
-	unreachable := func(err error) error {
-		if !local.Unrestricted() {
-			return &pauseError{reason: localReason(local), cause: err}
-		}
-		return &pauseError{reason: delivery.PausePeerUnreachable, cause: err}
-	}
 	caps, err := r.peer.Capabilities(ctx)
 	if err != nil {
-		return unreachable(err)
+		return unreachable(r.observeLocal(), err)
 	}
 	if !artifactCapable(caps.Methods) {
+		r.observeLocal()
 		return &pauseError{reason: delivery.PausePeerIncompatible}
 	}
+	if err := r.probe(ctx); err != nil {
+		return err
+	}
+	return r.evaluate(r.observeLocal())
+}
+
+func (r *deliveryRun) admit(ctx context.Context) (netpolicy.State, error) {
+	if r.s.now().Sub(r.peerAt) >= peerStateMaxAge {
+		if err := r.probe(ctx); err != nil {
+			return netpolicy.State{}, err
+		}
+	}
+	local := r.observeLocal()
+	return local, r.evaluate(local)
+}
+
+func (r *deliveryRun) probe(ctx context.Context) error {
 	state, err := r.peer.NetStatus(ctx)
 	if err != nil {
-		return unreachable(err)
+		return unreachable(r.observeLocal(), err)
 	}
 	r.observePeer(state)
-	if verdict := netpolicy.Evaluate(local, state); !verdict.Allowed {
+	return nil
+}
+
+func (r *deliveryRun) evaluate(local netpolicy.State) error {
+	if verdict := netpolicy.Evaluate(local, r.peerState); !verdict.Allowed {
 		return &pauseError{reason: delivery.ReasonForVerdict(verdict)}
 	}
 	return nil
+}
+
+func (r *deliveryRun) superseded() bool {
+	return r.sentBatches > 0 && r.l.dirty()
+}
+
+func unreachable(local netpolicy.State, err error) error {
+	if !local.Unrestricted() {
+		return &pauseError{reason: localReason(local), cause: err}
+	}
+	return &pauseError{reason: delivery.PausePeerUnreachable, cause: err}
+}
+
+func refusal(err error) error {
+	var paused *artifact.PausedError
+	if errors.As(err, &paused) {
+		return &pauseError{reason: delivery.ReasonForRefusal(paused), cause: paused}
+	}
+	return err
 }
 
 func artifactCapable(methods []string) bool {
@@ -614,9 +710,12 @@ func (r *deliveryRun) page(ctx context.Context, objects []artifact.ObjectEntry, 
 		for i, o := range objects {
 			digests[i] = o.Digest
 		}
+		if _, err := r.admit(ctx); err != nil {
+			return err
+		}
 		absent, err := r.peer.ArtifactHave(ctx, digests)
 		if err != nil {
-			return fmt.Errorf("peer have: %w", err)
+			return refusal(fmt.Errorf("peer have: %w", err))
 		}
 		for _, d := range absent {
 			missing[d] = true
@@ -640,6 +739,9 @@ func (r *deliveryRun) page(ctx context.Context, objects []artifact.ObjectEntry, 
 		if len(batch) == 0 {
 			return nil
 		}
+		if r.superseded() {
+			return errSuperseded
+		}
 		if err := r.send(ctx, batch); err != nil {
 			return err
 		}
@@ -653,14 +755,17 @@ func (r *deliveryRun) page(ctx context.Context, objects []artifact.ObjectEntry, 
 		if !progressive {
 			return nil
 		}
+		if _, err := r.admit(ctx); err != nil {
+			return err
+		}
 		if _, err := r.peer.ApplyV2(ctx, r.change); err != nil {
-			return fmt.Errorf("progressive apply: %w", err)
+			return refusal(fmt.Errorf("progressive apply: %w", err))
 		}
 		return nil
 	}
 	for _, o := range objects {
 		if missing[o.Digest] {
-			if len(batch) == artifact.MaxBatchObjects || batchBytes+o.Size > artifact.MaxBatchRaw {
+			if len(batch) == batchObjectLimit || batchBytes+o.Size > artifact.MaxBatchRaw {
 				if err := flush(); err != nil {
 					return err
 				}
@@ -700,7 +805,11 @@ func (r *deliveryRun) send(ctx context.Context, objects []artifact.ObjectEntry) 
 	if err != nil {
 		return fmt.Errorf("build batch: %w", err)
 	}
-	begin, err := r.peer.BatchBegin(ctx, batch, r.localState)
+	sender, err := r.admit(ctx)
+	if err != nil {
+		return err
+	}
+	begin, err := r.peer.BatchBegin(ctx, batch, sender)
 	if err := r.refused(begin.Peer, err); err != nil {
 		return err
 	}
@@ -712,9 +821,9 @@ func (r *deliveryRun) send(ctx context.Context, objects []artifact.ObjectEntry) 
 		if have[index] {
 			continue
 		}
-		local := r.observeLocal()
-		if verdict := netpolicy.Evaluate(local, r.peerState); !verdict.Allowed {
-			return &pauseError{reason: delivery.ReasonForVerdict(verdict)}
+		local, err := r.admit(ctx)
+		if err != nil {
+			return err
 		}
 		data, err := r.l.local.BatchRead(ctx, batch.ID, index)
 		if err != nil {
@@ -726,10 +835,14 @@ func (r *deliveryRun) send(ctx context.Context, objects []artifact.ObjectEntry) 
 			return err
 		}
 	}
+	if _, err := r.admit(ctx); err != nil {
+		return err
+	}
 	if _, err := r.peer.BatchCommit(ctx, batch.ID); err != nil {
 		return fmt.Errorf("commit batch %s: %w", batch.ID, err)
 	}
 	committed = batch.ID
+	r.sentBatches++
 	r.l.update(func(v *laneLive) {
 		v.progress.ObjectsSent += int64(len(objects))
 		v.progress.BytesSent += raw
@@ -838,15 +951,19 @@ func (r *deliveryRun) apply(ctx context.Context) error {
 }
 
 func (r *deliveryRun) applyOnce(ctx context.Context) (syncservice.ApplyResult, error) {
-	var ack syncservice.ApplyResult
-	var err error
-	if r.artifacts {
-		ack, err = r.peer.ApplyV2(ctx, r.change)
-	} else {
-		ack, err = r.peer.Apply(ctx, r.change)
+	if !r.artifacts {
+		ack, err := r.peer.Apply(ctx, r.change)
+		if err != nil {
+			return syncservice.ApplyResult{}, fmt.Errorf("apply %q on %s: %w", r.l.service, r.l.peer, err)
+		}
+		return ack, nil
 	}
+	if _, err := r.admit(ctx); err != nil {
+		return syncservice.ApplyResult{}, err
+	}
+	ack, err := r.peer.ApplyV2(ctx, r.change)
 	if err != nil {
-		return syncservice.ApplyResult{}, fmt.Errorf("apply %q on %s: %w", r.l.service, r.l.peer, err)
+		return syncservice.ApplyResult{}, refusal(fmt.Errorf("apply %q on %s: %w", r.l.service, r.l.peer, err))
 	}
 	return ack, nil
 }

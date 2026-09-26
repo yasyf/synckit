@@ -23,14 +23,17 @@ func (c *Client) ExportV2(ctx context.Context, request ExportRequest) (ChangeEnv
 
 // ApplyV2 delivers one immutable change that may carry artifact roots. The
 // receiver acknowledges SourceRevision only once its own store holds every
-// root closure; otherwise the result is Partial, Stale, or NeedSnapshot.
+// root closure; otherwise the result is Partial, Stale, or NeedSnapshot. A
+// policy refusal returns its *artifact.PausedError as the error.
 func (c *Client) ApplyV2(ctx context.Context, change ChangeEnvelope) (ApplyResult, error) {
 	if err := change.Validate(true); err != nil {
 		return ApplyResult{}, err
 	}
 	var out ApplyResult
-	err := c.callStruct(ctx, MethodApplyV2, change, &out)
-	return out, err
+	if err := c.callStruct(ctx, MethodApplyV2, change, &out); err != nil {
+		return ApplyResult{}, err
+	}
+	return out, pausedErr(out.Paused)
 }
 
 // NetStatus asks the consumer host for its live network State.
@@ -50,18 +53,22 @@ func (c *Client) ArtifactClosure(ctx context.Context, params artifact.ClosurePar
 	return out, err
 }
 
-// ArtifactHave returns the digests the store lacks, in query order.
+// ArtifactHave returns the digests the store lacks, in query order. A policy
+// refusal returns its *artifact.PausedError as the error.
 func (c *Client) ArtifactHave(ctx context.Context, digests []artifact.Digest) ([]artifact.Digest, error) {
 	params := artifact.HaveParams{Digests: digests}
 	if err := params.Validate(); err != nil {
 		return nil, err
 	}
 	var out artifact.HaveResult
-	err := c.callStruct(ctx, artifact.MethodHave, params, &out)
-	return out.Missing, err
+	if err := c.callStruct(ctx, artifact.MethodHave, params, &out); err != nil {
+		return nil, err
+	}
+	return out.Missing, pausedErr(out.Paused)
 }
 
-// BatchBuild asks the source store to build an outbox batch of objects.
+// BatchBuild asks the source store to build an outbox batch of objects, each
+// packed as its declared kind.
 func (c *Client) BatchBuild(ctx context.Context, objects []artifact.ObjectEntry) (artifact.BatchDescriptor, error) {
 	params := artifact.BatchBuildParams{Objects: objects}
 	if err := params.Validate(); err != nil {

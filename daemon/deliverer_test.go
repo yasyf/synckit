@@ -253,7 +253,7 @@ func (f *fakeSource) dispatcher() *rpc.Dispatcher {
 		packed := int64(len("SKP1")) + 1
 		for _, object := range p.Objects {
 			data := f.objects.data[object.Digest]
-			entries = append(entries, artifact.ObjectEntry{Digest: object.Digest, Kind: f.objects.kinds[object.Digest], Size: int64(len(data))})
+			entries = append(entries, object)
 			raw = append(raw, data...)
 			packed += 1 + 32 + int64(len(binary.AppendUvarint(nil, uint64(len(data))))) + int64(len(data))
 		}
@@ -466,9 +466,9 @@ type deliveryHarness struct {
 
 func newDeliveryHarness(t *testing.T, artifacts bool, peers ...string) *deliveryHarness {
 	t.Helper()
-	restore := []*time.Duration{&pauseRecheck, &deliveryBackoffBase, &deliveryBackoffMax}
-	saved := []time.Duration{pauseRecheck, deliveryBackoffBase, deliveryBackoffMax}
-	pauseRecheck, deliveryBackoffBase, deliveryBackoffMax = time.Hour, time.Hour, time.Hour
+	restore := []*time.Duration{&pauseRecheck, &deliveryBackoffBase, &deliveryBackoffMax, &artifactMaxWait}
+	saved := []time.Duration{pauseRecheck, deliveryBackoffBase, deliveryBackoffMax, artifactMaxWait}
+	pauseRecheck, deliveryBackoffBase, deliveryBackoffMax, artifactMaxWait = time.Hour, time.Hour, time.Hour, 0
 	t.Cleanup(func() {
 		for i, target := range restore {
 			*target = saved[i]

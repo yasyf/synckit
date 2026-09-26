@@ -191,3 +191,19 @@ func TestRegisterServesSourceMethods(t *testing.T) {
 		t.Fatal("pins.set with an empty owner succeeded")
 	}
 }
+
+func TestHaveRefusesBeforeDecodingWhileReceiverRestricted(t *testing.T) {
+	d := rpc.NewDispatcher()
+	Register(d, newStore(t), &fakeMonitor{state: cellular})
+	response := d.Dispatch(t.Context(), &rpc.Request{Method: MethodHave, Params: map[string]any{"digests": "not a list"}})
+	if !response.OK {
+		t.Fatalf("have = %+v, want the typed refusal", response)
+	}
+	var result HaveResult
+	if err := json.Unmarshal(response.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Paused == nil || result.Paused.Code != PauseReceiverCellular || len(result.Missing) != 0 {
+		t.Fatalf("have = %+v, want a receiver-cellular refusal", result)
+	}
+}

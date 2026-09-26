@@ -130,6 +130,16 @@ func PausedFor(verdict netpolicy.Verdict) *PausedError {
 	return &PausedError{Code: code, Reason: verdict.Reason}
 }
 
+// LiveRefusal returns the typed refusal for monitor's live State, or nil
+// when that State is unrestricted.
+func LiveRefusal(monitor netpolicy.Monitor) *PausedError {
+	live, _ := monitor.Current()
+	if live.Unrestricted() {
+		return nil
+	}
+	return PausedFor(netpolicy.Evaluate(live, live))
+}
+
 // NetStatusResult is the result of MethodNetStatus.
 type NetStatusResult struct {
 	State netpolicy.State `json:"state"`
@@ -187,12 +197,15 @@ func (p HaveParams) Validate() error {
 }
 
 // HaveResult lists the queried digests the store lacks, in query order.
+// Paused is set, and nothing was queried, when the receiver's live State is
+// not unrestricted.
 type HaveResult struct {
-	Missing []Digest `json:"missing"`
+	Missing []Digest     `json:"missing"`
+	Paused  *PausedError `json:"paused,omitempty"`
 }
 
 // BatchBuildParams asks the source store to build a batch of Objects in the
-// given order, each packed under the role its closure reference gives it.
+// given order, each packed as its declared kind.
 type BatchBuildParams struct {
 	Objects []ObjectEntry `json:"objects"`
 }
@@ -303,7 +316,8 @@ type PinsSetParams struct {
 	Roots []Ref  `json:"roots"`
 }
 
-// Validate checks the owner name and the roots.
+// Validate checks the owner name and at most MaxPinRoots unique valid
+// roots.
 func (p PinsSetParams) Validate() error {
 	if p.Owner == "" || strings.ContainsAny(p.Owner, "\x00\r\n") {
 		return fmt.Errorf("%w: pin owner %q", ErrInvalid, p.Owner)
@@ -311,5 +325,5 @@ func (p PinsSetParams) Validate() error {
 	if len(p.Roots) > MaxPinRoots {
 		return fmt.Errorf("%w: %d pinned roots exceed %d", ErrInvalid, len(p.Roots), MaxPinRoots)
 	}
-	return validateRefs(p.Roots, "pinned root")
+	return validateRefs(p.Roots, "root")
 }

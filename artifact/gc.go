@@ -49,11 +49,13 @@ func (s *Store) GC(ctx context.Context) (GCReport, error) {
 	}
 	w := newWalker(s.Reader, ClosureBound{MaxObjects: math.MaxInt, MaxDepth: DefaultClosureBound.MaxDepth, MaxBytes: math.MaxInt64}, true)
 	for _, pin := range pins {
-		if err := w.walk(ctx, pin.Roots); err != nil {
-			return GCReport{}, fmt.Errorf("artifact: mark pins of %q: %w", pin.Owner, err)
+		for _, root := range pin.Roots {
+			if err := w.visit(ctx, root, 1); err != nil {
+				return GCReport{}, fmt.Errorf("artifact: mark pins of %q: %w", pin.Owner, err)
+			}
 		}
 	}
-	report.Marked = len(w.objects)
+	report.Marked = len(w.stored)
 	for _, object := range objects {
 		if !object.young {
 			continue
@@ -70,7 +72,7 @@ func (s *Store) GC(ctx context.Context) (GCReport, error) {
 		}
 	}
 	for _, object := range objects {
-		if w.reached(object.digest) || object.young {
+		if _, kept := w.scope[object.digest]; kept || object.young {
 			continue
 		}
 		if err := durable.Remove(s.objectPath(object.digest)); err != nil {

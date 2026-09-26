@@ -28,6 +28,7 @@ const (
 	incomingDir    = "incoming"
 	committedDir   = "committed"
 	descriptorName = "descriptor.json"
+	landingDir     = "objects"
 	dirPerm        = 0o700
 	filePerm       = 0o600
 	openLockWait   = time.Second
@@ -214,10 +215,33 @@ func (r *Reader) readManifest(digest Digest, size int64) (Manifest, []byte, erro
 	if err != nil {
 		return Manifest{}, nil, fmt.Errorf("artifact: manifest %s: %w", digest, err)
 	}
-	if size >= 0 && m.Size != size {
-		return Manifest{}, nil, fmt.Errorf("%w: manifest %s holds %d bytes, ref says %d", ErrInvalid, digest, m.Size, size)
+	if err := checkManifestSize(digest, m, size); err != nil {
+		return Manifest{}, nil, err
 	}
 	return m, data, nil
+}
+
+func checkManifestSize(digest Digest, m Manifest, size int64) error {
+	if size >= 0 && m.Size != size {
+		return fmt.Errorf("%w: manifest %s holds %d bytes, ref says %d", ErrInvalid, digest, m.Size, size)
+	}
+	return nil
+}
+
+func (s *Store) touch(digest Digest) (bool, error) {
+	path := s.objectPath(digest)
+	_, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("artifact: stat object %s: %w", digest, err)
+	}
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		return false, fmt.Errorf("artifact: touch object %s: %w", digest, err)
+	}
+	return true, nil
 }
 
 func (s *Store) claim(digest Digest) func() {
@@ -243,19 +267,11 @@ func (s *Store) claim(digest Digest) func() {
 func (s *Store) writeObject(digest Digest, data []byte) (bool, error) {
 	release := s.claim(digest)
 	defer release()
-	path := s.objectPath(digest)
-	_, err := os.Stat(path)
-	if err == nil {
-		now := time.Now()
-		if err := os.Chtimes(path, now, now); err != nil {
-			return false, fmt.Errorf("artifact: touch object %s: %w", digest, err)
-		}
-		return false, nil
+	present, err := s.touch(digest)
+	if err != nil || present {
+		return false, err
 	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("artifact: stat object %s: %w", digest, err)
-	}
-	if err := durable.WriteFile(path, data, filePerm); err != nil {
+	if err := durable.WriteFile(s.objectPath(digest), data, filePerm); err != nil {
 		return false, fmt.Errorf("artifact: write object %s: %w", digest, err)
 	}
 	return true, nil
@@ -325,10 +341,14 @@ func (s *Store) PutBlob(ctx context.Context, b []byte) (Ref, error) {
 }
 
 // PutGroup stores a chunkless manifest labeled media that depends on deps,
-// refusing with a MissingError when any dep is absent.
+// refusing with a MissingError when any dep is absent. More than MaxDeps
+// deps split deterministically, in order, into a tree of GroupMedia
+// manifests of at most MaxDeps deps each beneath the returned root.
 func (s *Store) PutGroup(ctx context.Context, media string, deps []Ref) (Ref, error) {
-	m := Manifest{Schema: ManifestSchema, Media: media, Chunks: []ChunkRef{}, Deps: deps}
-	if err := m.Validate(); err != nil {
+	if !mediaPattern.MatchString(media) {
+		return Ref{}, fmt.Errorf("%w: manifest media %q", ErrInvalid, media)
+	}
+	if err := validateRefs(deps, "dep"); err != nil {
 		return Ref{}, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -345,7 +365,18 @@ func (s *Store) PutGroup(ctx context.Context, media string, deps []Ref) (Ref, er
 			return Ref{}, &MissingError{Digest: dep.Digest}
 		}
 	}
-	return s.putManifest(m)
+	for len(deps) > MaxDeps {
+		level := make([]Ref, 0, (len(deps)+MaxDeps-1)/MaxDeps)
+		for group := range slices.Chunk(deps, MaxDeps) {
+			ref, err := s.putManifest(Manifest{Schema: ManifestSchema, Media: GroupMedia, Chunks: []ChunkRef{}, Deps: group})
+			if err != nil {
+				return Ref{}, err
+			}
+			level = append(level, ref)
+		}
+		deps = level
+	}
+	return s.putManifest(Manifest{Schema: ManifestSchema, Media: media, Chunks: []ChunkRef{}, Deps: deps})
 }
 
 // Manifest reads and strictly decodes the manifest ref names, requiring its
@@ -459,8 +490,11 @@ func (r *Reader) Has(ctx context.Context, digests []Digest) ([]Digest, error) {
 }
 
 // Closure walks roots in priority order, depth first with every child before
-// its manifest and each manifest's chunks before its deps, and fails with a
-// MissingError on an absent manifest or a ClosureError past bound.
+// its manifest and each manifest's chunks before its deps, listing each
+// digest once and as a manifest whenever any root reaches it as one. It fails
+// with a MissingError on an absent manifest or a ClosureError when any one
+// root's complete closure passes bound: the bound applies per root, not to the
+// union.
 func (r *Reader) Closure(ctx context.Context, roots []Ref, bound ClosureBound) (Closure, error) {
 	closure, err := r.closure(ctx, roots, bound)
 	if err != nil {
@@ -493,7 +527,7 @@ func (r *Reader) closure(ctx context.Context, roots []Ref, bound ClosureBound) (
 	if err := w.walk(ctx, roots); err != nil {
 		return Closure{}, err
 	}
-	closure := Closure{Objects: w.objects, Bytes: w.bytes}
+	closure := w.order(roots)
 	r.memoMu.Lock()
 	r.memo = append([]closureMemo{{key: key, closure: closure}}, r.memo[:min(len(r.memo), closureMemos-1)]...)
 	r.memoMu.Unlock()
@@ -511,7 +545,7 @@ func (r *Reader) Complete(ctx context.Context, roots []Ref) (int, error) {
 	if err := w.walk(ctx, roots); err != nil {
 		return 0, err
 	}
-	return w.missing, nil
+	return len(w.missing), nil
 }
 
 // Verify re-hashes every object of roots' closure, failing with a
@@ -536,26 +570,43 @@ func (r *Reader) Verify(ctx context.Context, roots []Ref) error {
 	return nil
 }
 
+type reach uint8
+
+const (
+	reachedBlob reach = 1 << iota
+	reachedManifest
+)
+
+func reachOf(kind Kind) reach {
+	if kind == KindManifest {
+		return reachedManifest
+	}
+	return reachedBlob
+}
+
 type walker struct {
-	reader   *Reader
-	bound    ClosureBound
-	audit    bool
-	emitted  map[Digest]struct{}
-	expanded map[Digest]struct{}
-	objects  []ObjectEntry
-	bytes    int64
-	missing  int
+	reader       *Reader
+	bound        ClosureBound
+	audit        bool
+	manifests    map[Digest]Manifest
+	stored       map[Digest]int64
+	missing      map[Digest]struct{}
+	scope        map[Digest]reach
+	scopeObjects int
+	scopeBytes   int64
 }
 
 func newWalker(r *Reader, bound ClosureBound, audit bool) *walker {
 	return &walker{
 		reader: r, bound: bound, audit: audit,
-		emitted: map[Digest]struct{}{}, expanded: map[Digest]struct{}{}, objects: []ObjectEntry{},
+		manifests: map[Digest]Manifest{}, stored: map[Digest]int64{}, missing: map[Digest]struct{}{},
+		scope: map[Digest]reach{},
 	}
 }
 
 func (w *walker) walk(ctx context.Context, roots []Ref) error {
 	for _, root := range roots {
+		w.scope, w.scopeObjects, w.scopeBytes = map[Digest]reach{}, 0, 0
 		if err := w.visit(ctx, root, 1); err != nil {
 			return err
 		}
@@ -563,40 +614,37 @@ func (w *walker) walk(ctx context.Context, roots []Ref) error {
 	return nil
 }
 
-func (w *walker) reached(digest Digest) bool {
-	_, emitted := w.emitted[digest]
-	_, expanded := w.expanded[digest]
-	return emitted || expanded
-}
-
 func (w *walker) visit(ctx context.Context, ref Ref, depth int) error {
-	if ref.Kind == KindBlob {
-		if _, emitted := w.emitted[ref.Digest]; emitted {
-			return nil
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		return w.blob(ref)
-	}
-	if _, expanded := w.expanded[ref.Digest]; expanded {
+	reached := w.scope[ref.Digest]
+	if reached&reachOf(ref.Kind) != 0 {
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	w.scope[ref.Digest] = reached | reachOf(ref.Kind)
+	if _, absent := w.missing[ref.Digest]; absent {
+		return nil
+	}
+	if ref.Kind == KindBlob {
+		return w.blob(ref, reached == 0)
+	}
 	if depth > w.bound.MaxDepth {
 		return &ClosureError{Bound: BoundDepth, Limit: int64(w.bound.MaxDepth)}
 	}
-	m, encoded, err := w.reader.readManifest(ref.Digest, ref.Size)
+	m, err := w.manifest(ref)
 	var missing *MissingError
 	if w.audit && errors.As(err, &missing) {
-		w.expanded[ref.Digest] = struct{}{}
-		w.missing++
+		w.missing[ref.Digest] = struct{}{}
 		return nil
 	}
 	if err != nil {
 		return err
+	}
+	if reached == 0 {
+		if err := w.count(w.stored[ref.Digest]); err != nil {
+			return err
+		}
 	}
 	for _, chunk := range m.Chunks {
 		if err := w.visit(ctx, Ref{Digest: chunk.Digest, Kind: KindBlob, Size: chunk.Size}, depth); err != nil {
@@ -608,40 +656,83 @@ func (w *walker) visit(ctx context.Context, ref Ref, depth int) error {
 			return err
 		}
 	}
-	w.expanded[ref.Digest] = struct{}{}
-	if _, emitted := w.emitted[ref.Digest]; emitted {
+	return nil
+}
+
+func (w *walker) manifest(ref Ref) (Manifest, error) {
+	m, read := w.manifests[ref.Digest]
+	if !read {
+		decoded, encoded, err := w.reader.readManifest(ref.Digest, -1)
+		if err != nil {
+			return Manifest{}, err
+		}
+		m = decoded
+		w.manifests[ref.Digest] = m
+		w.stored[ref.Digest] = int64(len(encoded))
+	}
+	return m, checkManifestSize(ref.Digest, m, ref.Size)
+}
+
+func (w *walker) blob(ref Ref, first bool) error {
+	size, known := w.stored[ref.Digest]
+	if !known {
+		size = ref.Size
+		if w.audit {
+			info, err := w.reader.stat(ref.Digest)
+			if errors.Is(err, os.ErrNotExist) {
+				w.missing[ref.Digest] = struct{}{}
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("artifact: stat object %s: %w", ref.Digest, err)
+			}
+			size = info.Size()
+		}
+		w.stored[ref.Digest] = size
+	}
+	if w.audit && size != ref.Size {
+		return fmt.Errorf("%w: blob %s holds %d bytes, ref says %d", ErrInvalid, ref.Digest, size, ref.Size)
+	}
+	if !first {
 		return nil
 	}
-	return w.emit(ObjectEntry{Digest: ref.Digest, Kind: KindManifest, Size: int64(len(encoded))})
+	return w.count(size)
 }
 
-func (w *walker) blob(ref Ref) error {
-	if w.audit {
-		info, err := w.reader.stat(ref.Digest)
-		if errors.Is(err, os.ErrNotExist) {
-			w.emitted[ref.Digest] = struct{}{}
-			w.missing++
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("artifact: stat object %s: %w", ref.Digest, err)
-		}
-		if info.Size() != ref.Size {
-			return fmt.Errorf("%w: blob %s holds %d bytes, ref says %d", ErrInvalid, ref.Digest, info.Size(), ref.Size)
-		}
-	}
-	return w.emit(ObjectEntry{Digest: ref.Digest, Kind: KindBlob, Size: ref.Size})
-}
-
-func (w *walker) emit(entry ObjectEntry) error {
-	if len(w.objects) >= w.bound.MaxObjects {
+func (w *walker) count(size int64) error {
+	if w.scopeObjects >= w.bound.MaxObjects {
 		return &ClosureError{Bound: BoundObjects, Limit: int64(w.bound.MaxObjects)}
 	}
-	if w.bytes+entry.Size > w.bound.MaxBytes {
+	if w.scopeBytes+size > w.bound.MaxBytes {
 		return &ClosureError{Bound: BoundBytes, Limit: w.bound.MaxBytes}
 	}
-	w.emitted[entry.Digest] = struct{}{}
-	w.objects = append(w.objects, entry)
-	w.bytes += entry.Size
+	w.scopeObjects++
+	w.scopeBytes += size
 	return nil
+}
+
+func (w *walker) order(roots []Ref) Closure {
+	closure := Closure{Objects: []ObjectEntry{}}
+	listed := map[Digest]struct{}{}
+	var list func(Digest)
+	list = func(digest Digest) {
+		if _, done := listed[digest]; done {
+			return
+		}
+		listed[digest] = struct{}{}
+		kind := KindBlob
+		if m, ok := w.manifests[digest]; ok {
+			kind = KindManifest
+			for _, child := range m.children() {
+				list(child)
+			}
+		}
+		size := w.stored[digest]
+		closure.Objects = append(closure.Objects, ObjectEntry{Digest: digest, Kind: kind, Size: size})
+		closure.Bytes += size
+	}
+	for _, root := range roots {
+		list(root.Digest)
+	}
+	return closure
 }
