@@ -11,7 +11,10 @@ import (
 	"github.com/yasyf/synckit/rpc"
 )
 
-const acceptedPinPrefix = "synckit.accepted/"
+const (
+	acceptedPinPrefix = "synckit.accepted/"
+	ackedPinPrefix    = "synckit.acked/"
+)
 
 // ErrIncompleteAck reports a consumer acknowledging a change's source
 // revision while the receiver's own store lacks some root closure.
@@ -75,12 +78,13 @@ func registerArtifactConsumer(d *rpc.Dispatcher, svc ArtifactConsumer, store acc
 }
 
 func applyArtifacts(ctx context.Context, svc ArtifactConsumer, store acceptStore, change ChangeEnvelope) (ApplyResult, error) {
-	owner := acceptedPinPrefix + change.Origin
-	prior, err := pinnedRoots(ctx, store, owner)
+	acceptedOwner := acceptedPinPrefix + change.Origin
+	ackedOwner := ackedPinPrefix + change.Origin
+	acked, err := pinnedRoots(ctx, store, ackedOwner)
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if err := store.SetPins(ctx, owner, unionRefs(prior, change.Artifacts)); err != nil {
+	if err := store.SetPins(ctx, acceptedOwner, unionRefs(acked, change.Artifacts)); err != nil {
 		return ApplyResult{}, fmt.Errorf("syncservice: pin incoming roots from %s: %w", change.Origin, err)
 	}
 	ready, err := readyRoots(ctx, store, change.Artifacts)
@@ -91,15 +95,21 @@ func applyArtifacts(ctx context.Context, svc ArtifactConsumer, store acceptStore
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	acked := result.AckedRevision == change.SourceRevision
-	if acked && len(ready) < len(change.Artifacts) {
+	fullAck := result.AckedRevision == change.SourceRevision
+	if fullAck && len(ready) < len(change.Artifacts) {
 		return ApplyResult{}, fmt.Errorf("%w: %d of %d roots ready", ErrIncompleteAck, len(ready), len(change.Artifacts))
 	}
-	resolved := prior
-	if !result.Stale && (acked || result.Partial) {
-		resolved = change.Artifacts
+	accepted := !result.Stale && !result.NeedSnapshot && (fullAck || result.Partial)
+	if !accepted {
+		if err := store.SetPins(ctx, acceptedOwner, acked); err != nil {
+			return ApplyResult{}, fmt.Errorf("syncservice: release refused roots from %s: %w", change.Origin, err)
+		}
+		return result, nil
 	}
-	if err := store.SetPins(ctx, owner, resolved); err != nil {
+	if err := store.SetPins(ctx, ackedOwner, change.Artifacts); err != nil {
+		return ApplyResult{}, fmt.Errorf("syncservice: record acked roots from %s: %w", change.Origin, err)
+	}
+	if err := store.SetPins(ctx, acceptedOwner, change.Artifacts); err != nil {
 		return ApplyResult{}, fmt.Errorf("syncservice: narrow accepted roots from %s: %w", change.Origin, err)
 	}
 	return result, nil
