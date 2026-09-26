@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/netpolicy"
@@ -30,7 +31,10 @@ type acceptStore interface {
 // artifact methods on d. apply.v2 returns the typed refusal, before decoding
 // the change, while monitor's live State is not unrestricted; it computes
 // root readiness from store and refuses an acknowledgement while any root
-// closure is incomplete.
+// closure is incomplete. Each change's roots stay pinned under an owner of
+// their own from before svc sees them until svc refuses the change, fails an
+// attempt that pinned it, or acknowledges any change from the same origin, so
+// a failure after svc records a change never unpins roots svc holds.
 func RegisterArtifactConsumer(d *rpc.Dispatcher, svc ArtifactConsumer, store *artifact.Store, monitor netpolicy.Monitor) {
 	artifact.Register(d, store, monitor)
 	registerArtifactConsumer(d, svc, store, monitor)
@@ -78,64 +82,63 @@ func registerArtifactConsumer(d *rpc.Dispatcher, svc ArtifactConsumer, store acc
 }
 
 func applyArtifacts(ctx context.Context, svc ArtifactConsumer, store acceptStore, change ChangeEnvelope) (ApplyResult, error) {
-	acceptedOwner := acceptedPinPrefix + change.Origin
-	ackedOwner := ackedPinPrefix + change.Origin
-	acked, err := pinnedRoots(ctx, store, ackedOwner)
+	owner := acceptedPinPrefix + change.Origin + "/" + change.ChangeID
+	accepted, err := acceptedOwners(ctx, store, change.Origin)
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if err := store.SetPins(ctx, acceptedOwner, unionRefs(acked, change.Artifacts)); err != nil {
+	if err := store.SetPins(ctx, owner, change.Artifacts); err != nil {
 		return ApplyResult{}, fmt.Errorf("syncservice: pin incoming roots from %s: %w", change.Origin, err)
 	}
 	ready, err := readyRoots(ctx, store, change.Artifacts)
-	if err != nil {
-		return ApplyResult{}, err
+	var result ApplyResult
+	if err == nil {
+		result, err = svc.ApplyArtifacts(ctx, change, ready)
 	}
-	result, err := svc.ApplyArtifacts(ctx, change, ready)
 	if err != nil {
-		return ApplyResult{}, err
+		if slices.Contains(accepted, owner) {
+			return ApplyResult{}, err
+		}
+		return ApplyResult{}, errors.Join(err, release(ctx, store, change.Origin, owner))
 	}
 	fullAck := result.AckedRevision == change.SourceRevision
 	if fullAck && len(ready) < len(change.Artifacts) {
 		return ApplyResult{}, fmt.Errorf("%w: %d of %d roots ready", ErrIncompleteAck, len(ready), len(change.Artifacts))
 	}
-	accepted := !result.Stale && !result.NeedSnapshot && (fullAck || result.Partial)
-	if !accepted {
-		if err := store.SetPins(ctx, acceptedOwner, acked); err != nil {
-			return ApplyResult{}, fmt.Errorf("syncservice: release refused roots from %s: %w", change.Origin, err)
-		}
-		return result, nil
+	if result.Stale || result.NeedSnapshot || (!fullAck && !result.Partial) {
+		return result, release(ctx, store, change.Origin, owner)
 	}
-	if err := store.SetPins(ctx, ackedOwner, change.Artifacts); err != nil {
+	if err := store.SetPins(ctx, ackedPinPrefix+change.Origin, change.Artifacts); err != nil {
 		return ApplyResult{}, fmt.Errorf("syncservice: record acked roots from %s: %w", change.Origin, err)
 	}
-	if err := store.SetPins(ctx, acceptedOwner, change.Artifacts); err != nil {
-		return ApplyResult{}, fmt.Errorf("syncservice: narrow accepted roots from %s: %w", change.Origin, err)
+	if !slices.Contains(accepted, owner) {
+		accepted = append(accepted, owner)
 	}
-	return result, nil
+	return result, release(ctx, store, change.Origin, accepted...)
 }
 
-func pinnedRoots(ctx context.Context, store acceptStore, owner string) ([]artifact.Ref, error) {
+func acceptedOwners(ctx context.Context, store acceptStore, origin string) ([]string, error) {
 	pins, err := store.Pins(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("syncservice: read pins: %w", err)
 	}
+	prefix := acceptedPinPrefix + origin + "/"
+	var owners []string
 	for _, pin := range pins {
-		if pin.Owner == owner {
-			return pin.Roots, nil
+		if changeID, ok := strings.CutPrefix(pin.Owner, prefix); ok && !strings.Contains(changeID, "/") {
+			owners = append(owners, pin.Owner)
 		}
 	}
-	return nil, nil
+	return owners, nil
 }
 
-func unionRefs(prior, next []artifact.Ref) []artifact.Ref {
-	union := slices.Clone(prior)
-	for _, ref := range next {
-		if !slices.ContainsFunc(union, func(r artifact.Ref) bool { return r.Digest == ref.Digest }) {
-			union = append(union, ref)
+func release(ctx context.Context, store acceptStore, origin string, owners ...string) error {
+	for _, owner := range owners {
+		if err := store.SetPins(ctx, owner, nil); err != nil {
+			return fmt.Errorf("syncservice: release accepted roots from %s: %w", origin, err)
 		}
 	}
-	return union
+	return nil
 }
 
 func readyRoots(ctx context.Context, store acceptStore, roots []artifact.Ref) ([]artifact.Ref, error) {

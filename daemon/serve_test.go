@@ -793,3 +793,65 @@ func shrinkBackoff(t *testing.T) {
 		listRetryBudget = prevBudget
 	})
 }
+
+func TestReconcileStartsLanesForNewlyRegisteredPeers(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hostregistry.Mesh.Update(context.Background(), func(g *hostregistry.Registry) error {
+		g.Self = "me@self"
+		return nil
+	}); err != nil {
+		t.Fatalf("seed mesh: %v", err)
+	}
+	manifestsDir, err := ensureManifestsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestsDir, "stub.json"), mustJSON(t, testManifest()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := dialTransport
+	dialTransport = func(processScope, manifest.Manifest, string, string) syncservice.Transport {
+		return &countingTransport{onClose: func() {}}
+	}
+	t.Cleanup(func() { dialTransport = prev })
+	sup := newSupervisor(testProcessScope(t), newDeliveryStore(t.TempDir()), newFakeMonitor(unrestricted))
+	t.Cleanup(sup.stop)
+	ctx := context.Background()
+	if err := sup.reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before, err := sup.deliveries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := before.Kick("stub", "peer@node"); err == nil {
+		t.Fatal("Kick before registration found a lane")
+	}
+
+	fact, err := hostregistry.NewSSHHostFact("peer@node", "/opt/homebrew/bin/synckitd", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hostregistry.Mesh.RegisterHost(ctx, fact); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sup.reconcile(ctx, ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	after, err := sup.deliveries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := after.Kick("stub", "peer@node"); err != nil {
+		t.Fatalf("Kick after reconcile = %v, want a lane for the registered peer", err)
+	}
+	if _, err := sup.reconcile(ctx, ctx); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if again, _ := sup.deliveries(); again != after {
+		t.Fatal("reconcile with unchanged membership restarted the delivery generation")
+	}
+}

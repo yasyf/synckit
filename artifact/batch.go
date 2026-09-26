@@ -299,10 +299,11 @@ func (s *Store) PutPart(ctx context.Context, id Digest, index int, data []byte) 
 // It then touches each present object and lands each absent one in the
 // batch's staging with a plain fsync, flushes them all with one barrier,
 // and only then renames them into place, children strictly before their
-// manifests. It records the batch as committed for StagingTTL before
-// removing the staging, and re-committing a recorded batch touches its
-// objects and reports them present, so a concurrent sender of the same batch
-// finishes too.
+// manifests; a level whose directory fsync or barrier fails is renamed back
+// into staging, so no object is visible before its publication is durable.
+// It records the batch as committed for StagingTTL before removing the
+// staging, and re-committing a recorded batch touches its objects and reports
+// them present, so a concurrent sender of the same batch finishes too.
 func (s *Store) CommitBatch(ctx context.Context, id Digest) (CommitReport, error) {
 	if err := id.Validate(); err != nil {
 		return CommitReport{}, err
@@ -472,6 +473,7 @@ func (s *Store) publishLevel(landing string, landed []Digest, levels map[Digest]
 		}
 	}()
 	dirs := map[string]struct{}{}
+	var published []Digest
 	for _, digest := range landed {
 		if levels[digest] != level {
 			continue
@@ -479,19 +481,30 @@ func (s *Store) publishLevel(landing string, landed []Digest, levels map[Digest]
 		releases = append(releases, s.claim(digest))
 		target := s.objectPath(digest)
 		if err := os.Rename(filepath.Join(landing, string(digest)), target); err != nil {
-			return fmt.Errorf("artifact: publish object %s: %w", digest, err)
+			return errors.Join(fmt.Errorf("artifact: publish object %s: %w", digest, err), s.unpublish(landing, published))
 		}
+		published = append(published, digest)
 		dirs[filepath.Dir(target)] = struct{}{}
 	}
 	for dir := range dirs {
 		if err := syncObjectDir(dir); err != nil {
-			return err
+			return errors.Join(err, s.unpublish(landing, published))
 		}
 	}
 	if err := flushBarrier(landing); err != nil {
-		return fmt.Errorf("artifact: flush published objects: %w", err)
+		return errors.Join(fmt.Errorf("artifact: flush published objects: %w", err), s.unpublish(landing, published))
 	}
 	return nil
+}
+
+func (s *Store) unpublish(landing string, published []Digest) error {
+	var errs []error
+	for _, digest := range published {
+		if err := os.Rename(s.objectPath(digest), filepath.Join(landing, string(digest))); err != nil {
+			errs = append(errs, fmt.Errorf("artifact: withdraw unsynced object %s: %w", digest, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func syncDir(dir string) (err error) {

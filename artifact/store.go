@@ -594,6 +594,7 @@ type reach uint8
 const (
 	reachedBlob reach = 1 << iota
 	reachedManifest
+	reachedNamed
 )
 
 func reachOf(kind Kind) reach {
@@ -609,6 +610,7 @@ type walker struct {
 	audit        bool
 	manifests    map[Digest]Manifest
 	stored       map[Digest]int64
+	heights      map[Digest]int
 	missing      map[Digest]struct{}
 	scope        map[Digest]reach
 	scopeObjects int
@@ -618,7 +620,7 @@ type walker struct {
 func newWalker(r *Reader, bound ClosureBound, audit bool) *walker {
 	return &walker{
 		reader: r, bound: bound, audit: audit,
-		manifests: map[Digest]Manifest{}, stored: map[Digest]int64{}, missing: map[Digest]struct{}{},
+		manifests: map[Digest]Manifest{}, stored: map[Digest]int64{}, heights: map[Digest]int{}, missing: map[Digest]struct{}{},
 		scope: map[Digest]reach{},
 	}
 }
@@ -636,7 +638,7 @@ func (w *walker) walk(ctx context.Context, roots []Ref) error {
 func (w *walker) visit(ctx context.Context, ref Ref, depth int) error {
 	reached := w.scope[ref.Digest]
 	if reached&reachOf(ref.Kind) != 0 {
-		return nil
+		return w.revisit(ref, depth)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -670,12 +672,30 @@ func (w *walker) visit(ctx context.Context, ref Ref, depth int) error {
 			return err
 		}
 	}
+	height := 1
 	for _, dep := range m.Deps {
 		if err := w.visit(ctx, dep, depth+1); err != nil {
 			return err
 		}
+		if dep.Kind == KindManifest {
+			height = max(height, w.heights[dep.Digest]+1)
+		}
 	}
+	w.heights[ref.Digest] = height
 	return nil
+}
+
+func (w *walker) revisit(ref Ref, depth int) error {
+	if _, absent := w.missing[ref.Digest]; absent {
+		return nil
+	}
+	if ref.Kind == KindBlob {
+		return w.blob(ref, false)
+	}
+	if depth+w.heights[ref.Digest]-1 > w.bound.MaxDepth {
+		return &ClosureError{Bound: BoundDepth, Limit: int64(w.bound.MaxDepth)}
+	}
+	return checkManifestSize(ref.Digest, w.manifests[ref.Digest], ref.Size)
 }
 
 func (w *walker) manifest(ref Ref) (Manifest, error) {
@@ -684,6 +704,9 @@ func (w *walker) manifest(ref Ref) (Manifest, error) {
 		decoded, encoded, err := w.reader.readManifest(ref.Digest, -1)
 		if err != nil {
 			return Manifest{}, err
+		}
+		if size, known := w.stored[ref.Digest]; known && size != int64(len(encoded)) {
+			return Manifest{}, fmt.Errorf("%w: manifest %s holds %d bytes, blob ref says %d", ErrInvalid, ref.Digest, len(encoded), size)
 		}
 		m = decoded
 		w.manifests[ref.Digest] = m
@@ -709,7 +732,7 @@ func (w *walker) blob(ref Ref, first bool) error {
 		}
 		w.stored[ref.Digest] = size
 	}
-	if w.audit && size != ref.Size {
+	if size != ref.Size {
 		return fmt.Errorf("%w: blob %s holds %d bytes, ref says %d", ErrInvalid, ref.Digest, size, ref.Size)
 	}
 	if !first {

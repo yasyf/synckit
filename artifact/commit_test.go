@@ -189,3 +189,64 @@ func TestCommitBatchPublishesNothingBeforeTheBarrier(t *testing.T) {
 		t.Fatalf("Verify after commit = %v", err)
 	}
 }
+
+func TestCommitBatchHidesObjectsUntilTheirDirectoriesAreDurable(t *testing.T) {
+	src := newStore(t)
+	root, err := src.Put(t.Context(), bytes.NewReader(randomBytes(9, 3*ChunkSize)), "test/blob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := closureEntries(t, src, []Ref{root})
+	digests := make([]Digest, len(objects))
+	for i, object := range objects {
+		digests[i] = object.Digest
+	}
+	t.Cleanup(func() { syncObjectDir, flushBarrier = syncDir, fullSyncDir })
+	lost := errors.New("directory fsync failed")
+	tests := []struct {
+		name        string
+		fail        func()
+		wantMissing []Digest
+	}{
+		{"chunk directory sync", func() { syncObjectDir = func(string) error { return lost } }, digests},
+		{"manifest level barrier", func() {
+			barriers := 0
+			flushBarrier = func(dir string) error {
+				if barriers++; barriers == 3 {
+					return lost
+				}
+				return fullSyncDir(dir)
+			}
+		}, []Digest{root.Digest}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dst := newStore(t)
+			d := stageBatch(t, src, dst, objects)
+			tt.fail()
+			if _, err := dst.CommitBatch(t.Context(), d.ID); !errors.Is(err, lost) {
+				t.Fatalf("CommitBatch = %v, want the sync failure", err)
+			}
+			syncObjectDir, flushBarrier = syncDir, fullSyncDir
+			missing, err := dst.Has(t.Context(), digests)
+			if err != nil || !reflect.DeepEqual(missing, tt.wantMissing) {
+				t.Fatalf("Has after a failed sync = %v, %v; want %v", missing, err, tt.wantMissing)
+			}
+			if n, err := dst.Complete(t.Context(), []Ref{root}); err != nil || n == 0 {
+				t.Fatalf("Complete after a failed sync = %d, %v; want the unsynced objects missing", n, err)
+			}
+			syncs := 0
+			syncObjectDir = func(dir string) error {
+				syncs++
+				return syncDir(dir)
+			}
+			report, err := dst.CommitBatch(t.Context(), d.ID)
+			if err != nil || report.Stored != len(tt.wantMissing) || syncs == 0 {
+				t.Fatalf("retried CommitBatch = %+v, %v after %d directory syncs; want %d stored and synced", report, err, syncs, len(tt.wantMissing))
+			}
+			if err := dst.Verify(t.Context(), []Ref{root}); err != nil {
+				t.Fatalf("Verify after the retry = %v", err)
+			}
+		})
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -101,15 +102,7 @@ func startServe(c daemonkit.Ctx, dir string) (daemonkit.Product, error) {
 	// the exclusive mutex — a reload never tears down the clients a reconcile pass
 	// is mid-drive on; status is a pure read and stays concurrent.
 	d.RegisterExclusive("reconcile", func(hctx context.Context, _ map[string]any) (any, error) {
-		results, err := reconcileAll(hctx, c)
-		if err != nil {
-			return nil, err
-		}
-		scheduler, err := sup.deliveries()
-		if err != nil {
-			return nil, err
-		}
-		return results, scheduler.Kick("", "")
+		return sup.reconcile(hctx, c.Context)
 	})
 	// The generation reload starts must outlive the request, so it parents to the
 	// daemon's own lifetime: the request ctx dies as soon as Dispatch returns,
@@ -187,12 +180,37 @@ type supervisor struct {
 	wg        *sync.WaitGroup
 	clients   []*syncservice.Client
 	scheduler *deliveryScheduler
+	mesh      hostregistry.Registry
 	closed    bool
 	settled   bool
 }
 
 func newSupervisor(scope processScope, delivery *deliveryStore, monitor netpolicy.Monitor) *supervisor {
 	return &supervisor{scope: scope, delivery: delivery, monitor: monitor}
+}
+
+func (s *supervisor) reconcile(ctx, lifetime context.Context) ([]reconcileResult, error) {
+	results, err := reconcileAll(ctx, s.scope)
+	if err != nil {
+		return nil, err
+	}
+	reg, err := hostregistry.Mesh.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load mesh: %w", err)
+	}
+	s.mu.Lock()
+	current := s.mesh
+	s.mu.Unlock()
+	if current.Self != reg.Self || !slices.Equal(current.Hosts, reg.Hosts) {
+		if err := s.reload(lifetime); err != nil {
+			return nil, err
+		}
+	}
+	scheduler, err := s.deliveries()
+	if err != nil {
+		return nil, err
+	}
+	return results, scheduler.Kick("", "")
 }
 
 func (s *supervisor) deliveries() (*deliveryScheduler, error) {
@@ -254,7 +272,7 @@ func (s *supervisor) reload(parent context.Context) error {
 		s.startEngine(ctx, wg, m, locals[i], reg, scheduler)
 	}
 	scheduler.start()
-	s.scheduler = scheduler
+	s.scheduler, s.mesh = scheduler, *reg
 	slog.InfoContext(ctx, "synckitd watch supervisor reloaded", "manifests", len(manifests))
 	return nil
 }

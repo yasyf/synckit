@@ -282,7 +282,6 @@ func TestE2EApplyReprobeRechecksTheLiveLocalState(t *testing.T) {
 func TestE2EKickSupersedesAtTheNextBatchBoundary(t *testing.T) {
 	m := newE2EMesh(t, "a@node", "b@node")
 	batchObjectLimit = 1
-	artifactMaxWait = time.Hour
 	a, b := m.hosts["a@node"], m.hosts["b@node"]
 	backlog := make([]artifact.Ref, 6)
 	for i := range backlog {
@@ -318,6 +317,7 @@ func TestE2EKickSupersedesAtTheNextBatchBoundary(t *testing.T) {
 	})
 	d := m.deliver("a@node", "b@node")
 	<-running
+	artifactMaxWait = time.Hour
 	a.consumer.publish(2, append([]artifact.Ref{urgent}, backlog...)...)
 	if err := d.sched.Kick("stub", "b@node"); err != nil {
 		t.Fatal(err)
@@ -374,22 +374,25 @@ func TestE2EDeliversTheChildrenOfADigestReachedAsBothKinds(t *testing.T) {
 
 func TestE2EKickBeforeEveryFirstBatchStillShipsOne(t *testing.T) {
 	m := newE2EMesh(t, "a@node", "b@node")
-	artifactMaxWait = time.Hour
 	a, b := m.hosts["a@node"], m.hosts["b@node"]
 	content := randomBytes(t, 4<<10)
 	root := a.put(t, content)
 	a.consumer.publish(1, root)
-	ready := make(chan struct{})
+	entered, ready := make(chan struct{}), make(chan struct{})
+	var enter sync.Once
 	var sched atomic.Pointer[deliveryScheduler]
 	m.link("a@node", "b@node").setHook(func(request *rpc.Request) error {
 		if request.Method != artifact.MethodHave {
 			return nil
 		}
+		enter.Do(func() { close(entered) })
 		<-ready
 		return sched.Load().Kick("stub", "b@node")
 	})
 	d := m.deliver("a@node", "b@node")
 	sched.Store(d.sched)
+	<-entered
+	artifactMaxWait = time.Hour
 	close(ready)
 	d.await(t, "b@node", "ack despite a kick before every first batch", acked(1))
 	b.requireContent(t, root, content)

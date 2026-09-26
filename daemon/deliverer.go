@@ -65,6 +65,7 @@ type laneLive struct {
 	lastAttemptAt time.Time
 	nextAttemptAt time.Time
 	progress      delivery.Progress
+	progressFor   string
 	localNetwork  *netpolicy.State
 	peerNetwork   *netpolicy.State
 	down          bool
@@ -283,6 +284,7 @@ func peerStatus(record deliveryRecord, live *laneLive) delivery.PeerStatus {
 }
 
 func (s *deliveryScheduler) work(l *lane) {
+	_, _ = s.detect(s.ctx, l)
 	timer := time.NewTimer(time.Hour)
 	timer.Stop()
 	defer timer.Stop()
@@ -400,13 +402,21 @@ func (s *deliveryScheduler) logDown(l *lane, cause error, retryIn time.Duration)
 	s.wg.Go(func() { s.snapshot(s.ctx, l.peer) })
 }
 
-func (s *deliveryScheduler) prepare(ctx context.Context, l *lane) (bool, *syncservice.ChangeEnvelope, error) {
+func (s *deliveryScheduler) detect(ctx context.Context, l *lane) (bool, error) {
 	caps, err := l.local.Capabilities(ctx)
 	if err != nil {
-		return false, nil, fmt.Errorf("local capabilities for %q: %w", l.service, err)
+		return false, fmt.Errorf("local capabilities for %q: %w", l.service, err)
 	}
 	artifacts := slices.Contains(caps.Methods, syncservice.MethodExportV2)
 	l.artifacts.Store(artifacts)
+	return artifacts, nil
+}
+
+func (s *deliveryScheduler) prepare(ctx context.Context, l *lane) (bool, *syncservice.ChangeEnvelope, error) {
+	artifacts, err := s.detect(ctx, l)
+	if err != nil {
+		return false, nil, err
+	}
 	record, pending, err := s.store.load(ctx, l.service, l.peer)
 	if err != nil {
 		return false, nil, err
@@ -511,8 +521,12 @@ func (s *deliveryScheduler) reconcilePins(ctx context.Context, l *lane, artifact
 func unionRoots(old, next []artifact.Ref) []artifact.Ref {
 	union := slices.Clone(next)
 	for _, ref := range old {
-		if !slices.ContainsFunc(union, func(r artifact.Ref) bool { return r.Digest == ref.Digest }) {
+		index := slices.IndexFunc(union, func(r artifact.Ref) bool { return r.Digest == ref.Digest })
+		switch {
+		case index < 0:
 			union = append(union, ref)
+		case ref.Kind == artifact.KindManifest:
+			union[index] = ref
 		}
 	}
 	return union
@@ -643,8 +657,12 @@ func localReason(local netpolicy.State) delivery.PauseReason {
 func (r *deliveryRun) transfer(ctx context.Context) error {
 	roots := r.change.Artifacts
 	r.l.update(func(v *laneLive) {
-		v.state = delivery.StateTransferring
-		v.progress = delivery.Progress{RootsTotal: len(roots), InFlightLimit: artifact.PartSize}
+		var wire int64
+		if v.progressFor == r.change.ChangeID {
+			wire = v.progress.WireBytesSent
+		}
+		v.state, v.progressFor = delivery.StateTransferring, r.change.ChangeID
+		v.progress = delivery.Progress{RootsTotal: len(roots), InFlightLimit: artifact.PartSize, WireBytesSent: wire}
 	})
 	if len(roots) == 0 {
 		return nil
@@ -745,6 +763,9 @@ func (r *deliveryRun) page(ctx context.Context, objects []artifact.ObjectEntry, 
 		if err := r.send(ctx, batch); err != nil {
 			return err
 		}
+		if r.superseded() {
+			return errSuperseded
+		}
 		completed := waiting
 		batch, batchBytes, waiting = nil, 0, 0
 		var progressive bool
@@ -821,13 +842,13 @@ func (r *deliveryRun) send(ctx context.Context, objects []artifact.ObjectEntry) 
 		if have[index] {
 			continue
 		}
-		local, err := r.admit(ctx)
-		if err != nil {
-			return err
-		}
 		data, err := r.l.local.BatchRead(ctx, batch.ID, index)
 		if err != nil {
 			return fmt.Errorf("read part %d of %s: %w", index, batch.ID, err)
+		}
+		local, err := r.admit(ctx)
+		if err != nil {
+			return err
 		}
 		put, err := r.peer.BatchPut(ctx, batch.ID, index, data, local)
 		r.l.update(func(v *laneLive) { v.progress.WireBytesSent += int64(len(data)) })

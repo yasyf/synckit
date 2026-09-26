@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -605,6 +606,90 @@ func TestOpenSyncsObjectDirectoriesBeforeServing(t *testing.T) {
 			missing, err := reopened.Has(t.Context(), []Digest{digest})
 			if err != nil || len(missing) != 0 {
 				t.Fatalf("Has after Open = %v, %v; want the synced object present", missing, err)
+			}
+		})
+	}
+}
+
+func TestSharedReferencesAreValidatedOnEveryPath(t *testing.T) {
+	s := newStore(t)
+	ctx := t.Context()
+	blob, err := s.PutBlob(ctx, []byte("abc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := s.PutGroup(ctx, "test/right", []Ref{blob})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong, err := s.PutGroup(ctx, "test/wrong", []Ref{{Digest: blob.Digest, Kind: KindBlob, Size: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer, err := s.PutGroup(ctx, "test/outer", []Ref{right, wrong})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, roots := range [][]Ref{{wrong}, {outer}, {right, wrong}} {
+		if n, err := s.Complete(ctx, roots); !errors.Is(err, ErrInvalid) {
+			t.Errorf("Complete(%v) = %d, %v; want ErrInvalid", roots, n, err)
+		}
+		if err := s.Verify(ctx, roots); !errors.Is(err, ErrInvalid) {
+			t.Errorf("Verify(%v) = %v; want ErrInvalid", roots, err)
+		}
+	}
+	if _, err := s.Complete(ctx, []Ref{right}); err != nil {
+		t.Fatalf("Complete(right) = %v", err)
+	}
+}
+
+func reversed(refs []Ref) []Ref {
+	out := slices.Clone(refs)
+	slices.Reverse(out)
+	return out
+}
+
+func TestSharedDescendantsCountTowardEveryPathDepth(t *testing.T) {
+	s := newStore(t)
+	ctx := t.Context()
+	blob, err := s.PutBlob(ctx, []byte("leaf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := append(make([]Ref, 0, 1+DefaultClosureBound.MaxDepth), blob)
+	for range DefaultClosureBound.MaxDepth {
+		next, err := s.PutGroup(ctx, "test/chain", chain[len(chain)-1:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		chain = append(chain, next)
+	}
+	wrap := func(deps []Ref) Ref {
+		t.Helper()
+		ref, err := s.PutGroup(ctx, "test/wrap", deps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ref
+	}
+	tests := []struct {
+		name string
+		root Ref
+		ok   bool
+	}{
+		{"at the bound", wrap(chain[1 : len(chain)-1]), true},
+		{"shallowest first past the bound", wrap(chain[1:]), false},
+		{"deepest first past the bound", wrap(reversed(chain[1:])), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := s.Closure(ctx, []Ref{tt.root}, DefaultClosureBound)
+			var bounded *ClosureError
+			if tt.ok != (err == nil) || (!tt.ok && (!errors.As(err, &bounded) || bounded.Bound != BoundDepth)) {
+				t.Fatalf("Closure = %v, want ok=%v or a depth bound", err, tt.ok)
+			}
+			if _, err := s.Complete(ctx, []Ref{tt.root}); tt.ok != (err == nil) {
+				t.Fatalf("Complete = %v, want ok=%v", err, tt.ok)
 			}
 		})
 	}

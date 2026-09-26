@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -164,6 +165,7 @@ type fakeSource struct {
 	pins      map[string][]artifact.Ref
 	batches   map[artifact.Digest][][]byte
 	block     chan struct{}
+	onRead    func()
 }
 
 func newFakeSource(artifacts bool) *fakeSource {
@@ -273,6 +275,9 @@ func (f *fakeSource) dispatcher() *rpc.Dispatcher {
 	register(d, &f.counter, artifact.MethodBatchRead, func(p artifact.BatchReadParams) (any, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.onRead != nil {
+			f.onRead()
+		}
 		return artifact.BatchReadResult{Data: f.batches[p.ID][p.Index]}, nil
 	})
 	register(d, &f.counter, artifact.MethodBatchDrop, func(p artifact.BatchRef) (any, error) {
@@ -311,6 +316,7 @@ type fakeSink struct {
 	dropPuts     bool
 	loseAck      int
 	onPut        func()
+	onCommit     func()
 	lastApplyKey string
 }
 
@@ -431,6 +437,9 @@ func (k *fakeSink) dispatcher() *rpc.Dispatcher {
 	register(d, &k.counter, artifact.MethodBatchCommit, func(p artifact.BatchRef) (any, error) {
 		k.mu.Lock()
 		defer k.mu.Unlock()
+		if k.onCommit != nil {
+			k.onCommit()
+		}
 		staged := k.incoming[p.ID]
 		var raw []byte
 		for index, part := range staged.batch.Parts {
@@ -748,9 +757,12 @@ func TestDelivererPauseMidTransferStopsWithinOnePart(t *testing.T) {
 	}
 	sink.with(func(k *fakeSink) { k.onPut = nil })
 	h.monitor.set(unrestricted)
-	h.await("peer@node", "resume", acked(2))
+	final := h.await("peer@node", "resume", acked(2))
 	if got := sink.count(artifact.MethodBatchCommit); got != 1 {
 		t.Fatalf("commits after resume = %d, want 1", got)
+	}
+	if got := final.Progress.WireBytesSent; got != 4*artifact.PartSize {
+		t.Fatalf("wire bytes after resume = %d, want %d across both attempts", got, 4*artifact.PartSize)
 	}
 }
 
@@ -1049,5 +1061,77 @@ func TestSharedBatchDropsAfterLastSender(t *testing.T) {
 	}
 	if len(s.batches) != 0 {
 		t.Fatalf("batches = %v, want none held", s.batches)
+	}
+}
+
+func TestDelivererReadmitsAfterReadingEachPart(t *testing.T) {
+	h := newDeliveryHarness(t, true, "peer@node")
+	sink := h.sinks["peer@node"]
+	h.source.publish(2, h.source.blob([]byte("payload")))
+	h.source.onRead = func() {
+		h.monitor.mu.Lock()
+		defer h.monitor.mu.Unlock()
+		h.monitor.state = netpolicy.State{Status: netpolicy.StatusConnected, ManualMetered: true}
+	}
+	h.start()
+	h.await("peer@node", "manual metering pause", pausedWith(delivery.PauseLocalManualMetered))
+	if got := sink.count(artifact.MethodBatchPut); got != 0 {
+		t.Fatalf("puts = %d, want 0 once metering was enabled during the part read", got)
+	}
+}
+
+func TestDelivererSupersedesAfterTheFinalBatch(t *testing.T) {
+	h := newDeliveryHarness(t, true, "peer@node")
+	sink := h.sinks["peer@node"]
+	root := h.source.blob([]byte("payload"))
+	h.source.publish(2, root)
+	var once sync.Once
+	sink.onCommit = func() {
+		once.Do(func() {
+			h.source.publish(3, root)
+			if err := h.sched.Kick("stub", "peer@node"); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	h.start()
+	h.await("peer@node", "ack of the superseding revision", acked(3))
+	if got := sink.count(syncservice.MethodApplyV2); got != 1 {
+		t.Fatalf("applies = %d, want 1: the superseded revision must not be applied", got)
+	}
+}
+
+func TestDelivererCoalescesTheFirstArtifactRun(t *testing.T) {
+	h := newDeliveryHarness(t, true, "peer@node")
+	artifactMaxWait = 400 * time.Millisecond
+	h.source.publish(2, h.source.blob([]byte("payload")))
+	started := time.Now()
+	h.start()
+	h.await("peer@node", "ack", acked(2))
+	if waited := time.Since(started); waited < artifactMaxWait {
+		t.Fatalf("first artifact run acked after %s, want the %s coalescing window", waited, artifactMaxWait)
+	}
+}
+
+func TestUnionRootsKeepsManifestReachability(t *testing.T) {
+	digest := artifact.Sum([]byte("shared"))
+	asBlob := artifact.Ref{Digest: digest, Kind: artifact.KindBlob, Size: 6}
+	asManifest := artifact.Ref{Digest: digest, Kind: artifact.KindManifest, Size: 9}
+	other := artifact.Ref{Digest: artifact.Sum([]byte("other")), Kind: artifact.KindBlob, Size: 5}
+	tests := []struct {
+		name      string
+		old, next []artifact.Ref
+		want      []artifact.Ref
+	}{
+		{"old manifest", []artifact.Ref{asManifest, other}, []artifact.Ref{asBlob}, []artifact.Ref{asManifest, other}},
+		{"next manifest", []artifact.Ref{asBlob}, []artifact.Ref{other, asManifest}, []artifact.Ref{other, asManifest}},
+		{"both blobs", []artifact.Ref{asBlob}, []artifact.Ref{asBlob, other}, []artifact.Ref{asBlob, other}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := unionRoots(tt.old, tt.next); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("unionRoots = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

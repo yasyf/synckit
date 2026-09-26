@@ -282,3 +282,32 @@ func TestGCKeepsAPartialTransferForGCGrace(t *testing.T) {
 		})
 	}
 }
+
+func TestGCToleratesFileContentShapedLikeAManifest(t *testing.T) {
+	s := newStore(t)
+	ctx := t.Context()
+	plain, err := s.PutBlob(ctx, []byte("ordinary bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookalike, err := Manifest{
+		Schema: ManifestSchema, Media: "test/lookalike", Chunks: []ChunkRef{},
+		Deps: []Ref{{Digest: plain.Digest, Kind: KindManifest, Size: 0}},
+	}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := s.Put(ctx, bytes.NewReader(lookalike), "test/file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPins(ctx, "owner", []Ref{file}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GC(ctx); err != nil {
+		t.Fatalf("GC with a young manifest-shaped file = %v", err)
+	}
+	if got := readAll(t, s, file); !bytes.Equal(got, lookalike) {
+		t.Fatalf("file after GC = %q, want %q", got, lookalike)
+	}
+}

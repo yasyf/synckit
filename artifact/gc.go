@@ -26,7 +26,9 @@ type storedObject struct {
 // GC removes every object outside the union of pin closures that has not
 // been written or touched within GCGrace, and every outbox, incoming, or
 // committed batch untouched for StagingTTL. An object younger than GCGrace
-// keeps its whole closure, so no surviving manifest ever loses a child.
+// keeps every object it names whenever its bytes decode as a manifest,
+// transitively and whatever kind or size those names claim, so no surviving
+// manifest ever loses a child and no file content can fail the sweep.
 func (s *Store) GC(ctx context.Context) (GCReport, error) {
 	s.gcMu.Lock()
 	defer s.gcMu.Unlock()
@@ -60,15 +62,8 @@ func (s *Store) GC(ctx context.Context) (GCReport, error) {
 		if !object.young {
 			continue
 		}
-		manifest, err := s.isManifest(object.digest)
-		if err != nil {
-			return GCReport{}, err
-		}
-		if !manifest {
-			continue
-		}
-		if err := w.visit(ctx, Ref{Digest: object.digest, Kind: KindManifest, Size: -1}, 1); err != nil {
-			return GCReport{}, fmt.Errorf("artifact: mark young manifest %s: %w", object.digest, err)
+		if err := s.keepNamed(ctx, w, object.digest); err != nil {
+			return GCReport{}, fmt.Errorf("artifact: mark young object %s: %w", object.digest, err)
 		}
 	}
 	for _, object := range objects {
@@ -141,20 +136,47 @@ func (s *Store) scanObjects(ctx context.Context, cutoff time.Time) ([]storedObje
 	return objects, nil
 }
 
-func (s *Store) isManifest(digest Digest) (bool, error) {
+func (s *Store) keepNamed(ctx context.Context, w *walker, digest Digest) error {
+	pending := []Digest{digest}
+	for len(pending) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		digest := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		reached := w.scope[digest]
+		if reached&(reachedManifest|reachedNamed) != 0 {
+			continue
+		}
+		w.scope[digest] = reached | reachedNamed
+		m, decoded, err := s.sniffManifest(digest)
+		if err != nil {
+			return err
+		}
+		if decoded {
+			pending = append(pending, m.children()...)
+		}
+	}
+	return nil
+}
+
+func (s *Store) sniffManifest(digest Digest) (Manifest, bool, error) {
 	prefix, err := readPrefix(s.objectPath(digest), len(manifestPrefix))
+	if errors.Is(err, os.ErrNotExist) {
+		return Manifest{}, false, nil
+	}
 	if err != nil {
-		return false, fmt.Errorf("artifact: read object %s: %w", digest, err)
+		return Manifest{}, false, fmt.Errorf("artifact: read object %s: %w", digest, err)
 	}
 	if !bytes.Equal(prefix, manifestPrefix) {
-		return false, nil
+		return Manifest{}, false, nil
 	}
 	data, err := s.readObject(digest)
 	if err != nil {
-		return false, err
+		return Manifest{}, false, err
 	}
-	_, err = DecodeManifest(data)
-	return err == nil, nil
+	m, err := DecodeManifest(data)
+	return m, err == nil, nil
 }
 
 func readPrefix(path string, n int) (prefix []byte, err error) {

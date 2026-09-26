@@ -207,3 +207,27 @@ func TestHaveRefusesBeforeDecodingWhileReceiverRestricted(t *testing.T) {
 		t.Fatalf("have = %+v, want a receiver-cellular refusal", result)
 	}
 }
+
+func TestBatchBeginAndPutRefuseBeforeDecodingWhileReceiverRestricted(t *testing.T) {
+	d := rpc.NewDispatcher()
+	Register(d, newStore(t), &fakeMonitor{state: cellular})
+	for method, params := range map[string]map[string]any{
+		MethodBatchBegin: {"batch": "not a descriptor"},
+		MethodBatchPut:   {"id": "bad", "index": -1, "data": "!!not base64!!"},
+	} {
+		response := d.Dispatch(t.Context(), &rpc.Request{Method: method, Params: params})
+		if !response.OK {
+			t.Fatalf("%s = %+v, want the typed refusal", method, response)
+		}
+		var result struct {
+			Peer   netpolicy.State `json:"peer"`
+			Paused *PausedError    `json:"paused"`
+		}
+		if err := json.Unmarshal(response.Result, &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Paused == nil || result.Paused.Code != PauseReceiverCellular || !result.Peer.Cellular {
+			t.Fatalf("%s = %+v, want a receiver-cellular refusal carrying the live state", method, result)
+		}
+	}
+}

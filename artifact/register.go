@@ -10,11 +10,12 @@ import (
 )
 
 // Register binds every artifact method on d to s, each dispatched
-// concurrently. have returns the typed refusal, before decoding its params,
-// while monitor's live State is not unrestricted. batch.begin and batch.put
-// evaluate monitor's live State against the sender's declared State on
-// every call and, unless both are unrestricted, return the typed refusal
-// without writing; both report the receiver's live State.
+// concurrently. have, batch.begin, and batch.put return the typed refusal,
+// before decoding their params, while monitor's live State is not
+// unrestricted. batch.begin and batch.put then evaluate that State against
+// the sender's declared State on every call and, unless both are
+// unrestricted, return the typed refusal without writing; both report the
+// receiver's live State.
 func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
 	d.Register(MethodNetStatus, func(context.Context, map[string]any) (any, error) {
 		state, _ := monitor.Current()
@@ -53,8 +54,15 @@ func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
 	handle(d, MethodBatchDrop, func(ctx context.Context, p BatchRef) (any, error) {
 		return struct{}{}, s.DropBatch(ctx, p.ID)
 	})
-	handle(d, MethodBatchBegin, func(ctx context.Context, p BatchBeginParams) (any, error) {
+	d.Register(MethodBatchBegin, func(ctx context.Context, raw map[string]any) (any, error) {
 		live, _ := monitor.Current()
+		if !live.Unrestricted() {
+			return BatchBeginResult{HaveParts: []int{}, Peer: live, Paused: PausedFor(netpolicy.Evaluate(live, live))}, nil
+		}
+		p, err := decode[BatchBeginParams](raw)
+		if err != nil {
+			return nil, err
+		}
 		if verdict := netpolicy.Evaluate(live, p.Sender); !verdict.Allowed {
 			return BatchBeginResult{HaveParts: []int{}, Peer: live, Paused: PausedFor(verdict)}, nil
 		}
@@ -64,8 +72,15 @@ func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
 		}
 		return BatchBeginResult{HaveParts: held, Peer: live}, nil
 	})
-	handle(d, MethodBatchPut, func(ctx context.Context, p BatchPutParams) (any, error) {
+	d.Register(MethodBatchPut, func(ctx context.Context, raw map[string]any) (any, error) {
 		live, _ := monitor.Current()
+		if !live.Unrestricted() {
+			return BatchPutResult{Peer: live, Paused: PausedFor(netpolicy.Evaluate(live, live))}, nil
+		}
+		p, err := decode[BatchPutParams](raw)
+		if err != nil {
+			return nil, err
+		}
 		if verdict := netpolicy.Evaluate(live, p.Sender); !verdict.Allowed {
 			return BatchPutResult{Peer: live, Paused: PausedFor(verdict)}, nil
 		}
@@ -84,15 +99,20 @@ func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
 
 func handle[P interface{ Validate() error }](d *rpc.Dispatcher, method string, call func(context.Context, P) (any, error)) {
 	d.Register(method, func(ctx context.Context, raw map[string]any) (any, error) {
-		var params P
-		if err := decodeParams(raw, &params); err != nil {
-			return nil, err
-		}
-		if err := params.Validate(); err != nil {
+		params, err := decode[P](raw)
+		if err != nil {
 			return nil, err
 		}
 		return call(ctx, params)
 	})
+}
+
+func decode[P interface{ Validate() error }](raw map[string]any) (P, error) {
+	var params P
+	if err := decodeParams(raw, &params); err != nil {
+		return params, err
+	}
+	return params, params.Validate()
 }
 
 func decodeParams(params map[string]any, target any) error {

@@ -19,7 +19,7 @@ type fakeAcceptStore struct {
 	missing map[artifact.Digest]int
 	pins    map[string][]artifact.Ref
 	log     *[]string
-	fail    func(roots []artifact.Ref) error
+	fail    func(owner string, roots []artifact.Ref) error
 }
 
 func (s *fakeAcceptStore) Complete(_ context.Context, roots []artifact.Ref) (int, error) {
@@ -34,7 +34,7 @@ func (s *fakeAcceptStore) Complete(_ context.Context, roots []artifact.Ref) (int
 func (s *fakeAcceptStore) SetPins(_ context.Context, owner string, roots []artifact.Ref) error {
 	*s.log = append(*s.log, fmt.Sprintf("pin %s %s", owner, refNames(roots)))
 	if s.fail != nil {
-		if err := s.fail(roots); err != nil {
+		if err := s.fail(owner, roots); err != nil {
 			return err
 		}
 	}
@@ -51,6 +51,7 @@ func (s *fakeAcceptStore) Pins(context.Context) ([]artifact.PinSet, error) {
 	for owner, roots := range s.pins {
 		pins = append(pins, artifact.PinSet{Owner: owner, Roots: roots})
 	}
+	slices.SortFunc(pins, func(a, b artifact.PinSet) int { return strings.Compare(a.Owner, b.Owner) })
 	return pins, nil
 }
 
@@ -111,107 +112,107 @@ func TestApplyV2ReadinessPinsAndAck(t *testing.T) {
 	a, b, c := string(applyRoots[0].Digest)[:4], string(applyRoots[1].Digest)[:4], string(applyRoots[2].Digest)[:4]
 	all := refNames(applyRoots)
 	held := []artifact.Ref{{Digest: artifact.Sum([]byte("held")), Kind: artifact.KindBlob, Size: 4}}
-	union := refNames(append(slices.Clone(held), applyRoots...))
+	change := artifactChange(t, 3)
+	owner := acceptedPinPrefix + "host-b/" + change.ChangeID
 	acked := func(change ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: change.SourceRevision} }
 	tests := []struct {
-		name         string
-		missing      map[artifact.Digest]int
-		result       func(ChangeEnvelope) ApplyResult
-		wantErr      string
-		wantReady    string
-		wantAccepted []artifact.Ref
-		wantLog      []string
+		name       string
+		missing    map[artifact.Digest]int
+		result     func(ChangeEnvelope) ApplyResult
+		wantErr    string
+		wantReady  string
+		wantPinned []artifact.Ref
+		wantLog    []string
 	}{
 		{
-			name:         "complete ack",
-			result:       acked,
-			wantReady:    all,
-			wantAccepted: applyRoots,
+			name:       "complete ack",
+			result:     acked,
+			wantReady:  all,
+			wantPinned: applyRoots,
 			wantLog: []string{
-				"pin synckit.accepted/host-b " + union,
+				"pin " + owner + " " + all,
 				"complete " + a, "complete " + b, "complete " + c,
 				"apply " + all,
 				"pin synckit.acked/host-b " + all,
-				"pin synckit.accepted/host-b " + all,
+				"pin " + owner + " []",
 			},
 		},
 		{
-			name:         "partial keeps prior ack",
-			missing:      map[artifact.Digest]int{applyRoots[1].Digest: 2},
-			result:       func(ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: NewRevision(1), Partial: true} },
-			wantReady:    "[" + a + " " + c + "]",
-			wantAccepted: applyRoots,
+			name:       "partial keeps prior ack",
+			missing:    map[artifact.Digest]int{applyRoots[1].Digest: 2},
+			result:     func(ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: NewRevision(1), Partial: true} },
+			wantReady:  "[" + a + " " + c + "]",
+			wantPinned: applyRoots,
 			wantLog: []string{
-				"pin synckit.accepted/host-b " + union,
+				"pin " + owner + " " + all,
 				"complete " + a, "complete " + b, "complete " + c,
 				"apply [" + a + " " + c + "]",
 				"pin synckit.acked/host-b " + all,
-				"pin synckit.accepted/host-b " + all,
+				"pin " + owner + " []",
 			},
 		},
 		{
-			name:         "false ack refused",
-			missing:      map[artifact.Digest]int{applyRoots[2].Digest: 1},
-			result:       acked,
-			wantErr:      ErrIncompleteAck.Error() + ": 2 of 3 roots ready",
-			wantReady:    "[" + a + " " + b + "]",
-			wantAccepted: append(slices.Clone(held), applyRoots...),
+			name:       "false ack refused",
+			missing:    map[artifact.Digest]int{applyRoots[2].Digest: 1},
+			result:     acked,
+			wantErr:    ErrIncompleteAck.Error() + ": 2 of 3 roots ready",
+			wantReady:  "[" + a + " " + b + "]",
+			wantPinned: append(slices.Clone(held), applyRoots...),
 			wantLog: []string{
-				"pin synckit.accepted/host-b " + union,
+				"pin " + owner + " " + all,
 				"complete " + a, "complete " + b, "complete " + c,
 				"apply [" + a + " " + b + "]",
 			},
 		},
 		{
-			name: "stale leaves accepted pins",
+			name: "stale releases the change",
 			result: func(ChangeEnvelope) ApplyResult {
 				return ApplyResult{AckedRevision: NewRevision(9), Stale: true, HeldDigest: "d"}
 			},
-			wantReady:    all,
-			wantAccepted: held,
+			wantReady:  all,
+			wantPinned: held,
 			wantLog: []string{
-				"pin synckit.accepted/host-b " + union,
+				"pin " + owner + " " + all,
 				"complete " + a, "complete " + b, "complete " + c,
 				"apply " + all,
-				"pin synckit.accepted/host-b " + refNames(held),
+				"pin " + owner + " []",
 			},
 		},
 		{
-			name: "stale at the source revision leaves accepted pins",
+			name: "stale at the source revision releases the change",
 			result: func(change ChangeEnvelope) ApplyResult {
 				return ApplyResult{AckedRevision: change.SourceRevision, Stale: true, HeldDigest: "d"}
 			},
-			wantReady:    all,
-			wantAccepted: held,
+			wantReady:  all,
+			wantPinned: held,
 			wantLog: []string{
-				"pin synckit.accepted/host-b " + union,
+				"pin " + owner + " " + all,
 				"complete " + a, "complete " + b, "complete " + c,
 				"apply " + all,
-				"pin synckit.accepted/host-b " + refNames(held),
+				"pin " + owner + " []",
 			},
 		},
 		{
-			name:         "need snapshot leaves accepted pins",
-			missing:      map[artifact.Digest]int{applyRoots[0].Digest: 1},
-			result:       func(ChangeEnvelope) ApplyResult { return ApplyResult{NeedSnapshot: true} },
-			wantReady:    "[" + b + " " + c + "]",
-			wantAccepted: held,
+			name:       "need snapshot releases the change",
+			missing:    map[artifact.Digest]int{applyRoots[0].Digest: 1},
+			result:     func(ChangeEnvelope) ApplyResult { return ApplyResult{NeedSnapshot: true} },
+			wantReady:  "[" + b + " " + c + "]",
+			wantPinned: held,
 			wantLog: []string{
-				"pin synckit.accepted/host-b " + union,
+				"pin " + owner + " " + all,
 				"complete " + a, "complete " + b, "complete " + c,
 				"apply [" + b + " " + c + "]",
-				"pin synckit.accepted/host-b " + refNames(held),
+				"pin " + owner + " []",
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var log []string
-			store := &fakeAcceptStore{missing: tt.missing, pins: map[string][]artifact.Ref{"synckit.accepted/host-b": held, "synckit.acked/host-b": held}, log: &log}
+			store := &fakeAcceptStore{missing: tt.missing, pins: map[string][]artifact.Ref{"synckit.acked/host-b": held}, log: &log}
 			consumer := &fakeArtifactConsumer{result: tt.result, log: &log}
 			dispatcher := rpc.NewDispatcher()
 			registerArtifactConsumer(dispatcher, consumer, store, staticMonitor{state: connectedState})
-			change := artifactChange(t, 3)
 
 			got, err := NewClient(directTransport{dispatcher}).ApplyV2(t.Context(), change)
 			if tt.wantErr != "" {
@@ -224,8 +225,8 @@ func TestApplyV2ReadinessPinsAndAck(t *testing.T) {
 			if refNames(consumer.ready) != tt.wantReady {
 				t.Errorf("consumer ready = %s, want %s", refNames(consumer.ready), tt.wantReady)
 			}
-			if !reflect.DeepEqual(store.pins["synckit.accepted/host-b"], tt.wantAccepted) {
-				t.Errorf("accepted pins = %s, want %s", refNames(store.pins["synckit.accepted/host-b"]), refNames(tt.wantAccepted))
+			if got, want := pinnedUnion(store), sortedNames(tt.wantPinned); got != want {
+				t.Errorf("pinned roots = %s, want %s", got, want)
 			}
 			if !reflect.DeepEqual(log, tt.wantLog) {
 				t.Errorf("call log = %q, want %q", log, tt.wantLog)
@@ -245,15 +246,15 @@ func TestApplyV2FalseAckIsIncompleteAck(t *testing.T) {
 	if !errors.Is(err, ErrIncompleteAck) {
 		t.Fatalf("applyArtifacts() = %v, want ErrIncompleteAck", err)
 	}
-	if got := refNames(store.pins["synckit.accepted/host-b"]); got != refNames(applyRoots) {
-		t.Fatalf("accepted pins after a refused ack = %s, want every root still pinned", got)
+	if got := pinnedUnion(store); got != sortedNames(applyRoots) {
+		t.Fatalf("pinned roots after a refused ack = %s, want every root still pinned", got)
 	}
 }
 
-func TestApplyV2AcceptedPinsHoldOnlyAckedAndCurrentRoots(t *testing.T) {
+func TestApplyV2ReleasesFailedChangesAndKeepsInterruptedAcks(t *testing.T) {
 	var log []string
 	held := []artifact.Ref{{Digest: artifact.Sum([]byte("held")), Kind: artifact.KindBlob, Size: 4}}
-	store := &fakeAcceptStore{pins: map[string][]artifact.Ref{"synckit.accepted/host-b": held, "synckit.acked/host-b": held}, log: &log}
+	store := &fakeAcceptStore{pins: map[string][]artifact.Ref{"synckit.acked/host-b": held}, log: &log}
 	consumer := &fakeArtifactConsumer{
 		result: func(change ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: change.SourceRevision} },
 		log:    &log,
@@ -264,10 +265,10 @@ func TestApplyV2AcceptedPinsHoldOnlyAckedAndCurrentRoots(t *testing.T) {
 			{Digest: artifact.Sum([]byte(label + "-2")), Kind: artifact.KindManifest, Size: 9},
 		}
 	}
-	assertPins := func(step string, wantAccepted, wantAcked []artifact.Ref) {
+	assertPins := func(step string, wantPinned, wantAcked []artifact.Ref) {
 		t.Helper()
-		if got := store.pins["synckit.accepted/host-b"]; !reflect.DeepEqual(got, wantAccepted) {
-			t.Fatalf("%s: accepted pins = %s, want %s", step, refNames(got), refNames(wantAccepted))
+		if got, want := pinnedUnion(store), sortedNames(wantPinned); got != want {
+			t.Fatalf("%s: pinned roots = %s, want %s", step, got, want)
 		}
 		if got := store.pins["synckit.acked/host-b"]; !reflect.DeepEqual(got, wantAcked) {
 			t.Fatalf("%s: acked pins = %s, want %s", step, refNames(got), refNames(wantAcked))
@@ -281,36 +282,40 @@ func TestApplyV2AcceptedPinsHoldOnlyAckedAndCurrentRoots(t *testing.T) {
 		if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, uint64(10+i), roots)); !errors.Is(err, failed) {
 			t.Fatalf("failing apply %d = %v, want the consumer failure", i, err)
 		}
-		assertPins(fmt.Sprintf("failing apply %d", i), slices.Concat(held, roots), held)
+		assertPins(fmt.Sprintf("failing apply %d", i), held, held)
 	}
 	consumer.err = nil
 
 	recordFailed := errors.New("record acked roots failed")
-	store.fail = func(roots []artifact.Ref) error {
-		if refNames(roots) == refNames(applyRoots) {
+	store.fail = func(owner string, _ []artifact.Ref) error {
+		if owner == ackedPinPrefix+"host-b" {
 			return recordFailed
 		}
 		return nil
 	}
-	if _, err := applyArtifacts(t.Context(), consumer, store, artifactChange(t, 20)); !errors.Is(err, recordFailed) {
+	interrupted := artifactChange(t, 20)
+	if _, err := applyArtifacts(t.Context(), consumer, store, interrupted); !errors.Is(err, recordFailed) {
 		t.Fatalf("interrupted ack = %v, want the record failure", err)
 	}
 	store.fail = nil
 	assertPins("interrupted ack", slices.Concat(held, applyRoots), held)
 
-	next := rootsOf("next")
 	consumer.err = failed
-	if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, 21, next)); !errors.Is(err, failed) {
+	if _, err := applyArtifacts(t.Context(), consumer, store, interrupted); !errors.Is(err, failed) {
+		t.Fatalf("failing retry of the interrupted ack = %v, want the consumer failure", err)
+	}
+	assertPins("failing retry of the interrupted ack", slices.Concat(held, applyRoots), held)
+	if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, 21, rootsOf("next"))); !errors.Is(err, failed) {
 		t.Fatalf("apply after an interrupted ack = %v, want the consumer failure", err)
 	}
-	assertPins("apply after an interrupted ack", slices.Concat(held, next), held)
+	assertPins("apply after an interrupted ack", slices.Concat(held, applyRoots), held)
 	consumer.err = nil
 
 	consumer.result = func(ChangeEnvelope) ApplyResult { return ApplyResult{NeedSnapshot: true} }
 	if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, 22, rootsOf("snapshot"))); err != nil {
 		t.Fatal(err)
 	}
-	assertPins("need snapshot", held, held)
+	assertPins("need snapshot", slices.Concat(held, applyRoots), held)
 
 	consumer.result = func(change ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: change.SourceRevision} }
 	final := rootsOf("final")
@@ -319,12 +324,11 @@ func TestApplyV2AcceptedPinsHoldOnlyAckedAndCurrentRoots(t *testing.T) {
 	}
 	assertPins("ack", final, final)
 
-	later := rootsOf("later")
 	consumer.err = failed
-	if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, 24, later)); !errors.Is(err, failed) {
+	if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, 24, rootsOf("later"))); !errors.Is(err, failed) {
 		t.Fatalf("apply after the ack = %v, want the consumer failure", err)
 	}
-	assertPins("failing apply after the ack", slices.Concat(final, later), final)
+	assertPins("failing apply after the ack", final, final)
 }
 
 func TestArtifactConsumerRefusesArtifactsOnV1(t *testing.T) {
@@ -443,22 +447,22 @@ func TestRegisterArtifactConsumerWithStore(t *testing.T) {
 	ack := func(change ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: change.SourceRevision} }
 	partial := func(ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: NewRevision(0), Partial: true} }
 	tests := []struct {
-		name         string
-		roots        []artifact.Ref
-		result       func(ChangeEnvelope) ApplyResult
-		wantErr      string
-		wantReady    []artifact.Ref
-		wantAccepted []artifact.Ref
+		name       string
+		roots      []artifact.Ref
+		result     func(ChangeEnvelope) ApplyResult
+		wantErr    string
+		wantReady  []artifact.Ref
+		wantPinned []artifact.Ref
 	}{
-		{name: "complete ack", roots: []artifact.Ref{presentRef}, result: ack, wantReady: []artifact.Ref{presentRef}, wantAccepted: []artifact.Ref{presentRef}},
+		{name: "complete ack", roots: []artifact.Ref{presentRef}, result: ack, wantReady: []artifact.Ref{presentRef}, wantPinned: []artifact.Ref{presentRef}},
 		{
 			name: "absent root refuses ack", roots: []artifact.Ref{presentRef, absent}, result: ack,
 			wantErr: fmt.Sprintf("%s: %v: 1 of 2 roots ready", MethodApplyV2, ErrIncompleteAck), wantReady: []artifact.Ref{presentRef},
-			wantAccepted: []artifact.Ref{presentRef, absent},
+			wantPinned: []artifact.Ref{presentRef, absent},
 		},
 		{
 			name: "absent root partial", roots: []artifact.Ref{presentRef, absent}, result: partial,
-			wantReady: []artifact.Ref{presentRef}, wantAccepted: []artifact.Ref{presentRef, absent},
+			wantReady: []artifact.Ref{presentRef}, wantPinned: []artifact.Ref{presentRef, absent},
 		},
 	}
 	for _, tt := range tests {
@@ -503,14 +507,12 @@ func TestRegisterArtifactConsumerWithStore(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var accepted []artifact.Ref
+			var pinned []artifact.Ref
 			for _, pin := range pins {
-				if pin.Owner == "synckit.accepted/host-b" {
-					accepted = pin.Roots
-				}
+				pinned = append(pinned, pin.Roots...)
 			}
-			if !reflect.DeepEqual(accepted, tt.wantAccepted) {
-				t.Errorf("accepted pins = %s, want %s", refNames(accepted), refNames(tt.wantAccepted))
+			if got, want := sortedNames(pinned), sortedNames(tt.wantPinned); got != want {
+				t.Errorf("pinned roots = %s, want %s", got, want)
 			}
 		})
 	}
@@ -557,5 +559,123 @@ func TestArtifactChangesMustBeSnapshots(t *testing.T) {
 				t.Fatalf("Validate = %v, want error %t", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestApplyV2KeepsCommittedRootsAfterAnInterruptedAck(t *testing.T) {
+	rootsOf := func(label string) []artifact.Ref {
+		return []artifact.Ref{
+			{Digest: artifact.Sum([]byte(label + "-1")), Kind: artifact.KindBlob, Size: 4},
+			{Digest: artifact.Sum([]byte(label + "-2")), Kind: artifact.KindManifest, Size: 9},
+		}
+	}
+	held := rootsOf("held")
+	committed := rootsOf("committed")
+	failed := errors.New("apply failed")
+	tests := []struct {
+		name   string
+		result func(ChangeEnvelope) ApplyResult
+		err    error
+	}{
+		{name: "next apply fails", err: failed},
+		{name: "next apply refused", result: func(ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: NewRevision(20)} }},
+		{name: "next apply stale", result: func(ChangeEnvelope) ApplyResult {
+			return ApplyResult{AckedRevision: NewRevision(20), Stale: true, HeldDigest: "d"}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var log []string
+			store := &fakeAcceptStore{pins: map[string][]artifact.Ref{}, log: &log}
+			consumer := &fakeArtifactConsumer{
+				result: func(change ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: change.SourceRevision} },
+				log:    &log,
+			}
+			if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, 10, held)); err != nil {
+				t.Fatal(err)
+			}
+			recordFailed := errors.New("record acked roots failed")
+			store.fail = func(owner string, roots []artifact.Ref) error {
+				if owner == ackedPinPrefix+"host-b" && refNames(roots) == refNames(committed) {
+					return recordFailed
+				}
+				return nil
+			}
+			if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, 20, committed)); !errors.Is(err, recordFailed) {
+				t.Fatalf("interrupted ack = %v, want the record failure", err)
+			}
+			store.fail = nil
+			consumer.result, consumer.err = tt.result, tt.err
+			if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, 30, rootsOf("next"))); !errors.Is(err, tt.err) {
+				t.Fatalf("next apply = %v, want %v", err, tt.err)
+			}
+			if got, want := pinnedUnion(store), sortedNames(slices.Concat(held, committed)); got != want {
+				t.Fatalf("pinned roots = %s, want %s: the consumer holds the interrupted change", got, want)
+			}
+			consumer.result = func(change ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: change.SourceRevision} }
+			consumer.err = nil
+			final := rootsOf("final")
+			if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, 40, final)); err != nil {
+				t.Fatal(err)
+			}
+			if got := pinnedUnion(store); got != sortedNames(final) {
+				t.Fatalf("pinned roots after the next ack = %s, want %s", got, refNames(final))
+			}
+		})
+	}
+}
+
+func pinnedUnion(store *fakeAcceptStore) string {
+	pins, _ := store.Pins(context.Background())
+	seen := map[artifact.Digest]bool{}
+	var union []artifact.Ref
+	for _, pin := range pins {
+		for _, root := range pin.Roots {
+			if !seen[root.Digest] {
+				seen[root.Digest] = true
+				union = append(union, root)
+			}
+		}
+	}
+	return sortedNames(union)
+}
+
+func sortedNames(refs []artifact.Ref) string {
+	sorted := slices.Clone(refs)
+	slices.SortFunc(sorted, func(a, b artifact.Ref) int { return strings.Compare(string(a.Digest), string(b.Digest)) })
+	return refNames(sorted)
+}
+
+func TestApplyV2PinsKeepAManifestRootSharingABlobDigest(t *testing.T) {
+	var log []string
+	store := &fakeAcceptStore{pins: map[string][]artifact.Ref{}, log: &log}
+	consumer := &fakeArtifactConsumer{
+		result: func(change ChangeEnvelope) ApplyResult { return ApplyResult{AckedRevision: change.SourceRevision} },
+		log:    &log,
+	}
+	digest := artifact.Sum([]byte("shared"))
+	asBlob := []artifact.Ref{{Digest: digest, Kind: artifact.KindBlob, Size: 6}}
+	asManifest := []artifact.Ref{{Digest: digest, Kind: artifact.KindManifest, Size: 9}}
+	if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, 10, asBlob)); err != nil {
+		t.Fatal(err)
+	}
+	consumer.err = errors.New("apply failed")
+	if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, 20, asManifest)); err == nil {
+		t.Fatal("apply = nil, want the consumer failure")
+	}
+	consumer.err = nil
+	var seen []artifact.Ref
+	consumer.result = func(change ChangeEnvelope) ApplyResult {
+		pins, _ := store.Pins(context.Background())
+		for _, pin := range pins {
+			seen = append(seen, pin.Roots...)
+		}
+		return ApplyResult{AckedRevision: change.SourceRevision}
+	}
+	if _, err := applyArtifacts(t.Context(), consumer, store, artifactChangeOf(t, 30, asManifest)); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(seen, asManifest[0]) {
+		t.Fatalf("pins during the manifest apply = %v, want the manifest interpretation of %s", seen, digest)
 	}
 }
