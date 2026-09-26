@@ -479,6 +479,13 @@ func (s *Store) publishLevel(landing string, landed []Digest, levels map[Digest]
 			continue
 		}
 		releases = append(releases, s.claim(digest))
+		present, err := s.touch(digest)
+		if err != nil {
+			return errors.Join(err, s.unpublish(landing, published))
+		}
+		if present {
+			continue
+		}
 		target := s.objectPath(digest)
 		if err := os.Rename(filepath.Join(landing, string(digest)), target); err != nil {
 			return errors.Join(fmt.Errorf("artifact: publish object %s: %w", digest, err), s.unpublish(landing, published))
@@ -494,16 +501,20 @@ func (s *Store) publishLevel(landing string, landed []Digest, levels map[Digest]
 	if err := flushBarrier(landing); err != nil {
 		return errors.Join(fmt.Errorf("artifact: flush published objects: %w", err), s.unpublish(landing, published))
 	}
+	s.markSynced(published...)
 	return nil
 }
 
 func (s *Store) unpublish(landing string, published []Digest) error {
 	var errs []error
+	var stranded []Digest
 	for _, digest := range published {
 		if err := os.Rename(s.objectPath(digest), filepath.Join(landing, string(digest))); err != nil {
+			stranded = append(stranded, digest)
 			errs = append(errs, fmt.Errorf("artifact: withdraw unsynced object %s: %w", digest, err))
 		}
 	}
+	s.markUnsynced(stranded)
 	return errors.Join(errs...)
 }
 

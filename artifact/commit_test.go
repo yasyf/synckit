@@ -3,6 +3,8 @@ package artifact
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -248,5 +250,84 @@ func TestCommitBatchHidesObjectsUntilTheirDirectoriesAreDurable(t *testing.T) {
 				t.Fatalf("Verify after the retry = %v", err)
 			}
 		})
+	}
+}
+
+func TestCommitBatchRollbackSparesAConcurrentlyPublishedObject(t *testing.T) {
+	src, dst := newStore(t), newStore(t)
+	content := randomBytes(11, 512)
+	root, err := src.Put(t.Context(), bytes.NewReader(content), "test/blob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := stageBatch(t, src, dst, closureEntries(t, src, []Ref{root}))
+	t.Cleanup(func() { flushBarrier = fullSyncDir })
+	lost := errors.New("barrier failed")
+	var stored Ref
+	barriers := 0
+	flushBarrier = func(dir string) error {
+		barriers++
+		switch barriers {
+		case 1:
+			if stored, err = dst.Put(t.Context(), bytes.NewReader(content), "test/blob"); err != nil {
+				return err
+			}
+		case 2:
+			return lost
+		}
+		return fullSyncDir(dir)
+	}
+	if _, err := dst.CommitBatch(t.Context(), d.ID); !errors.Is(err, lost) {
+		t.Fatalf("CommitBatch = %v, want the barrier failure", err)
+	}
+	if n, err := dst.Complete(t.Context(), []Ref{stored}); err != nil || n != 0 {
+		t.Fatalf("Complete of the concurrently stored root = %d, %v; want 0 missing", n, err)
+	}
+}
+
+func TestCommitBatchKeepsAStrandedObjectHiddenUntilItIsDurable(t *testing.T) {
+	src, dst := newStore(t), newStore(t)
+	root, err := src.Put(t.Context(), bytes.NewReader(randomBytes(13, 512)), "test/blob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := closureEntries(t, src, []Ref{root})
+	digests := make([]Digest, len(objects))
+	for i, object := range objects {
+		digests[i] = object.Digest
+	}
+	d := stageBatch(t, src, dst, objects)
+	landing := filepath.Join(dst.root, incomingDir, string(d.ID), landingDir)
+	t.Cleanup(func() {
+		syncObjectDir = syncDir
+		_ = os.Chmod(landing, dirPerm)
+	})
+	lost := errors.New("directory fsync failed")
+	syncObjectDir = func(string) error {
+		if err := os.Chmod(landing, 0o400); err != nil {
+			return err
+		}
+		return lost
+	}
+	if _, err := dst.CommitBatch(t.Context(), d.ID); !errors.Is(err, lost) {
+		t.Fatalf("CommitBatch = %v, want the sync failure", err)
+	}
+	if err := os.Chmod(landing, dirPerm); err != nil {
+		t.Fatal(err)
+	}
+	if missing, err := dst.Has(t.Context(), digests); err != nil || !reflect.DeepEqual(missing, digests) {
+		t.Fatalf("Has after a failed withdrawal = %v, %v; want %v missing", missing, err, digests)
+	}
+	syncs := 0
+	syncObjectDir = func(dir string) error {
+		syncs++
+		return syncDir(dir)
+	}
+	report, err := dst.CommitBatch(t.Context(), d.ID)
+	if err != nil || report.Present != 0 || syncs == 0 {
+		t.Fatalf("retried CommitBatch = %+v, %v after %d directory syncs; want every object republished and synced", report, err, syncs)
+	}
+	if err := dst.Verify(t.Context(), []Ref{root}); err != nil {
+		t.Fatalf("Verify after the retry = %v", err)
 	}
 }

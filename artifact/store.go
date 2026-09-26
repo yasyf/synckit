@@ -58,6 +58,7 @@ type Reader struct {
 	memo       []closureMemo
 	publishMu  sync.Mutex
 	publishing map[Digest]chan struct{}
+	unsynced   map[Digest]struct{}
 }
 
 type closureMemo struct {
@@ -112,7 +113,7 @@ func Open(root string) (*Store, error) {
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("artifact: open %s: %w", root, err), lock.Close())
 	}
-	return &Store{Reader: &Reader{root: root, publishing: map[Digest]chan struct{}{}}, lock: lock, encoder: encoder}, nil
+	return &Store{Reader: &Reader{root: root, publishing: map[Digest]chan struct{}{}, unsynced: map[Digest]struct{}{}}, lock: lock, encoder: encoder}, nil
 }
 
 // Close releases store.lock.
@@ -186,7 +187,8 @@ func (r *Reader) inFlight(digest Digest) bool {
 	r.publishMu.Lock()
 	defer r.publishMu.Unlock()
 	_, publishing := r.publishing[digest]
-	return publishing
+	_, unsynced := r.unsynced[digest]
+	return publishing || unsynced
 }
 
 func (r *Reader) stat(digest Digest) (fs.FileInfo, error) {
@@ -248,6 +250,9 @@ func checkManifestSize(digest Digest, m Manifest, size int64) error {
 }
 
 func (s *Store) touch(digest Digest) (bool, error) {
+	if s.isUnsynced(digest) {
+		return false, nil
+	}
 	path := s.objectPath(digest)
 	_, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -261,6 +266,29 @@ func (s *Store) touch(digest Digest) (bool, error) {
 		return false, fmt.Errorf("artifact: touch object %s: %w", digest, err)
 	}
 	return true, nil
+}
+
+func (s *Store) isUnsynced(digest Digest) bool {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	_, unsynced := s.unsynced[digest]
+	return unsynced
+}
+
+func (s *Store) markUnsynced(digests []Digest) {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	for _, digest := range digests {
+		s.unsynced[digest] = struct{}{}
+	}
+}
+
+func (s *Store) markSynced(digests ...Digest) {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	for _, digest := range digests {
+		delete(s.unsynced, digest)
+	}
 }
 
 func (s *Store) claim(digest Digest) func() {
@@ -293,6 +321,7 @@ func (s *Store) writeObject(digest Digest, data []byte) (bool, error) {
 	if err := durable.WriteFile(s.objectPath(digest), data, filePerm); err != nil {
 		return false, fmt.Errorf("artifact: write object %s: %w", digest, err)
 	}
+	s.markSynced(digest)
 	return true, nil
 }
 
