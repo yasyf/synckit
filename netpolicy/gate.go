@@ -9,8 +9,11 @@ import (
 // RemoteFunc fetches the peer's current State over the policy control channel.
 type RemoteFunc func(ctx context.Context) (State, error)
 
+const restrictedMidTransfer = "local: restricted mid-transfer"
+
 // PausedError reports that the cost policy paused bulk transfer; Reason is the
-// blocking Verdict's Reason.
+// blocking Verdict's Reason, or "local: restricted mid-transfer" when this
+// host's State was restricted at some point after Wait admitted the transfer.
 type PausedError struct {
 	Reason string
 }
@@ -34,13 +37,18 @@ func NewGate(monitor Monitor, poll time.Duration) *Gate {
 	return &Gate{monitor: monitor, poll: poll}
 }
 
-// Check runs before each chunk: it returns ctx's error once cancelled, a
-// *PausedError when the policy blocks local against remote, and nil otherwise.
-func (g *Gate) Check(ctx context.Context, remote State) error {
+// Check runs before each chunk of a transfer Wait admitted, with admitted the
+// local State Wait returned: it returns ctx's error once cancelled, a
+// *PausedError when the policy blocks local against remote or local was
+// restricted at any point since admitted, and nil otherwise.
+func (g *Gate) Check(ctx context.Context, admitted, remote State) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	local, _ := g.monitor.Current()
+	if local.Unrestricted() && local.RestrictedEpoch != admitted.RestrictedEpoch {
+		return &PausedError{Reason: restrictedMidTransfer}
+	}
 	if v := Evaluate(local, remote); !v.Allowed {
 		return &PausedError{Reason: v.Reason}
 	}
@@ -48,23 +56,24 @@ func (g *Gate) Check(ctx context.Context, remote State) error {
 }
 
 // Wait blocks until the policy allows bulk transfer, re-evaluating on every
-// local path change, manual setting edit, and poll, and returns the remote
-// State that allowed it. A remote fetch error ends the wait.
-func (g *Gate) Wait(ctx context.Context, remote RemoteFunc) (State, error) {
+// local path change, manual setting edit, and poll, and returns the local and
+// remote States that allowed it; the transfer passes local to every Check. A
+// remote fetch error ends the wait.
+func (g *Gate) Wait(ctx context.Context, remote RemoteFunc) (local, peer State, err error) {
 	ticker := time.NewTicker(g.poll)
 	defer ticker.Stop()
 	for {
-		local, changed := g.monitor.Current()
-		peer, err := remote(ctx)
-		if err != nil {
-			return State{}, fmt.Errorf("fetch remote network state: %w", err)
+		var changed <-chan struct{}
+		local, changed = g.monitor.Current()
+		if peer, err = remote(ctx); err != nil {
+			return State{}, State{}, fmt.Errorf("fetch remote network state: %w", err)
 		}
 		if Evaluate(local, peer).Allowed {
-			return peer, nil
+			return local, peer, nil
 		}
 		select {
 		case <-ctx.Done():
-			return State{}, ctx.Err()
+			return State{}, State{}, ctx.Err()
 		case <-changed:
 		case <-ticker.C:
 		}

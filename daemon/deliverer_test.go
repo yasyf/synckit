@@ -38,6 +38,7 @@ type fakeMonitor struct {
 	mu      sync.Mutex
 	state   netpolicy.State
 	changed chan struct{}
+	reads   int
 }
 
 func newFakeMonitor(state netpolicy.State) *fakeMonitor {
@@ -47,6 +48,7 @@ func newFakeMonitor(state netpolicy.State) *fakeMonitor {
 func (m *fakeMonitor) Current() (netpolicy.State, <-chan struct{}) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.reads++
 	return m.state, m.changed
 }
 
@@ -56,6 +58,37 @@ func (m *fakeMonitor) set(state netpolicy.State) {
 	m.state = state
 	close(m.changed)
 	m.changed = make(chan struct{})
+}
+
+func (m *fakeMonitor) pulse() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.RestrictedEpoch++
+	close(m.changed)
+	m.changed = make(chan struct{})
+}
+
+func (m *fakeMonitor) pulseUnwatched() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.RestrictedEpoch++
+}
+
+func (m *fakeMonitor) awaitReads(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		m.mu.Lock()
+		reads := m.reads
+		m.mu.Unlock()
+		if reads >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("monitor read %d times, want %d", reads, n)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func (*fakeMonitor) Close() error { return nil }
@@ -1093,6 +1126,135 @@ func TestDelivererReadmitsAfterReadingEachPart(t *testing.T) {
 	h.await("peer@node", "manual metering pause", pausedWith(delivery.PauseLocalManualMetered))
 	if got := sink.count(artifact.MethodBatchPut); got != 0 {
 		t.Fatalf("puts = %d, want 0 once metering was enabled during the part read", got)
+	}
+}
+
+func TestDelivererRestartsAfterAClearedRestriction(t *testing.T) {
+	tests := []struct {
+		name        string
+		arm         func(h *deliveryHarness, release chan struct{})
+		putsAtPause int
+	}{
+		{
+			name: "watched pulse during a put",
+			arm: func(h *deliveryHarness, release chan struct{}) {
+				var once sync.Once
+				h.sinks["peer@node"].onPut = func() {
+					once.Do(func() {
+						h.source.mu.Lock()
+						h.source.block = release
+						h.source.mu.Unlock()
+						h.monitor.pulse()
+					})
+				}
+			},
+			putsAtPause: 1,
+		},
+		{
+			name: "unwatched pulse during a part read",
+			arm: func(h *deliveryHarness, release chan struct{}) {
+				var once sync.Once
+				h.source.onRead = func() {
+					once.Do(func() {
+						h.source.block = release
+						h.monitor.pulseUnwatched()
+					})
+				}
+			},
+			putsAtPause: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newDeliveryHarness(t, true, "peer@node")
+			sink := h.sinks["peer@node"]
+			h.monitor.state.RestrictedEpoch = 5
+			h.source.publish(2, h.source.blob([]byte("payload")))
+			release := make(chan struct{})
+			tt.arm(h, release)
+			h.start()
+			h.await("peer@node", "restart after the cleared restriction", pausedWith(delivery.PauseLocalRestrictedMidTransfer))
+			if got := sink.count(artifact.MethodBatchPut); got != tt.putsAtPause {
+				t.Fatalf("puts at the pause = %d, want %d", got, tt.putsAtPause)
+			}
+			if got := sink.count(artifact.MethodBatchCommit, syncservice.MethodApplyV2); got != 0 {
+				t.Fatalf("interrupted transfer made %d commit/apply calls, want 0", got)
+			}
+			close(release)
+			h.await("peer@node", "ack after the restart", acked(2))
+			if got := sink.count(artifact.MethodNetStatus); got != 2 {
+				t.Fatalf("net.status calls = %d, want 2: the restart re-admits the transfer", got)
+			}
+			if got := sink.count(artifact.MethodBatchPut); got != 1 {
+				t.Fatalf("puts = %d, want the one part sent once", got)
+			}
+		})
+	}
+}
+
+func TestDelivererContinuesThroughAnUnrestrictedPathChange(t *testing.T) {
+	h := newDeliveryHarness(t, true, "peer@node")
+	sink := h.sinks["peer@node"]
+	admitted := netpolicy.State{Status: netpolicy.StatusConnected, RestrictedEpoch: 5}
+	h.monitor.state = admitted
+	roots := make([]artifact.Ref, 0, 2)
+	for range 2 {
+		chunk := make([]byte, artifact.ChunkSize)
+		_, _ = rand.Read(chunk)
+		roots = append(roots, h.source.blob(chunk))
+	}
+	h.source.publish(2, roots...)
+	var once sync.Once
+	sink.onPut = func() { once.Do(func() { h.monitor.set(admitted) }) }
+	h.start()
+	h.await("peer@node", "ack", acked(2))
+	if got := sink.count(artifact.MethodNetStatus); got != 1 {
+		t.Fatalf("net.status calls = %d, want 1: the transfer continues under its admission", got)
+	}
+	if got := sink.count(artifact.MethodBatchPut); got != 2 {
+		t.Fatalf("puts = %d, want 2", got)
+	}
+}
+
+func TestWatchLocalCancelsOnARestrictionSinceAdmission(t *testing.T) {
+	admitted := netpolicy.State{Status: netpolicy.StatusConnected, RestrictedEpoch: 5}
+	tests := []struct {
+		name   string
+		change func(*fakeMonitor)
+		want   delivery.PauseReason
+	}{
+		{"restriction cleared before the read", (*fakeMonitor).pulse, delivery.PauseLocalRestrictedMidTransfer},
+		{"restricted", func(m *fakeMonitor) {
+			m.set(netpolicy.State{Status: netpolicy.StatusConnected, Cellular: true, RestrictedEpoch: 6})
+		}, delivery.PauseLocalCellular},
+		{"unrestricted path change", func(m *fakeMonitor) { m.set(admitted) }, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newFakeMonitor(admitted)
+			r := &deliveryRun{s: &deliveryScheduler{monitor: m}, admittedEpoch: admitted.RestrictedEpoch}
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			stop := make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				r.watchLocal(ctx, cancel, stop)
+			}()
+			m.awaitReads(t, 1)
+			tt.change(m)
+			m.awaitReads(t, 2)
+			close(stop)
+			<-done
+			cause := context.Cause(ctx)
+			var paused *pauseError
+			switch {
+			case tt.want == "" && cause != nil:
+				t.Fatalf("watcher cancelled with %v, want the transfer to continue", cause)
+			case tt.want != "" && (!errors.As(cause, &paused) || paused.reason != tt.want):
+				t.Fatalf("watcher cause = %v, want pause %s", cause, tt.want)
+			}
+		})
 	}
 }
 

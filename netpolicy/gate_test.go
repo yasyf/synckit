@@ -38,6 +38,7 @@ func staticRemote(s State) RemoteFunc {
 }
 
 type waitResult struct {
+	local  State
 	remote State
 	err    error
 }
@@ -45,8 +46,8 @@ type waitResult struct {
 func startWait(ctx context.Context, g *Gate, remote RemoteFunc) <-chan waitResult {
 	done := make(chan waitResult, 1)
 	go func() {
-		peer, err := g.Wait(ctx, remote)
-		done <- waitResult{peer, err}
+		local, peer, err := g.Wait(ctx, remote)
+		done <- waitResult{local, peer, err}
 	}()
 	return done
 }
@@ -54,13 +55,16 @@ func startWait(ctx context.Context, g *Gate, remote RemoteFunc) <-chan waitResul
 func TestGateCheckPausesMidLoop(t *testing.T) {
 	m, _ := newFakeMonitor(t, connected)
 	g := NewGate(m, time.Hour)
+	admitted, peer, err := g.Wait(context.Background(), staticRemote(connected))
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
 	sent := 0
-	var err error
 	for chunk := range 5 {
 		if chunk == 2 {
 			m.publish(State{Status: StatusConnected, Cellular: true})
 		}
-		if err = g.Check(context.Background(), connected); err != nil {
+		if err = g.Check(context.Background(), admitted, peer); err != nil {
 			break
 		}
 		sent++
@@ -74,6 +78,45 @@ func TestGateCheckPausesMidLoop(t *testing.T) {
 	}
 	if sent != 2 {
 		t.Errorf("sent %d chunks, want 2", sent)
+	}
+}
+
+func TestGateCheckPausesAfterAClearedRestriction(t *testing.T) {
+	tests := []struct {
+		name       string
+		change     func(t *testing.T, m fakeMonitor, path string)
+		wantReason string
+	}{
+		{"coalesced cellular", func(_ *testing.T, m fakeMonitor, _ string) {
+			m.publish(State{Status: StatusConnected, Cellular: true})
+			m.publish(connected)
+		}, "local: restricted mid-transfer"},
+		{"metered on and off", func(t *testing.T, _ fakeMonitor, path string) {
+			saveManual(t, path, Manual{Metered: true})
+			saveManual(t, path, Manual{})
+		}, "local: restricted mid-transfer"},
+		{"unrestricted path change", func(_ *testing.T, m fakeMonitor, _ string) {
+			m.publish(State{Status: StatusConnected, ObservedAt: time.Now()})
+		}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, path := newFakeMonitor(t, connected)
+			g := NewGate(m, time.Hour)
+			admitted, peer, err := g.Wait(context.Background(), staticRemote(connected))
+			if err != nil {
+				t.Fatalf("Wait() error = %v", err)
+			}
+			tt.change(t, m, path)
+			err = g.Check(context.Background(), admitted, peer)
+			var paused *PausedError
+			switch {
+			case tt.wantReason == "" && err != nil:
+				t.Fatalf("Check() = %v, want nil", err)
+			case tt.wantReason != "" && (!errors.As(err, &paused) || paused.Reason != tt.wantReason):
+				t.Fatalf("Check() = %v, want paused %q", err, tt.wantReason)
+			}
+		})
 	}
 }
 
@@ -96,7 +139,8 @@ func TestGateCheck(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m, _ := newFakeMonitor(t, tt.local)
-			err := NewGate(m, time.Hour).Check(tt.ctx, tt.remote)
+			admitted, _ := m.Current()
+			err := NewGate(m, time.Hour).Check(tt.ctx, admitted, tt.remote)
 			var paused *PausedError
 			switch {
 			case tt.wantErr != nil:
@@ -116,9 +160,10 @@ func TestGateCheck(t *testing.T) {
 
 func TestGateCheckHonorsManualOverride(t *testing.T) {
 	m, path := newFakeMonitor(t, connected)
+	admitted, _ := m.Current()
 	saveManual(t, path, Manual{Metered: true})
 	var paused *PausedError
-	if err := NewGate(m, time.Hour).Check(context.Background(), connected); !errors.As(err, &paused) || paused.Reason != "local: manual metered" {
+	if err := NewGate(m, time.Hour).Check(context.Background(), admitted, connected); !errors.As(err, &paused) || paused.Reason != "local: manual metered" {
 		t.Fatalf("Check() = %v, want paused local: manual metered", err)
 	}
 }
@@ -134,8 +179,8 @@ func TestGateWaitResumesOnLocalChange(t *testing.T) {
 	m.publish(connected)
 	select {
 	case r := <-done:
-		if r.err != nil || r.remote != connected {
-			t.Fatalf("Wait() = %+v, want connected remote", r)
+		if r.err != nil || r.remote != connected || !r.local.Unrestricted() {
+			t.Fatalf("Wait() = %+v, want unrestricted local and connected remote", r)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Wait did not resume after the local path changed")
@@ -151,7 +196,7 @@ func TestGateWaitRepollsRemote(t *testing.T) {
 		}
 		return connected, nil
 	}
-	peer, err := NewGate(m, 5*time.Millisecond).Wait(context.Background(), remote)
+	_, peer, err := NewGate(m, 5*time.Millisecond).Wait(context.Background(), remote)
 	if err != nil || peer != connected {
 		t.Fatalf("Wait() = %+v, %v; want connected, nil", peer, err)
 	}
@@ -195,7 +240,7 @@ func TestGateWaitErrors(t *testing.T) {
 			m, _ := newFakeMonitor(t, connected)
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 			defer cancel()
-			if _, err := NewGate(m, time.Hour).Wait(ctx, tt.remote); !errors.Is(err, tt.wantErr) {
+			if _, _, err := NewGate(m, time.Hour).Wait(ctx, tt.remote); !errors.Is(err, tt.wantErr) {
 				t.Fatalf("Wait() = %v, want %v", err, tt.wantErr)
 			}
 		})

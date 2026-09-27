@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are unrestricted. `synckitd net status [--json]` prints the local state and
   each mesh peer's verdict. `synckitd net metered on|off` sets the manual
   override.
+- **`netpolicy` catches a restriction that clears between two reads.**
+  `State.RestrictedEpoch` advances on every restricted path update and on every
+  manual setting save except one clearing a metered mark it already counted,
+  including a save undone before the next read. The delivery worker records the
+  epoch when it admits a transfer and stops the transfer once the epoch moves.
+  It pauses with `local-restricted-mid-transfer` and retries at once, checking
+  the network again before it sends. `Gate.Wait` also returns the local `State`
+  now, and `Gate.Check` takes it and pauses the same way.
 - **syncservice v2 for artifact consumers.** `ChangeEnvelope.Artifacts` names a
   change's roots, and `BindDelivery` hashes them into the `ChangeID`, so changes
   with different root sets always get different IDs. A change without artifacts

@@ -358,8 +358,7 @@ func (s *deliveryScheduler) work(l *lane) {
 		var paused *pauseError
 		switch {
 		case errors.As(err, &paused):
-			s.pause(l, paused)
-			timer.Reset(s.timing.pauseRecheck)
+			timer.Reset(s.pause(l, paused))
 			retry, wake = timer.C, l.wake
 		case err != nil:
 			delay = min(max(2*delay, s.timing.backoffBase), s.timing.backoffMax)
@@ -391,15 +390,19 @@ func (s *deliveryScheduler) awaitCapabilities(l *lane) bool {
 	}
 }
 
-func (s *deliveryScheduler) pause(l *lane, paused *pauseError) {
+func (s *deliveryScheduler) pause(l *lane, paused *pauseError) time.Duration {
 	now := s.now()
+	recheck := s.timing.pauseRecheck
+	if paused.reason == delivery.PauseLocalRestrictedMidTransfer {
+		recheck = 0
+	}
 	var entered, down bool
 	l.update(func(v *laneLive) {
 		entered = v.state != delivery.StatePaused || v.pauseReason != paused.reason
 		if entered {
 			v.pauseSince = now
 		}
-		v.state, v.pauseReason, v.nextAttemptAt, v.running = delivery.StatePaused, paused.reason, now.Add(s.timing.pauseRecheck), false
+		v.state, v.pauseReason, v.nextAttemptAt, v.running = delivery.StatePaused, paused.reason, now.Add(recheck), false
 		v.lastError = ""
 		if paused.cause != nil {
 			v.lastError = paused.cause.Error()
@@ -410,10 +413,11 @@ func (s *deliveryScheduler) pause(l *lane, paused *pauseError) {
 	})
 	switch {
 	case down:
-		s.logDown(l, paused, s.timing.pauseRecheck)
+		s.logDown(l, paused, recheck)
 	case entered:
 		slog.InfoContext(s.ctx, "delivery: paused", "manifest", l.service, "peer", l.peer, "reason", paused.reason)
 	}
+	return recheck
 }
 
 func (s *deliveryScheduler) fail(l *lane, err error, delay time.Duration) {
@@ -613,14 +617,15 @@ func (s *deliveryScheduler) deliverPending(ctx context.Context, l *lane) error {
 }
 
 type deliveryRun struct {
-	s           *deliveryScheduler
-	l           *lane
-	peer        *syncservice.Client
-	artifacts   bool
-	change      syncservice.ChangeEnvelope
-	peerState   netpolicy.State
-	peerAt      time.Time
-	sentBatches int
+	s             *deliveryScheduler
+	l             *lane
+	peer          *syncservice.Client
+	artifacts     bool
+	change        syncservice.ChangeEnvelope
+	peerState     netpolicy.State
+	peerAt        time.Time
+	admittedEpoch uint64
+	sentBatches   int
 }
 
 func (r *deliveryRun) observeLocal() netpolicy.State {
@@ -647,7 +652,9 @@ func (r *deliveryRun) gate(ctx context.Context) error {
 	if err := r.probe(ctx); err != nil {
 		return err
 	}
-	return r.evaluate(r.observeLocal())
+	local := r.observeLocal()
+	r.admittedEpoch = local.RestrictedEpoch
+	return r.evaluate(local)
 }
 
 func (r *deliveryRun) admit(ctx context.Context) (netpolicy.State, error) {
@@ -657,7 +664,20 @@ func (r *deliveryRun) admit(ctx context.Context) (netpolicy.State, error) {
 		}
 	}
 	local := r.observeLocal()
+	if paused := r.interrupted(local); paused != nil {
+		return netpolicy.State{}, paused
+	}
 	return local, r.evaluate(local)
+}
+
+func (r *deliveryRun) interrupted(local netpolicy.State) *pauseError {
+	switch {
+	case !local.Unrestricted():
+		return &pauseError{reason: localReason(local)}
+	case local.RestrictedEpoch != r.admittedEpoch:
+		return &pauseError{reason: delivery.PauseLocalRestrictedMidTransfer}
+	}
+	return nil
 }
 
 func (r *deliveryRun) probe(ctx context.Context) error {
@@ -735,8 +755,8 @@ func (r *deliveryRun) transfer(ctx context.Context) error {
 func (r *deliveryRun) watchLocal(ctx context.Context, cancel context.CancelCauseFunc, stop <-chan struct{}) {
 	for {
 		state, changed := r.s.monitor.Current()
-		if !state.Unrestricted() {
-			cancel(&pauseError{reason: localReason(state)})
+		if paused := r.interrupted(state); paused != nil {
+			cancel(paused)
 			return
 		}
 		select {
