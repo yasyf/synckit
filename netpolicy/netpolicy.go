@@ -41,9 +41,10 @@ type State struct {
 	// file's identity, size, and modification time and the random edit mark
 	// SaveManual rewrites beside it, so a SaveManual between two reads is
 	// never missed, even when the file is deleted again before the second
-	// read. RestrictedEpoch never crosses the wire and compares only States
-	// from one Monitor.
-	RestrictedEpoch uint64 `json:"-"`
+	// read. RestrictedEpoch compares only States from one Monitor; it crosses
+	// the wire so a receiver can refuse every bulk call of a transfer admitted
+	// under an earlier epoch of its own.
+	RestrictedEpoch uint64 `json:"restricted_epoch"`
 }
 
 // Unrestricted reports whether s alone permits bulk transfer: connected and

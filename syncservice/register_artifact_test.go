@@ -229,7 +229,7 @@ func TestApplyV2ReadinessPinsAndAck(t *testing.T) {
 			dispatcher := rpc.NewDispatcher()
 			registerArtifactConsumer(dispatcher, consumer, store, staticMonitor{state: connectedState})
 
-			got, err := NewClient(directTransport{dispatcher}).ApplyV2(t.Context(), change)
+			got, err := NewClient(directTransport{dispatcher}).ApplyV2(t.Context(), change, connectedState.RestrictedEpoch)
 			if tt.wantErr != "" {
 				if err == nil || err.Error() != MethodApplyV2+": "+tt.wantErr {
 					t.Fatalf("ApplyV2() = %+v, %v; want error %q", got, err, tt.wantErr)
@@ -507,7 +507,7 @@ func TestRegisterArtifactConsumerWithStore(t *testing.T) {
 			if change, err = BindDelivery(change, "host-b"); err != nil {
 				t.Fatal(err)
 			}
-			got, err := client.ApplyV2(t.Context(), change)
+			got, err := client.ApplyV2(t.Context(), change, state.RestrictedEpoch)
 			if tt.wantErr != "" {
 				if err == nil || err.Error() != tt.wantErr {
 					t.Fatalf("ApplyV2() = %+v, %v; want error %q", got, err, tt.wantErr)
@@ -533,21 +533,33 @@ func TestRegisterArtifactConsumerWithStore(t *testing.T) {
 	}
 }
 
-func TestApplyV2RefusesBeforeDecodingWhileReceiverRestricted(t *testing.T) {
-	var log []string
-	dispatcher := rpc.NewDispatcher()
-	cellular := netpolicy.State{Status: netpolicy.StatusConnected, Cellular: true}
-	registerArtifactConsumer(dispatcher, &fakeArtifactConsumer{log: &log}, &fakeAcceptStore{pins: map[string][]artifact.Ref{}, log: &log}, staticMonitor{state: cellular})
-	response := dispatcher.Dispatch(t.Context(), &rpc.Request{Method: MethodApplyV2, Params: map[string]any{"kind": 7}})
-	if !response.OK {
-		t.Fatalf("apply.v2 = %+v, want the typed refusal", response)
+func TestApplyV2RefusesBeforeDecoding(t *testing.T) {
+	tests := []struct {
+		name     string
+		live     netpolicy.State
+		admitted uint64
+		want     artifact.PauseCode
+	}{
+		{"while the receiver is restricted", netpolicy.State{Status: netpolicy.StatusConnected, Cellular: true, RestrictedEpoch: 4}, 4, artifact.PauseReceiverCellular},
+		{"once the receiver's epoch moved", netpolicy.State{Status: netpolicy.StatusConnected, RestrictedEpoch: 4}, 3, artifact.PauseReceiverRestrictedMidTransfer},
 	}
-	var result ApplyResult
-	if err := json.Unmarshal(response.Result, &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.Paused == nil || result.Paused.Code != artifact.PauseReceiverCellular || len(log) != 0 {
-		t.Fatalf("apply.v2 = %+v with log %v, want a receiver-cellular refusal and no store or consumer call", result, log)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var log []string
+			dispatcher := rpc.NewDispatcher()
+			registerArtifactConsumer(dispatcher, &fakeArtifactConsumer{log: &log}, &fakeAcceptStore{pins: map[string][]artifact.Ref{}, log: &log}, staticMonitor{state: tt.live})
+			response := dispatcher.Dispatch(t.Context(), &rpc.Request{Method: MethodApplyV2, Params: map[string]any{"kind": 7, artifact.AdmittedParam: tt.admitted}})
+			if !response.OK {
+				t.Fatalf("apply.v2 = %+v, want the typed refusal", response)
+			}
+			var result ApplyResult
+			if err := json.Unmarshal(response.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Paused == nil || result.Paused.Code != tt.want || len(log) != 0 {
+				t.Fatalf("apply.v2 = %+v with log %v, want a %s refusal and no store or consumer call", result, log, tt.want)
+			}
+		})
 	}
 }
 

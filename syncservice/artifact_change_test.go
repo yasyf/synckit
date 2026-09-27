@@ -197,7 +197,7 @@ func TestClientArtifactPayloadGolden(t *testing.T) {
 	partID := artifact.Digest(strings.Repeat("b", 64))
 	sender := netpolicy.State{Status: netpolicy.StatusConnected}
 	refs := `[{"digest":"` + string(blobDigest) + `","kind":"blob","size":5},{"digest":"` + string(manifestRoot) + `","kind":"manifest","size":10}]`
-	senderJSON := `{"cellular":false,"constrained":false,"expensive":false,"manual_metered":false,"observed_at":"0001-01-01T00:00:00Z","status":"connected"}`
+	senderJSON := `{"cellular":false,"constrained":false,"expensive":false,"manual_metered":false,"observed_at":"0001-01-01T00:00:00Z","restricted_epoch":0,"status":"connected"}`
 
 	tests := []struct {
 		name string
@@ -207,19 +207,19 @@ func TestClientArtifactPayloadGolden(t *testing.T) {
 		{"export v2", func() {
 			_, _ = c.ExportV2(ctx, ExportRequest{ServiceID: "fake", SchemaFingerprint: testSchema, SinceRevision: NewRevision(4)})
 		}, `{"method":"synckit.syncservice.export.v2","params":{"schema_fingerprint":"` + testSchema + `","service_id":"fake","since_revision":"4"}}`},
-		{"apply v2", func() { _, _ = c.ApplyV2(ctx, change) }, `{"method":"synckit.syncservice.apply.v2","params":{"artifacts":` + refs + `,"base_revision":"0","change_id":"` + change.ChangeID + `","kind":"snapshot","origin":"host-a","payload":"e30=","payload_digest":"` + change.PayloadDigest + `","schema_fingerprint":"` + testSchema + `","service_id":"fake","source_revision":"1"}}`},
+		{"apply v2", func() { _, _ = c.ApplyV2(ctx, change, 7) }, `{"method":"synckit.syncservice.apply.v2","params":{"admitted":7,"artifacts":` + refs + `,"base_revision":"0","change_id":"` + change.ChangeID + `","kind":"snapshot","origin":"host-a","payload":"e30=","payload_digest":"` + change.PayloadDigest + `","schema_fingerprint":"` + testSchema + `","service_id":"fake","source_revision":"1"}}`},
 		{"net status", func() { _, _ = c.NetStatus(ctx) }, `{"method":"synckit.net.status.v1","params":null}`},
 		{"closure", func() {
 			_, _ = c.ArtifactClosure(ctx, artifact.ClosureParams{Roots: testRoots, After: 16384, Limit: 16384})
 		}, `{"method":"synckit.artifact.closure.v1","params":{"after":16384,"limit":16384,"roots":` + refs + `}}`},
-		{"have", func() { _, _ = c.ArtifactHave(ctx, []artifact.Digest{blobDigest}) }, `{"method":"synckit.artifact.have.v1","params":{"digests":["` + string(blobDigest) + `"]}}`},
+		{"have", func() { _, _ = c.ArtifactHave(ctx, []artifact.Digest{blobDigest}, 7) }, `{"method":"synckit.artifact.have.v1","params":{"admitted":7,"digests":["` + string(blobDigest) + `"]}}`},
 		{"batch build", func() {
 			_, _ = c.BatchBuild(ctx, []artifact.ObjectEntry{{Digest: blobDigest, Kind: artifact.KindBlob, Size: 5}})
 		}, `{"method":"synckit.artifact.batch.build.v1","params":{"objects":[{"digest":"` + string(blobDigest) + `","kind":"blob","size":5}]}}`},
 		{"batch read", func() { _, _ = c.BatchRead(ctx, partID, 2) }, `{"method":"synckit.artifact.batch.read.v1","params":{"id":"` + string(partID) + `","index":2}}`},
 		{"batch drop", func() { _ = c.BatchDrop(ctx, partID) }, `{"method":"synckit.artifact.batch.drop.v1","params":{"id":"` + string(partID) + `"}}`},
-		{"batch put", func() { _, _ = c.BatchPut(ctx, partID, 1, []byte("hi"), sender) }, `{"method":"synckit.artifact.batch.put.v1","params":{"data":"aGk=","id":"` + string(partID) + `","index":1,"sender":` + senderJSON + `}}`},
-		{"batch commit", func() { _, _ = c.BatchCommit(ctx, partID) }, `{"method":"synckit.artifact.batch.commit.v1","params":{"id":"` + string(partID) + `"}}`},
+		{"batch put", func() { _, _ = c.BatchPut(ctx, partID, 1, []byte("hi"), sender, 7) }, `{"method":"synckit.artifact.batch.put.v1","params":{"admitted":7,"data":"aGk=","id":"` + string(partID) + `","index":1,"sender":` + senderJSON + `}}`},
+		{"batch commit", func() { _, _ = c.BatchCommit(ctx, partID, 7) }, `{"method":"synckit.artifact.batch.commit.v1","params":{"admitted":7,"id":"` + string(partID) + `"}}`},
 		{"pins set", func() { _ = c.PinsSet(ctx, "synckit.delivery/host-b", testRoots[:1]) }, `{"method":"synckit.artifact.pins.set.v1","params":{"owner":"synckit.delivery/host-b","roots":[{"digest":"` + string(blobDigest) + `","kind":"blob","size":5}]}}`},
 		{"pins clear", func() { _ = c.PinsSet(ctx, "synckit.delivery/host-b", nil) }, `{"method":"synckit.artifact.pins.set.v1","params":{"owner":"synckit.delivery/host-b","roots":null}}`},
 	}
@@ -247,19 +247,19 @@ func TestClientArtifactRefusesInvalidParams(t *testing.T) {
 	ctx := context.Background()
 	calls := map[string]func() error{
 		"closure":     func() error { _, err := c.ArtifactClosure(ctx, artifact.ClosureParams{Roots: testRoots}); return err },
-		"have":        func() error { _, err := c.ArtifactHave(ctx, []artifact.Digest{"x"}); return err },
+		"have":        func() error { _, err := c.ArtifactHave(ctx, []artifact.Digest{"x"}, 0); return err },
 		"batch build": func() error { _, err := c.BatchBuild(ctx, nil); return err },
 		"batch read":  func() error { _, err := c.BatchRead(ctx, blobDigest, -1); return err },
 		"batch drop":  func() error { return c.BatchDrop(ctx, "") },
 		"batch begin": func() error {
-			_, err := c.BatchBegin(ctx, artifact.BatchDescriptor{}, netpolicy.State{})
+			_, err := c.BatchBegin(ctx, artifact.BatchDescriptor{}, netpolicy.State{}, 0)
 			return err
 		},
 		"batch put": func() error {
-			_, err := c.BatchPut(ctx, blobDigest, 0, nil, netpolicy.State{})
+			_, err := c.BatchPut(ctx, blobDigest, 0, nil, netpolicy.State{}, 0)
 			return err
 		},
-		"batch commit": func() error { _, err := c.BatchCommit(ctx, ""); return err },
+		"batch commit": func() error { _, err := c.BatchCommit(ctx, "", 0); return err },
 		"pins set":     func() error { return c.PinsSet(ctx, "", testRoots) },
 	}
 	for name, call := range calls {
@@ -296,7 +296,7 @@ func TestClientBatchPaused(t *testing.T) {
 			name:   "begin paused",
 			result: `{"have_parts":null,"peer":` + peer + `,` + paused + `}`,
 			call: func(c *Client) (netpolicy.State, error) {
-				out, err := c.BatchBegin(ctx, descriptor, netpolicy.State{Status: netpolicy.StatusConnected})
+				out, err := c.BatchBegin(ctx, descriptor, netpolicy.State{Status: netpolicy.StatusConnected}, 0)
 				return out.Peer, err
 			},
 			wantCode:   artifact.PauseReceiverCellular,
@@ -306,7 +306,7 @@ func TestClientBatchPaused(t *testing.T) {
 			name:   "put paused",
 			result: `{"peer":` + peer + `,` + paused + `}`,
 			call: func(c *Client) (netpolicy.State, error) {
-				out, err := c.BatchPut(ctx, descriptor.ID, 0, []byte{1}, netpolicy.State{Status: netpolicy.StatusConnected})
+				out, err := c.BatchPut(ctx, descriptor.ID, 0, []byte{1}, netpolicy.State{Status: netpolicy.StatusConnected}, 0)
 				return out.Peer, err
 			},
 			wantCode:   artifact.PauseReceiverCellular,
@@ -316,7 +316,7 @@ func TestClientBatchPaused(t *testing.T) {
 			name:   "put accepted",
 			result: `{"peer":` + peer + `}`,
 			call: func(c *Client) (netpolicy.State, error) {
-				out, err := c.BatchPut(ctx, descriptor.ID, 0, []byte{1}, netpolicy.State{Status: netpolicy.StatusConnected})
+				out, err := c.BatchPut(ctx, descriptor.ID, 0, []byte{1}, netpolicy.State{Status: netpolicy.StatusConnected}, 0)
 				return out.Peer, err
 			},
 			wantPeerOn: true,
@@ -325,7 +325,7 @@ func TestClientBatchPaused(t *testing.T) {
 			name:   "unknown pause code",
 			result: `{"peer":` + peer + `,"paused":{"code":"receiver-wifi","reason":"?"}}`,
 			call: func(c *Client) (netpolicy.State, error) {
-				out, err := c.BatchPut(ctx, descriptor.ID, 0, []byte{1}, netpolicy.State{Status: netpolicy.StatusConnected})
+				out, err := c.BatchPut(ctx, descriptor.ID, 0, []byte{1}, netpolicy.State{Status: netpolicy.StatusConnected}, 0)
 				return out.Peer, err
 			},
 			wantErr:    artifact.ErrInvalid,
@@ -351,6 +351,41 @@ func TestClientBatchPaused(t *testing.T) {
 			}
 			if state.Cellular != tt.wantPeerOn || state.Status != netpolicy.StatusConnected {
 				t.Fatalf("peer state = %+v", state)
+			}
+		})
+	}
+}
+
+func TestClientBatchCommitPaused(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   string
+		want     artifact.CommitReport
+		wantCode artifact.PauseCode
+	}{
+		{"committed", `{"stored":2,"present":1,"bytes":9}`, artifact.CommitReport{Stored: 2, Present: 1, Bytes: 9}, ""},
+		{
+			"refused",
+			`{"stored":0,"present":0,"bytes":0,"paused":{"code":"receiver-restricted-mid-transfer","reason":"local: restricted mid-transfer"}}`,
+			artifact.CommitReport{},
+			artifact.PauseReceiverRestrictedMidTransfer,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := &callRecordingTransport{response: &Response{OK: true, Result: json.RawMessage(tt.result)}}
+			report, err := NewClient(rt).BatchCommit(context.Background(), blobDigest, 3)
+			var refusal *artifact.PausedError
+			switch {
+			case tt.wantCode != "":
+				if !errors.As(err, &refusal) || refusal.Code != tt.wantCode {
+					t.Fatalf("err = %v, want refusal %s", err, tt.wantCode)
+				}
+			case err != nil:
+				t.Fatalf("err = %v", err)
+			}
+			if report != tt.want {
+				t.Fatalf("report = %+v, want %+v", report, tt.want)
 			}
 		})
 	}

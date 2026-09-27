@@ -83,6 +83,10 @@ const (
 	PausePeerConstrained PauseReason = "peer-constrained"
 	// PausePeerManualMetered means the peer is manually marked metered.
 	PausePeerManualMetered PauseReason = "peer-manual-metered"
+	// PausePeerRestrictedMidTransfer means the peer's network was restricted at
+	// some point after the transfer was admitted and is unrestricted again;
+	// the deliverer stops the transfer and restarts it at once.
+	PausePeerRestrictedMidTransfer PauseReason = "peer-restricted-mid-transfer"
 	// PausePeerUnreachable means the peer's network status call failed.
 	PausePeerUnreachable PauseReason = "peer-unreachable"
 	// PausePeerIncompatible means the peer lacks the v2 or artifact methods
@@ -91,18 +95,19 @@ const (
 )
 
 var refusalReasons = map[artifact.PauseCode]PauseReason{
-	artifact.PauseReceiverDisconnected:  PausePeerDisconnected,
-	artifact.PauseReceiverUnknown:       PausePeerUnknown,
-	artifact.PauseReceiverCellular:      PausePeerCellular,
-	artifact.PauseReceiverExpensive:     PausePeerExpensive,
-	artifact.PauseReceiverConstrained:   PausePeerConstrained,
-	artifact.PauseReceiverManualMetered: PausePeerManualMetered,
-	artifact.PauseSenderDisconnected:    PauseLocalDisconnected,
-	artifact.PauseSenderUnknown:         PauseLocalUnknown,
-	artifact.PauseSenderCellular:        PauseLocalCellular,
-	artifact.PauseSenderExpensive:       PauseLocalExpensive,
-	artifact.PauseSenderConstrained:     PauseLocalConstrained,
-	artifact.PauseSenderManualMetered:   PauseLocalManualMetered,
+	artifact.PauseReceiverDisconnected:          PausePeerDisconnected,
+	artifact.PauseReceiverUnknown:               PausePeerUnknown,
+	artifact.PauseReceiverCellular:              PausePeerCellular,
+	artifact.PauseReceiverExpensive:             PausePeerExpensive,
+	artifact.PauseReceiverConstrained:           PausePeerConstrained,
+	artifact.PauseReceiverManualMetered:         PausePeerManualMetered,
+	artifact.PauseReceiverRestrictedMidTransfer: PausePeerRestrictedMidTransfer,
+	artifact.PauseSenderDisconnected:            PauseLocalDisconnected,
+	artifact.PauseSenderUnknown:                 PauseLocalUnknown,
+	artifact.PauseSenderCellular:                PauseLocalCellular,
+	artifact.PauseSenderExpensive:               PauseLocalExpensive,
+	artifact.PauseSenderConstrained:             PauseLocalConstrained,
+	artifact.PauseSenderManualMetered:           PauseLocalManualMetered,
 }
 
 var verdictReasons = map[artifact.PauseCode]PauseReason{
@@ -120,8 +125,8 @@ var verdictReasons = map[artifact.PauseCode]PauseReason{
 	artifact.PauseSenderManualMetered:   PausePeerManualMetered,
 }
 
-// ReasonForRefusal maps a peer's batch.begin or batch.put refusal to the
-// delivering host's PauseReason: a receiver-side block is the peer's, a
+// ReasonForRefusal maps a peer's bulk call refusal to the delivering host's
+// PauseReason: a receiver-side block is the peer's, a
 // sender-side block is this host's. The refusal's code must be valid.
 func ReasonForRefusal(refusal *artifact.PausedError) PauseReason {
 	reason, ok := refusalReasons[refusal.Code]

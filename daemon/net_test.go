@@ -103,7 +103,8 @@ func TestNetStatusCommand(t *testing.T) {
     "constrained": false,
     "cellular": false,
     "manual_metered": false,
-    "observed_at": "2026-09-26T12:00:00Z"
+    "observed_at": "2026-09-26T12:00:00Z",
+    "restricted_epoch": 0
   },
   "peers": [
     {
@@ -115,7 +116,8 @@ func TestNetStatusCommand(t *testing.T) {
         "constrained": false,
         "cellular": true,
         "manual_metered": false,
-        "observed_at": "2026-09-26T12:00:00Z"
+        "observed_at": "2026-09-26T12:00:00Z",
+        "restricted_epoch": 0
       },
       "verdict": {
         "allowed": false,

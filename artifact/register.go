@@ -10,10 +10,11 @@ import (
 )
 
 // Register binds every artifact method on d to s, each dispatched
-// concurrently. have, batch.begin, and batch.put return the typed refusal,
-// before decoding their params, while monitor's live State is not
-// unrestricted. batch.begin and batch.put then evaluate that State against
-// the sender's declared State on every call and, unless both are
+// concurrently. have, batch.begin, batch.put, and batch.commit return the
+// typed Refusal, before decoding their other params, while monitor's live
+// State is not unrestricted or has moved past the epoch the sender admitted
+// the transfer under. batch.begin and batch.put then evaluate that State
+// against the sender's declared State on every call and, unless both are
 // unrestricted, return the typed refusal without writing; both report the
 // receiver's live State.
 func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
@@ -25,7 +26,11 @@ func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
 		return s.closurePage(ctx, p)
 	})
 	d.Register(MethodHave, func(ctx context.Context, raw map[string]any) (any, error) {
-		if refusal := LiveRefusal(monitor); refusal != nil {
+		_, refusal, err := Refusal(monitor, raw)
+		if err != nil {
+			return nil, err
+		}
+		if refusal != nil {
 			return HaveResult{Missing: []Digest{}, Paused: refusal}, nil
 		}
 		var p HaveParams
@@ -55,9 +60,12 @@ func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
 		return struct{}{}, s.DropBatch(ctx, p.ID)
 	})
 	d.Register(MethodBatchBegin, func(ctx context.Context, raw map[string]any) (any, error) {
-		live, _ := monitor.Current()
-		if !live.Unrestricted() {
-			return BatchBeginResult{HaveParts: []int{}, Peer: live, Paused: PausedFor(netpolicy.Evaluate(live, live))}, nil
+		live, refusal, err := Refusal(monitor, raw)
+		if err != nil {
+			return nil, err
+		}
+		if refusal != nil {
+			return BatchBeginResult{HaveParts: []int{}, Peer: live, Paused: refusal}, nil
 		}
 		sender, err := decodeSender(raw)
 		if err != nil {
@@ -77,9 +85,12 @@ func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
 		return BatchBeginResult{HaveParts: held, Peer: live}, nil
 	})
 	d.Register(MethodBatchPut, func(ctx context.Context, raw map[string]any) (any, error) {
-		live, _ := monitor.Current()
-		if !live.Unrestricted() {
-			return BatchPutResult{Peer: live, Paused: PausedFor(netpolicy.Evaluate(live, live))}, nil
+		live, refusal, err := Refusal(monitor, raw)
+		if err != nil {
+			return nil, err
+		}
+		if refusal != nil {
+			return BatchPutResult{Peer: live, Paused: refusal}, nil
 		}
 		sender, err := decodeSender(raw)
 		if err != nil {
@@ -97,8 +108,23 @@ func Register(d *rpc.Dispatcher, s *Store, monitor netpolicy.Monitor) {
 		}
 		return BatchPutResult{Peer: live}, nil
 	})
-	handle(d, MethodBatchCommit, func(ctx context.Context, p BatchRef) (any, error) {
-		return s.CommitBatch(ctx, p.ID)
+	d.Register(MethodBatchCommit, func(ctx context.Context, raw map[string]any) (any, error) {
+		_, refusal, err := Refusal(monitor, raw)
+		if err != nil {
+			return nil, err
+		}
+		if refusal != nil {
+			return BatchCommitResult{Paused: refusal}, nil
+		}
+		p, err := decode[BatchCommitParams](raw)
+		if err != nil {
+			return nil, err
+		}
+		report, err := s.CommitBatch(ctx, p.ID)
+		if err != nil {
+			return nil, err
+		}
+		return BatchCommitResult{CommitReport: report}, nil
 	})
 	handle(d, MethodPinsSet, func(ctx context.Context, p PinsSetParams) (any, error) {
 		return struct{}{}, s.SetPins(ctx, p.Owner, p.Roots)

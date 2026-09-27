@@ -81,9 +81,13 @@ func TestStateWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	const want = `{"status":"connected","expensive":false,"constrained":false,"cellular":true,"manual_metered":true,"observed_at":"2026-09-26T12:00:00Z"}`
+	const want = `{"status":"connected","expensive":false,"constrained":false,"cellular":true,"manual_metered":true,"observed_at":"2026-09-26T12:00:00Z","restricted_epoch":7}`
 	if string(data) != want {
 		t.Fatalf("wire = %s, want %s", data, want)
+	}
+	var decoded State
+	if err := json.Unmarshal(data, &decoded); err != nil || decoded != s {
+		t.Fatalf("round trip = %+v, %v; want %+v", decoded, err, s)
 	}
 	var absent State
 	if err := json.Unmarshal([]byte(`{}`), &absent); err != nil {

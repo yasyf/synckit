@@ -92,7 +92,7 @@ func TestPausedErrorWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"peer":{"status":"connected","expensive":false,"constrained":false,"cellular":true,"manual_metered":false,"observed_at":"2026-09-26T00:00:00Z"},` +
+	want := `{"peer":{"status":"connected","expensive":false,"constrained":false,"cellular":true,"manual_metered":false,"observed_at":"2026-09-26T00:00:00Z","restricted_epoch":0},` +
 		`"paused":{"code":"receiver-cellular","reason":"local: cellular"}}`
 	if string(encoded) != want {
 		t.Fatalf("json = %s, want %s", encoded, want)
@@ -105,7 +105,7 @@ func TestPausedErrorWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `{"have_parts":[0,2],"peer":{"status":"","expensive":false,"constrained":false,"cellular":false,"manual_metered":false,"observed_at":"0001-01-01T00:00:00Z"}}`; string(open) != want {
+	if want := `{"have_parts":[0,2],"peer":{"status":"","expensive":false,"constrained":false,"cellular":false,"manual_metered":false,"observed_at":"0001-01-01T00:00:00Z","restricted_epoch":0}}`; string(open) != want {
 		t.Fatalf("begin json = %s, want %s", open, want)
 	}
 }
@@ -145,6 +145,8 @@ func TestParamsValidate(t *testing.T) {
 		{"pins past the union bound", PinsSetParams{Owner: "o", Roots: distinctRoots(MaxPinRoots + 1)}, false},
 		{"ref", BatchRef{ID: digestOne}, true},
 		{"ref bad id", BatchRef{}, false},
+		{"commit", BatchCommitParams{ID: digestOne, Admitted: 3}, true},
+		{"commit bad id", BatchCommitParams{Admitted: 3}, false},
 		{"read", BatchReadParams{ID: digestOne, Index: 0}, true},
 		{"read negative index", BatchReadParams{ID: digestOne, Index: -1}, false},
 		{"read index past parts", BatchReadParams{ID: digestOne, Index: maxBatchParts}, false},
@@ -178,12 +180,15 @@ func TestParamsJSON(t *testing.T) {
 	}{
 		{"closure", ClosureParams{Roots: []Ref{{digestOne, KindBlob, 1}}, After: 2, Limit: 3}, `{"roots":[{"digest":"` + string(digestOne) + `","kind":"blob","size":1}],"after":2,"limit":3}`},
 		{"closure page", ClosurePage{Objects: []ObjectEntry{{digestOne, KindBlob, 1}}, Next: 1, Done: true, TotalObjects: 1, TotalBytes: 1}, `{"objects":[{"digest":"` + string(digestOne) + `","kind":"blob","size":1}],"next":1,"done":true,"total_objects":1,"total_bytes":1}`},
-		{"have", HaveParams{Digests: []Digest{digestOne}}, `{"digests":["` + string(digestOne) + `"]}`},
+		{"have", HaveParams{Digests: []Digest{digestOne}, Admitted: 3}, `{"digests":["` + string(digestOne) + `"],"admitted":3}`},
 		{"have result", HaveResult{Missing: []Digest{digestOne}}, `{"missing":["` + string(digestOne) + `"]}`},
 		{"build", BatchBuildParams{Objects: []ObjectEntry{{Digest: digestOne, Kind: KindBlob, Size: 1}}}, `{"objects":[{"digest":"` + string(digestOne) + `","kind":"blob","size":1}]}`},
 		{"read", BatchReadParams{ID: digestOne, Index: 4}, `{"id":"` + string(digestOne) + `","index":4}`},
 		{"read result", BatchReadResult{Data: []byte("hi")}, `{"data":"aGk="}`},
-		{"net status", NetStatusResult{}, `{"state":{"status":"","expensive":false,"constrained":false,"cellular":false,"manual_metered":false,"observed_at":"0001-01-01T00:00:00Z"}}`},
+		{"net status", NetStatusResult{State: netpolicy.State{RestrictedEpoch: 3}}, `{"state":{"status":"","expensive":false,"constrained":false,"cellular":false,"manual_metered":false,"observed_at":"0001-01-01T00:00:00Z","restricted_epoch":3}}`},
+		{"commit", BatchCommitParams{ID: digestOne, Admitted: 3}, `{"id":"` + string(digestOne) + `","admitted":3}`},
+		{"commit result", BatchCommitResult{CommitReport: CommitReport{Stored: 2, Present: 1, Bytes: 9}}, `{"stored":2,"present":1,"bytes":9}`},
+		{"commit refused", BatchCommitResult{Paused: &PausedError{Code: PauseReceiverRestrictedMidTransfer, Reason: "local: restricted mid-transfer"}}, `{"stored":0,"present":0,"bytes":0,"paused":{"code":"receiver-restricted-mid-transfer","reason":"local: restricted mid-transfer"}}`},
 		{"pins", PinsSetParams{Owner: "o"}, `{"owner":"o","roots":null}`},
 	}
 	for _, tt := range tests {

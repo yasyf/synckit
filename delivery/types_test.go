@@ -44,6 +44,10 @@ func TestReasons(t *testing.T) {
 			}
 		})
 	}
+	midTransfer := &artifact.PausedError{Code: artifact.PauseReceiverRestrictedMidTransfer, Reason: "local: restricted mid-transfer"}
+	if got := ReasonForRefusal(midTransfer); got != PausePeerRestrictedMidTransfer {
+		t.Errorf("receiver mid-transfer refusal = %s, want %s", got, PausePeerRestrictedMidTransfer)
+	}
 }
 
 func TestPeerStatusJSON(t *testing.T) {
@@ -73,7 +77,7 @@ func TestPeerStatusJSON(t *testing.T) {
 		`"pending":{"change_id":"c5","kind":"snapshot","base_revision":"0","source_revision":"5","roots":2,"staged_at":` + stamp + `,"superseded":1},` +
 		`"state":"paused","pause_reason":"peer-cellular","pause_since":` + stamp + `,"last_attempt_at":` + stamp + `,"next_attempt_at":` + stamp + `,` +
 		`"progress":{"roots_total":2,"roots_complete":1,"objects_missing":3,"objects_sent":4,"bytes_missing":5,"bytes_sent":6,"wire_bytes_sent":7,"in_flight_limit":1048576,"enumeration_done":true},` +
-		`"local_network":{"status":"connected","expensive":false,"constrained":false,"cellular":false,"manual_metered":false,"observed_at":` + stamp + `}}`
+		`"local_network":{"status":"connected","expensive":false,"constrained":false,"cellular":false,"manual_metered":false,"observed_at":` + stamp + `,"restricted_epoch":0}}`
 	if string(encoded) != want {
 		t.Fatalf("json = %s\nwant %s", encoded, want)
 	}

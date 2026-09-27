@@ -117,7 +117,7 @@ func TestReceiverEvaluatesLivePolicyOnEveryCall(t *testing.T) {
 	for index := 1; index < len(parts); index++ {
 		mustCall[BatchPutResult](t, d, MethodBatchPut, BatchPutParams{ID: batch.ID, Index: index, Data: parts[index], Sender: unrestricted})
 	}
-	report := mustCall[CommitReport](t, d, MethodBatchCommit, BatchRef{ID: batch.ID})
+	report := mustCall[CommitReport](t, d, MethodBatchCommit, BatchCommitParams{ID: batch.ID})
 	if report.Stored != len(batch.Objects) {
 		t.Fatalf("commit = %+v, want %d stored", report, len(batch.Objects))
 	}
@@ -253,5 +253,48 @@ func TestBatchBeginAndPutRefuseARestrictedSenderBeforeDecodingBulk(t *testing.T)
 		if result.Paused == nil || result.Paused.Code != PauseSenderCellular || result.Peer.Status != netpolicy.StatusConnected || result.Peer.Cellular {
 			t.Fatalf("%s = %+v, want a sender-cellular refusal carrying the receiver state", method, result)
 		}
+	}
+}
+
+func TestReceiverRefusesATransferAdmittedUnderAnEarlierEpoch(t *testing.T) {
+	live := unrestricted
+	live.RestrictedEpoch = 4
+	refused := &PausedError{Code: PauseReceiverRestrictedMidTransfer, Reason: "local: restricted mid-transfer"}
+	tests := []struct {
+		method string
+		params map[string]any
+		peer   *netpolicy.State
+	}{
+		{MethodHave, map[string]any{"digests": "not a list"}, nil},
+		{MethodBatchBegin, map[string]any{"batch": "not a descriptor", "sender": unrestricted}, &live},
+		{MethodBatchPut, map[string]any{"id": "bad", "index": -1, "data": "!!not base64!!", "sender": unrestricted}, &live},
+		{MethodBatchCommit, map[string]any{"id": "bad"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			d := rpc.NewDispatcher()
+			Register(d, newStore(t), &fakeMonitor{state: live})
+			for _, admitted := range []uint64{0, 3} {
+				tt.params[AdmittedParam] = admitted
+				response := d.Dispatch(t.Context(), &rpc.Request{Method: tt.method, Params: tt.params})
+				if !response.OK {
+					t.Fatalf("admitted %d: %s = %+v, want the typed refusal", admitted, tt.method, response)
+				}
+				var result struct {
+					Peer   *netpolicy.State `json:"peer"`
+					Paused *PausedError     `json:"paused"`
+				}
+				if err := json.Unmarshal(response.Result, &result); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(result.Paused, refused) || !reflect.DeepEqual(result.Peer, tt.peer) {
+					t.Fatalf("admitted %d: %s = %+v, want %+v carrying the live state", admitted, tt.method, result, refused)
+				}
+			}
+			tt.params[AdmittedParam] = live.RestrictedEpoch
+			if response := d.Dispatch(t.Context(), &rpc.Request{Method: tt.method, Params: tt.params}); response.OK {
+				t.Fatalf("admitted at the live epoch: %s = %+v, want the invalid params decoded and rejected", tt.method, response)
+			}
+		})
 	}
 }

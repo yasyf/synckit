@@ -393,7 +393,7 @@ func (s *deliveryScheduler) awaitCapabilities(l *lane) bool {
 func (s *deliveryScheduler) pause(l *lane, paused *pauseError) time.Duration {
 	now := s.now()
 	recheck := s.timing.pauseRecheck
-	if paused.reason == delivery.PauseLocalRestrictedMidTransfer {
+	if paused.reason == delivery.PauseLocalRestrictedMidTransfer || paused.reason == delivery.PausePeerRestrictedMidTransfer {
 		recheck = 0
 	}
 	var entered, down bool
@@ -624,7 +624,8 @@ type deliveryRun struct {
 	change        syncservice.ChangeEnvelope
 	peerState     netpolicy.State
 	peerAt        time.Time
-	admittedEpoch uint64
+	admittedLocal uint64
+	admittedPeer  uint64
 	sentBatches   int
 }
 
@@ -653,7 +654,7 @@ func (r *deliveryRun) gate(ctx context.Context) error {
 		return err
 	}
 	local := r.observeLocal()
-	r.admittedEpoch = local.RestrictedEpoch
+	r.admittedLocal, r.admittedPeer = local.RestrictedEpoch, r.peerState.RestrictedEpoch
 	return r.evaluate(local)
 }
 
@@ -667,14 +668,20 @@ func (r *deliveryRun) admit(ctx context.Context) (netpolicy.State, error) {
 	if paused := r.interrupted(local); paused != nil {
 		return netpolicy.State{}, paused
 	}
-	return local, r.evaluate(local)
+	if err := r.evaluate(local); err != nil {
+		return netpolicy.State{}, err
+	}
+	if r.peerState.RestrictedEpoch != r.admittedPeer {
+		return netpolicy.State{}, &pauseError{reason: delivery.PausePeerRestrictedMidTransfer}
+	}
+	return local, nil
 }
 
 func (r *deliveryRun) interrupted(local netpolicy.State) *pauseError {
 	switch {
 	case !local.Unrestricted():
 		return &pauseError{reason: localReason(local)}
-	case local.RestrictedEpoch != r.admittedEpoch:
+	case local.RestrictedEpoch != r.admittedLocal:
 		return &pauseError{reason: delivery.PauseLocalRestrictedMidTransfer}
 	}
 	return nil
@@ -801,7 +808,7 @@ func (r *deliveryRun) page(ctx context.Context, objects []artifact.ObjectEntry, 
 		if _, err := r.admit(ctx); err != nil {
 			return err
 		}
-		absent, err := r.peer.ArtifactHave(ctx, digests)
+		absent, err := r.peer.ArtifactHave(ctx, digests, r.admittedPeer)
 		if err != nil {
 			return refusal(fmt.Errorf("peer have: %w", err))
 		}
@@ -849,7 +856,7 @@ func (r *deliveryRun) page(ctx context.Context, objects []artifact.ObjectEntry, 
 		if _, err := r.admit(ctx); err != nil {
 			return err
 		}
-		if _, err := r.peer.ApplyV2(ctx, r.change); err != nil {
+		if _, err := r.peer.ApplyV2(ctx, r.change, r.admittedPeer); err != nil {
 			return refusal(fmt.Errorf("progressive apply: %w", err))
 		}
 		return nil
@@ -909,7 +916,7 @@ func (r *deliveryRun) commit(ctx context.Context, objects []artifact.ObjectEntry
 	if err != nil {
 		return "", err
 	}
-	begin, err := r.peer.BatchBegin(ctx, batch, sender)
+	begin, err := r.peer.BatchBegin(ctx, batch, sender, r.admittedPeer)
 	if err := r.refused(begin.Peer, err); err != nil {
 		return "", err
 	}
@@ -929,7 +936,7 @@ func (r *deliveryRun) commit(ctx context.Context, objects []artifact.ObjectEntry
 		if err != nil {
 			return "", err
 		}
-		put, err := r.peer.BatchPut(ctx, batch.ID, index, data, local)
+		put, err := r.peer.BatchPut(ctx, batch.ID, index, data, local, r.admittedPeer)
 		r.l.update(func(v *laneLive) { v.progress.WireBytesSent += int64(len(data)) })
 		if err := r.refused(put.Peer, err); err != nil {
 			return "", err
@@ -938,8 +945,8 @@ func (r *deliveryRun) commit(ctx context.Context, objects []artifact.ObjectEntry
 	if _, err := r.admit(ctx); err != nil {
 		return "", err
 	}
-	if _, err := r.peer.BatchCommit(ctx, batch.ID); err != nil {
-		return "", fmt.Errorf("commit batch %s: %w", batch.ID, err)
+	if _, err := r.peer.BatchCommit(ctx, batch.ID, r.admittedPeer); err != nil {
+		return "", refusal(fmt.Errorf("commit batch %s: %w", batch.ID, err))
 	}
 	r.sentBatches++
 	r.l.update(func(v *laneLive) {
@@ -1060,7 +1067,7 @@ func (r *deliveryRun) applyOnce(ctx context.Context) (syncservice.ApplyResult, e
 	if _, err := r.admit(ctx); err != nil {
 		return syncservice.ApplyResult{}, err
 	}
-	ack, err := r.peer.ApplyV2(ctx, r.change)
+	ack, err := r.peer.ApplyV2(ctx, r.change, r.admittedPeer)
 	if err != nil {
 		return syncservice.ApplyResult{}, refusal(fmt.Errorf("apply %q on %s: %w", r.l.service, r.l.peer, err))
 	}

@@ -483,7 +483,7 @@ func (k *fakeSink) dispatcher() *rpc.Dispatcher {
 		}
 		return artifact.BatchPutResult{Peer: k.state}, nil
 	})
-	register(d, &k.counter, artifact.MethodBatchCommit, func(p artifact.BatchRef) (any, error) {
+	register(d, &k.counter, artifact.MethodBatchCommit, func(p artifact.BatchCommitParams) (any, error) {
 		k.mu.Lock()
 		defer k.mu.Unlock()
 		if k.onCommit != nil {
@@ -1232,7 +1232,7 @@ func TestWatchLocalCancelsOnARestrictionSinceAdmission(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newFakeMonitor(admitted)
-			r := &deliveryRun{s: &deliveryScheduler{monitor: m}, admittedEpoch: admitted.RestrictedEpoch}
+			r := &deliveryRun{s: &deliveryScheduler{monitor: m}, admittedLocal: admitted.RestrictedEpoch}
 			ctx, cancel := context.WithCancelCause(t.Context())
 			defer cancel(nil)
 			stop := make(chan struct{})
