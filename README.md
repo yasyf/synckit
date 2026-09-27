@@ -182,11 +182,26 @@ Network.framework. Artifact transfer requires both endpoints to report a
 connected route with no expensive, constrained, cellular, or manual metered
 flag. Unknown network state pauses transfer.
 
-The receiver checks its live policy on every `batch.begin` and `batch.put`,
-including each compressed part, before writing. It also checks the sender's
-declared state. `apply.v2` refuses requests while the receiver is restricted.
-Paused workers recheck after 60 seconds or a local network change; failures
-back off from 30 seconds to 5 minutes.
+The receiver reads its live network state once per `have`, `batch.begin`,
+`batch.put`, `batch.commit`, and `apply.v2` call, before decoding bulk params.
+While restricted, it refuses the call with its own restriction code, such as
+`receiver-cellular`. While unrestricted, it refuses with
+`receiver-restricted-mid-transfer` if its `RestrictedEpoch` differs from
+`admitted`, the receiver's epoch from `net.status` when the sender admitted the
+transfer. A refused call writes nothing. `batch.begin` and `batch.put` also
+check the sender's declared state; each `batch.put` carries one compressed part.
+
+The sender stops with `local-restricted-mid-transfer` or
+`peer-restricted-mid-transfer` when that endpoint is unrestricted but its
+epoch has moved since admission. An active restriction pauses with its
+ordinary reason, such as `local-cellular` or `peer-cellular`. For the two
+mid-transfer reasons, the first restart is immediate; further consecutive
+restarts wait 1 second, doubling up to 60 seconds. A committed batch, an
+acknowledged delivery, a different pause, or a failure resets the sequence.
+Local network changes do not shorten restart waits, and a kick during any wait
+only restages the change.
+Every other pause rechecks after 60 seconds or a local network change;
+failures back off from 30 seconds to 5 minutes.
 
 | Command | Effect |
 |---|---|
