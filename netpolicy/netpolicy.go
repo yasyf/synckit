@@ -38,9 +38,11 @@ type State struct {
 	// except one that clears a metered mark the Monitor already observed; an
 	// unmetered rewrite counts too, since metered may have been switched on
 	// and off between two reads of the file. Each Current call re-checks the
-	// file's identity, size, and modification time, so a SaveManual between
-	// two reads is never missed. RestrictedEpoch never crosses the wire and
-	// compares only States from one Monitor.
+	// file's identity, size, and modification time and the random edit mark
+	// SaveManual rewrites beside it, so a SaveManual between two reads is
+	// never missed, even when the file is deleted again before the second
+	// read. RestrictedEpoch never crosses the wire and compares only States
+	// from one Monitor.
 	RestrictedEpoch uint64 `json:"-"`
 }
 

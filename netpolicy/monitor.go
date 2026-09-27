@@ -92,7 +92,7 @@ func (o *observed) watch(sweep *time.Ticker) {
 			if !ok {
 				return
 			}
-			if event.Name == o.manual.path {
+			if event.Name == o.manual.path || event.Name == o.manual.markPath {
 				o.refreshManual()
 			}
 		case err, ok := <-o.watcher.Errors:

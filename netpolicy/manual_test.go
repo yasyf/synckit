@@ -66,11 +66,12 @@ func TestManualSourceTracksEdits(t *testing.T) {
 		{"corrupt fails closed", func(t *testing.T) { writeRaw(t, path, "{not json") }, true, true},
 		{"corrupt again", unchanged, false, true},
 		{"repaired", func(t *testing.T) { saveManual(t, path, Manual{}) }, true, false},
-		{"removed", func(t *testing.T) {
-			if err := os.Remove(path); err != nil {
-				t.Fatalf("remove: %v", err)
-			}
+		{"removed", func(t *testing.T) { removeManual(t, path) }, true, false},
+		{"metered pulse removed", func(t *testing.T) {
+			saveManual(t, path, Manual{Metered: true})
+			removeManual(t, path)
 		}, true, false},
+		{"absent after the pulse", unchanged, false, false},
 	}
 	for _, step := range steps {
 		step.write(t)
@@ -115,10 +116,34 @@ func TestManualSourceUnreadableFailsClosed(t *testing.T) {
 	}
 }
 
+func TestManualSourceUnreadableEditMarkFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), manualFileName)
+	if err := os.Mkdir(editMarkPath(path), manualDirPerm); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	src := newManualSource(path)
+	if !src.refresh() || !src.value {
+		t.Fatalf("unreadable mark: metered %v, want true", src.value)
+	}
+	if err := os.Remove(editMarkPath(path)); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if !src.refresh() || src.value {
+		t.Fatalf("mark cleared: metered %v, want false", src.value)
+	}
+}
+
 func saveManual(t *testing.T, path string, m Manual) {
 	t.Helper()
 	if err := SaveManual(path, m); err != nil {
 		t.Fatalf("SaveManual: %v", err)
+	}
+}
+
+func removeManual(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
 	}
 }
 
