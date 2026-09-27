@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func stageBatch(t *testing.T, src, dst *Store, objects []ObjectEntry) BatchDescriptor {
@@ -285,18 +286,22 @@ func TestCommitBatchRollbackSparesAConcurrentlyPublishedObject(t *testing.T) {
 	}
 }
 
-func TestCommitBatchKeepsAStrandedObjectHiddenUntilItIsDurable(t *testing.T) {
-	src, dst := newStore(t), newStore(t)
-	root, err := src.Put(t.Context(), bytes.NewReader(randomBytes(13, 512)), "test/blob")
+type namedReader struct {
+	name   string
+	reader *Reader
+}
+
+func ownerAndReadOnly(t *testing.T, s *Store) []namedReader {
+	t.Helper()
+	readOnly, err := OpenReadOnly(s.root)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("OpenReadOnly: %v", err)
 	}
-	objects := closureEntries(t, src, []Ref{root})
-	digests := make([]Digest, len(objects))
-	for i, object := range objects {
-		digests[i] = object.Digest
-	}
-	d := stageBatch(t, src, dst, objects)
+	return []namedReader{{"owner", s.Reader}, {"read-only", readOnly}}
+}
+
+func strandChunk(t *testing.T, dst *Store, d BatchDescriptor) {
+	t.Helper()
 	landing := filepath.Join(dst.root, incomingDir, string(d.ID), landingDir)
 	t.Cleanup(func() {
 		syncObjectDir = syncDir
@@ -312,22 +317,173 @@ func TestCommitBatchKeepsAStrandedObjectHiddenUntilItIsDurable(t *testing.T) {
 	if _, err := dst.CommitBatch(t.Context(), d.ID); !errors.Is(err, lost) {
 		t.Fatalf("CommitBatch = %v, want the sync failure", err)
 	}
+	syncObjectDir = syncDir
 	if err := os.Chmod(landing, dirPerm); err != nil {
 		t.Fatal(err)
 	}
-	if missing, err := dst.Has(t.Context(), digests); err != nil || !reflect.DeepEqual(missing, digests) {
-		t.Fatalf("Has after a failed withdrawal = %v, %v; want %v missing", missing, err, digests)
+}
+
+func TestCommitBatchKeepsAStrandedObjectHiddenFromEveryReaderUntilItIsDurable(t *testing.T) {
+	src := newStore(t)
+	root, err := src.Put(t.Context(), bytes.NewReader(randomBytes(13, 512)), "test/blob")
+	if err != nil {
+		t.Fatal(err)
 	}
-	syncs := 0
+	objects := closureEntries(t, src, []Ref{root})
+	digests := make([]Digest, len(objects))
+	for i, object := range objects {
+		digests[i] = object.Digest
+	}
+	chunk := Ref{Digest: objects[0].Digest, Kind: KindBlob, Size: objects[0].Size}
+	tests := []struct {
+		name        string
+		recover     func(t *testing.T, dst *Store, d BatchDescriptor) *Store
+		wantMissing int
+	}{
+		{"retried commit", func(t *testing.T, dst *Store, d BatchDescriptor) *Store {
+			syncs := 0
+			syncObjectDir = func(dir string) error {
+				syncs++
+				return syncDir(dir)
+			}
+			report, err := dst.CommitBatch(t.Context(), d.ID)
+			syncObjectDir = syncDir
+			if err != nil || report.Present != 0 || syncs == 0 {
+				t.Fatalf("retried CommitBatch = %+v, %v after %d directory syncs; want every object republished and synced", report, err, syncs)
+			}
+			return dst
+		}, 0},
+		{"reopen", func(t *testing.T, dst *Store, _ BatchDescriptor) *Store {
+			if err := dst.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(dst.root)
+			if err != nil {
+				t.Fatalf("Open after a stranded commit: %v", err)
+			}
+			t.Cleanup(func() { _ = reopened.Close() })
+			return reopened
+		}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dst := newStore(t)
+			d := stageBatch(t, src, dst, objects)
+			readers := ownerAndReadOnly(t, dst)
+			strandChunk(t, dst, d)
+			if _, err := os.Stat(dst.objectPath(chunk.Digest)); err != nil {
+				t.Fatalf("stat stranded chunk = %v; want the failed withdrawal to leave it in place", err)
+			}
+			for _, r := range readers {
+				if missing, err := r.reader.Has(t.Context(), digests); err != nil || !reflect.DeepEqual(missing, digests) {
+					t.Fatalf("%s Has after a failed withdrawal = %v, %v; want %v missing", r.name, missing, err, digests)
+				}
+				if n, err := r.reader.Complete(t.Context(), []Ref{chunk}); err != nil || n != 1 {
+					t.Fatalf("%s Complete(stranded chunk) = %d, %v; want 1 missing", r.name, n, err)
+				}
+				var missing *MissingError
+				if err := r.reader.Materialize(t.Context(), chunk, filepath.Join(t.TempDir(), "chunk"), filePerm); !errors.As(err, &missing) {
+					t.Fatalf("%s Materialize(stranded chunk) = %v, want MissingError", r.name, err)
+				}
+			}
+			recovered := tt.recover(t, dst, d)
+			readers[0].reader = recovered.Reader
+			for _, r := range readers {
+				if err := r.reader.Verify(t.Context(), []Ref{chunk}); err != nil {
+					t.Fatalf("%s Verify(chunk) after recovery = %v", r.name, err)
+				}
+				if n, err := r.reader.Complete(t.Context(), []Ref{root}); err != nil || n != tt.wantMissing {
+					t.Fatalf("%s Complete(root) after recovery = %d, %v; want %d missing", r.name, n, err, tt.wantMissing)
+				}
+			}
+		})
+	}
+}
+
+func TestReadOnlyReaderSeesNoObjectBeforeItsPublicationIsDurable(t *testing.T) {
+	src, dst := newStore(t), newStore(t)
+	root, err := src.Put(t.Context(), bytes.NewReader(randomBytes(17, 512)), "test/blob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := closureEntries(t, src, []Ref{root})
+	digests := make([]Digest, len(objects))
+	for i, object := range objects {
+		digests[i] = object.Digest
+	}
+	d := stageBatch(t, src, dst, objects)
+	readOnly, err := OpenReadOnly(dst.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syncObjectDir = syncDir })
+	var seen [][]Digest
 	syncObjectDir = func(dir string) error {
-		syncs++
+		missing, err := readOnly.Has(t.Context(), digests)
+		if err != nil {
+			return err
+		}
+		seen = append(seen, missing)
 		return syncDir(dir)
 	}
-	report, err := dst.CommitBatch(t.Context(), d.ID)
-	if err != nil || report.Present != 0 || syncs == 0 {
-		t.Fatalf("retried CommitBatch = %+v, %v after %d directory syncs; want every object republished and synced", report, err, syncs)
+	if _, err := dst.CommitBatch(t.Context(), d.ID); err != nil {
+		t.Fatalf("CommitBatch: %v", err)
 	}
-	if err := dst.Verify(t.Context(), []Ref{root}); err != nil {
-		t.Fatalf("Verify after the retry = %v", err)
+	if want := [][]Digest{digests, {root.Digest}}; !reflect.DeepEqual(seen, want) {
+		t.Fatalf("read-only Has during each level's directory sync = %v, want %v", seen, want)
+	}
+	if missing, err := readOnly.Has(t.Context(), digests); err != nil || len(missing) != 0 {
+		t.Fatalf("read-only Has after the commit = %v, %v; want nothing missing", missing, err)
+	}
+}
+
+func TestGCRecoversAStrandedManifestAndKeepsItsChildren(t *testing.T) {
+	src, dst := newStore(t), newStore(t)
+	root, err := src.Put(t.Context(), bytes.NewReader(randomBytes(19, 512)), "test/blob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := stageBatch(t, src, dst, closureEntries(t, src, []Ref{root}))
+	landing := filepath.Join(dst.root, incomingDir, string(d.ID), landingDir)
+	t.Cleanup(func() {
+		flushBarrier = fullSyncDir
+		_ = os.Chmod(landing, dirPerm)
+	})
+	lost := errors.New("manifest barrier failed")
+	barriers := 0
+	flushBarrier = func(dir string) error {
+		if barriers++; barriers == 3 {
+			if err := os.Chmod(landing, 0o400); err != nil {
+				return err
+			}
+			return lost
+		}
+		return fullSyncDir(dir)
+	}
+	if _, err := dst.CommitBatch(t.Context(), d.ID); !errors.Is(err, lost) {
+		t.Fatalf("CommitBatch = %v, want the manifest barrier failure", err)
+	}
+	flushBarrier = fullSyncDir
+	if err := os.Chmod(landing, dirPerm); err != nil {
+		t.Fatal(err)
+	}
+	ageAll(t, dst, 2*GCGrace)
+	now := time.Now()
+	if err := os.Chtimes(dst.objectPath(root.Digest), now, now); err != nil {
+		t.Fatal(err)
+	}
+	readers := ownerAndReadOnly(t, dst)
+	for _, r := range readers {
+		if n, err := r.reader.Complete(t.Context(), []Ref{root}); err != nil || n != 1 {
+			t.Fatalf("%s Complete(stranded root) = %d, %v; want 1 missing", r.name, n, err)
+		}
+	}
+	if report, err := dst.GC(t.Context()); err != nil || report.Removed != 0 {
+		t.Fatalf("GC with a young stranded manifest = %+v, %v; want it recovered and its chunk kept", report, err)
+	}
+	for _, r := range readers {
+		if err := r.reader.Verify(t.Context(), []Ref{root}); err != nil {
+			t.Fatalf("%s Verify(root) after GC = %v", r.name, err)
+		}
 	}
 }

@@ -28,10 +28,15 @@ type storedObject struct {
 // committed batch untouched for StagingTTL. An object younger than GCGrace
 // keeps every object it names whenever its bytes decode as a manifest,
 // transitively and whatever kind or size those names claim, so no surviving
-// manifest ever loses a child and no file content can fail the sweep.
+// manifest ever loses a child and no file content can fail the sweep. It
+// first makes durable, and so present, every object a failed publication
+// left hidden.
 func (s *Store) GC(ctx context.Context) (GCReport, error) {
 	s.gcMu.Lock()
 	defer s.gcMu.Unlock()
+	if err := s.recoverUnsynced(); err != nil {
+		return GCReport{}, fmt.Errorf("artifact: recover unsynced objects: %w", err)
+	}
 	now := time.Now()
 	var report GCReport
 	for _, dir := range []string{outboxDir, incomingDir, committedDir} {

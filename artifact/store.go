@@ -27,6 +27,7 @@ const (
 	outboxDir      = "outbox"
 	incomingDir    = "incoming"
 	committedDir   = "committed"
+	unsyncedDir    = "unsynced"
 	descriptorName = "descriptor.json"
 	landingDir     = "objects"
 	dirPerm        = 0o700
@@ -49,16 +50,14 @@ func ServiceRoot(serviceID string) (string, error) {
 }
 
 // Reader reads a store without writing, locking, or sweeping it. Every read
-// re-hashes the objects it returns. Another process of the owning user reads
-// through OpenReadOnly after pinning its roots via the owning process, so GC
-// cannot remove them mid-read.
+// re-hashes the objects it returns, and every Reader, in any process, sees an
+// object as absent until its publication is durable. Another process of the
+// owning user reads through OpenReadOnly after pinning its roots via the
+// owning process, so GC cannot remove them mid-read.
 type Reader struct {
-	root       string
-	memoMu     sync.Mutex
-	memo       []closureMemo
-	publishMu  sync.Mutex
-	publishing map[Digest]chan struct{}
-	unsynced   map[Digest]struct{}
+	root   string
+	memoMu sync.Mutex
+	memo   []closureMemo
 }
 
 type closureMemo struct {
@@ -85,10 +84,14 @@ type Store struct {
 	incomingMu sync.Mutex
 	encMu      sync.Mutex
 	encoder    *zstd.Encoder
+	publishMu  sync.Mutex
+	publishing map[Digest]chan struct{}
 }
 
 // Open creates the store layout at root when absent and takes store.lock,
-// failing with durable.ErrLockBusy when another handle holds it.
+// failing with durable.ErrLockBusy when another handle holds it. It makes
+// every object already renamed into place durable before serving, so an
+// object an interrupted publication left hidden becomes present.
 func Open(root string) (*Store, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -110,10 +113,13 @@ func Open(root string) (*Store, error) {
 	if err == nil {
 		err = syncObjectDirs(root)
 	}
+	if err == nil {
+		err = clearUnsynced(root)
+	}
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("artifact: open %s: %w", root, err), lock.Close())
 	}
-	return &Store{Reader: &Reader{root: root, publishing: map[Digest]chan struct{}{}, unsynced: map[Digest]struct{}{}}, lock: lock, encoder: encoder}, nil
+	return &Store{Reader: &Reader{root: root}, lock: lock, encoder: encoder, publishing: map[Digest]chan struct{}{}}, nil
 }
 
 // Close releases store.lock.
@@ -122,7 +128,7 @@ func (s *Store) Close() error {
 }
 
 func createLayout(root string) error {
-	for _, dir := range []string{objectsDir, pinsDir, outboxDir, incomingDir, committedDir} {
+	for _, dir := range []string{objectsDir, pinsDir, outboxDir, incomingDir, committedDir, unsyncedDir} {
 		if err := mkdirAll(filepath.Join(root, dir)); err != nil {
 			return err
 		}
@@ -161,6 +167,39 @@ func syncObjectDirs(root string) error {
 	return nil
 }
 
+func unsyncedMarks(root string) ([]os.DirEntry, error) {
+	dir := filepath.Join(root, unsyncedDir)
+	marks, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("artifact: list %s: %w", dir, err)
+	}
+	return marks, nil
+}
+
+func clearUnsynced(root string) error {
+	marks, err := unsyncedMarks(root)
+	if err != nil {
+		return err
+	}
+	for _, mark := range marks {
+		if err := os.Remove(filepath.Join(root, unsyncedDir, mark.Name())); err != nil {
+			return fmt.Errorf("artifact: clear unsynced mark %s: %w", mark.Name(), err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) recoverUnsynced() error {
+	marks, err := unsyncedMarks(s.root)
+	if err != nil || len(marks) == 0 {
+		return err
+	}
+	if err := syncObjectDirs(s.root); err != nil {
+		return err
+	}
+	return clearUnsynced(s.root)
+}
+
 func mkdirAll(dir string) error {
 	_, err := os.Stat(dir)
 	if err == nil {
@@ -183,20 +222,35 @@ func (r *Reader) objectPath(digest Digest) string {
 	return filepath.Join(r.root, objectsDir, string(digest[:2]), string(digest))
 }
 
-func (r *Reader) inFlight(digest Digest) bool {
-	r.publishMu.Lock()
-	defer r.publishMu.Unlock()
-	_, publishing := r.publishing[digest]
-	_, unsynced := r.unsynced[digest]
-	return publishing || unsynced
+func (r *Reader) unsyncedPath(digest Digest) string {
+	return filepath.Join(r.root, unsyncedDir, string(digest))
+}
+
+func (r *Reader) unsynced(digest Digest) (bool, error) {
+	_, err := os.Stat(r.unsyncedPath(digest))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("artifact: stat unsynced mark %s: %w", digest, err)
+	}
+	return true, nil
 }
 
 func (r *Reader) stat(digest Digest) (fs.FileInfo, error) {
 	path := r.objectPath(digest)
-	if r.inFlight(digest) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	unsynced, err := r.unsynced(digest)
+	if err != nil {
+		return nil, err
+	}
+	if unsynced {
 		return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
 	}
-	return os.Stat(path)
+	return info, nil
 }
 
 func (r *Reader) present(digest Digest) (bool, error) {
@@ -211,15 +265,19 @@ func (r *Reader) present(digest Digest) (bool, error) {
 }
 
 func (r *Reader) readObject(digest Digest) ([]byte, error) {
-	if r.inFlight(digest) {
-		return nil, &MissingError{Digest: digest}
-	}
 	data, err := readFile(r.objectPath(digest))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, &MissingError{Digest: digest}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("artifact: read object %s: %w", digest, err)
+	}
+	unsynced, err := r.unsynced(digest)
+	if err != nil {
+		return nil, err
+	}
+	if unsynced {
+		return nil, &MissingError{Digest: digest}
 	}
 	if Sum(data) != digest {
 		return nil, fmt.Errorf("%w: object %s is corrupt", ErrInvalid, digest)
@@ -250,45 +308,35 @@ func checkManifestSize(digest Digest, m Manifest, size int64) error {
 }
 
 func (s *Store) touch(digest Digest) (bool, error) {
-	if s.isUnsynced(digest) {
-		return false, nil
-	}
-	path := s.objectPath(digest)
-	_, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("artifact: stat object %s: %w", digest, err)
+	present, err := s.present(digest)
+	if err != nil || !present {
+		return false, err
 	}
 	now := time.Now()
-	if err := os.Chtimes(path, now, now); err != nil {
+	if err := os.Chtimes(s.objectPath(digest), now, now); err != nil {
 		return false, fmt.Errorf("artifact: touch object %s: %w", digest, err)
 	}
 	return true, nil
 }
 
-func (s *Store) isUnsynced(digest Digest) bool {
-	s.publishMu.Lock()
-	defer s.publishMu.Unlock()
-	_, unsynced := s.unsynced[digest]
-	return unsynced
+func (s *Store) markUnsynced(digest Digest) error {
+	mark, err := os.OpenFile(s.unsyncedPath(digest), os.O_WRONLY|os.O_CREATE, filePerm)
+	if err != nil {
+		return fmt.Errorf("artifact: mark object %s unsynced: %w", digest, err)
+	}
+	if err := mark.Close(); err != nil {
+		return fmt.Errorf("artifact: mark object %s unsynced: %w", digest, err)
+	}
+	return nil
 }
 
-func (s *Store) markUnsynced(digests []Digest) {
-	s.publishMu.Lock()
-	defer s.publishMu.Unlock()
+func (s *Store) markSynced(digests ...Digest) error {
 	for _, digest := range digests {
-		s.unsynced[digest] = struct{}{}
+		if err := os.Remove(s.unsyncedPath(digest)); err != nil {
+			return fmt.Errorf("artifact: mark object %s synced: %w", digest, err)
+		}
 	}
-}
-
-func (s *Store) markSynced(digests ...Digest) {
-	s.publishMu.Lock()
-	defer s.publishMu.Unlock()
-	for _, digest := range digests {
-		delete(s.unsynced, digest)
-	}
+	return nil
 }
 
 func (s *Store) claim(digest Digest) func() {
@@ -318,10 +366,15 @@ func (s *Store) writeObject(digest Digest, data []byte) (bool, error) {
 	if err != nil || present {
 		return false, err
 	}
+	if err := s.markUnsynced(digest); err != nil {
+		return false, err
+	}
 	if err := durable.WriteFile(s.objectPath(digest), data, filePerm); err != nil {
 		return false, fmt.Errorf("artifact: write object %s: %w", digest, err)
 	}
-	s.markSynced(digest)
+	if err := s.markSynced(digest); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 

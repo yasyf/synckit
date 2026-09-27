@@ -452,16 +452,22 @@ func TestInFlightPublicationIsAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	readers := ownerAndReadOnly(t, s)
 	release := s.claim(ref.Digest)
-	if missing, err := s.Has(t.Context(), []Digest{ref.Digest}); err != nil || !reflect.DeepEqual(missing, []Digest{ref.Digest}) {
-		t.Fatalf("Has(in flight) = %v, %v; want the digest missing", missing, err)
+	if err := s.markUnsynced(ref.Digest); err != nil {
+		t.Fatal(err)
 	}
-	if missing, err := s.Complete(t.Context(), []Ref{ref}); err != nil || missing != 1 {
-		t.Fatalf("Complete(in flight) = %d, %v; want 1 missing", missing, err)
-	}
-	var missingErr *MissingError
-	if err := s.Verify(t.Context(), []Ref{ref}); !errors.As(err, &missingErr) || missingErr.Digest != ref.Digest {
-		t.Fatalf("Verify(in flight) = %v, want MissingError", err)
+	for _, r := range readers {
+		if missing, err := r.reader.Has(t.Context(), []Digest{ref.Digest}); err != nil || !reflect.DeepEqual(missing, []Digest{ref.Digest}) {
+			t.Fatalf("%s Has(in flight) = %v, %v; want the digest missing", r.name, missing, err)
+		}
+		if missing, err := r.reader.Complete(t.Context(), []Ref{ref}); err != nil || missing != 1 {
+			t.Fatalf("%s Complete(in flight) = %d, %v; want 1 missing", r.name, missing, err)
+		}
+		var missingErr *MissingError
+		if err := r.reader.Verify(t.Context(), []Ref{ref}); !errors.As(err, &missingErr) || missingErr.Digest != ref.Digest {
+			t.Fatalf("%s Verify(in flight) = %v, want MissingError", r.name, err)
+		}
 	}
 	wrote := make(chan struct{})
 	go func() {
@@ -475,8 +481,10 @@ func TestInFlightPublicationIsAbsent(t *testing.T) {
 	}
 	release()
 	<-wrote
-	if missing, err := s.Complete(t.Context(), []Ref{ref}); err != nil || missing != 0 {
-		t.Fatalf("Complete(published) = %d, %v; want 0 missing", missing, err)
+	for _, r := range readers {
+		if missing, err := r.reader.Complete(t.Context(), []Ref{ref}); err != nil || missing != 0 {
+			t.Fatalf("%s Complete(published) = %d, %v; want 0 missing", r.name, missing, err)
+		}
 	}
 }
 

@@ -300,7 +300,11 @@ func (s *Store) PutPart(ctx context.Context, id Digest, index int, data []byte) 
 // batch's staging with a plain fsync, flushes them all with one barrier,
 // and only then renames them into place, children strictly before their
 // manifests; a level whose directory fsync or barrier fails is renamed back
-// into staging, so no object is visible before its publication is durable.
+// into staging. Every object stays marked unsynced on disk from before its
+// rename until its level is durable, and one a failed rollback strands stays
+// marked until a retried commit, the next GC, or the next Open makes it
+// durable, so no Reader in any process sees an object before its
+// publication is durable.
 // It records the batch as committed for StagingTTL before removing the
 // staging, and re-committing a recorded batch touches its objects and reports
 // them present, so a concurrent sender of the same batch finishes too.
@@ -486,6 +490,9 @@ func (s *Store) publishLevel(landing string, landed []Digest, levels map[Digest]
 		if present {
 			continue
 		}
+		if err := s.markUnsynced(digest); err != nil {
+			return errors.Join(err, s.unpublish(landing, published))
+		}
 		target := s.objectPath(digest)
 		if err := os.Rename(filepath.Join(landing, string(digest)), target); err != nil {
 			return errors.Join(fmt.Errorf("artifact: publish object %s: %w", digest, err), s.unpublish(landing, published))
@@ -501,20 +508,16 @@ func (s *Store) publishLevel(landing string, landed []Digest, levels map[Digest]
 	if err := flushBarrier(landing); err != nil {
 		return errors.Join(fmt.Errorf("artifact: flush published objects: %w", err), s.unpublish(landing, published))
 	}
-	s.markSynced(published...)
-	return nil
+	return s.markSynced(published...)
 }
 
 func (s *Store) unpublish(landing string, published []Digest) error {
 	var errs []error
-	var stranded []Digest
 	for _, digest := range published {
 		if err := os.Rename(s.objectPath(digest), filepath.Join(landing, string(digest))); err != nil {
-			stranded = append(stranded, digest)
 			errs = append(errs, fmt.Errorf("artifact: withdraw unsynced object %s: %w", digest, err))
 		}
 	}
-	s.markUnsynced(stranded)
 	return errors.Join(errs...)
 }
 
