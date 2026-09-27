@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as zstd-compressed SKP1 packs with at most 32 MiB of uncompressed object bytes,
   split into parts of at most 1 MiB; `CommitBatch` checks
   every object's kind, digest, and size and stores nothing when any check fails.
+  Each object stays marked under `unsynced/` until its bytes are durable, and
+  every reader, including an `OpenReadOnly` reader in another process, treats a
+  marked object as missing. A failed rollback leaves its marks in place; the
+  next `Open` or `GC` makes those objects durable and clears the marks.
   `Register` serves the store over RPC, and on every `batch.begin` and
   `batch.put` the receiver checks its own live network state before writing.
 - **`netpolicy` gates bulk transfer on network cost.** On macOS,
@@ -66,6 +70,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker to have no queued kick or running attempt. It returns idle or paused
   status. Failed workers keep retrying while `WaitIdle` waits; its context bounds
   the wait. `Close` stops workers and closes local service transports.
+- **`rpc.ErrUnknownMethod` marks a daemon that predates a method.**
+  `rpc.ReplyError` turns a failed reply's `Error` into an error. It wraps
+  `ErrUnknownMethod` only for the dispatcher's own `unknown method "<name>"`
+  reply; any other text, including a handler error that starts with the same
+  words, stays an opaque error. The `delivery` and `syncservice` clients, the
+  `synckitd consent` commands, and `synckitd reconcile` wrap their reply errors
+  this way, so `errors.Is(err, rpc.ErrUnknownMethod)` tells a daemon that needs
+  upgrading from a failed handler. Their error text is unchanged.
 
 ### Changed
 
@@ -100,6 +112,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails, the new plist is on disk and the old job is already gone. Either way
   the next install finishes the reload, instead of recording the new build
   while the old one keeps running.
+- **A failed `rpc.Client.Call` retires its lane within the caller's context.**
+  A call that failed because its own deadline or cancellation ended used to
+  wait up to 5 s for the daemon to finish the abandoned request before
+  returning. The lane is now torn down once that context ends. When the peer
+  rejects a call while its context is still live, daemonkit v0.23.0's graceful
+  go-away can still run past the caller's deadline, bounded by daemonkit's
+  10 s write timeout.
 
 ## [0.39.2] - 2026-08-31
 

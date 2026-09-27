@@ -171,8 +171,9 @@ The `delivery` package calls the running daemon over RPC.
 `PeerStatus` includes the pending change and acknowledged revision, plus live
 progress, pause reasons, network observations, and the next attempt time.
 Use `PeerStatus.Acked` to check whether the peer has acknowledged a source
-revision. A successful kick only queues work. `synckitd reconcile` also requests
-delivery from the running daemon and fails if the daemon is unavailable.
+revision. A successful kick only queues work. `synckitd reconcile` runs a
+reconcile pass inside the running daemon, which then kicks delivery, and fails
+if the daemon is unavailable.
 
 ### Inspect network policy
 
