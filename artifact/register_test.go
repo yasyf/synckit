@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -54,7 +53,7 @@ func call[R any](t *testing.T, d *rpc.Dispatcher, method string, params any) (R,
 	}
 	response := d.Dispatch(t.Context(), &rpc.Request{Method: method, Params: raw})
 	if !response.OK {
-		return result, errors.New(response.Error)
+		return result, rpc.ReplyError(response.Error)
 	}
 	if err := json.Unmarshal(response.Result, &result); err != nil {
 		t.Fatalf("decode %s result: %v", method, err)
@@ -135,7 +134,7 @@ func TestRegisterServesSourceMethods(t *testing.T) {
 
 	for _, method := range Methods {
 		response := d.Dispatch(t.Context(), &rpc.Request{Method: method, Params: map[string]any{}})
-		if strings.Contains(response.Error, "unknown method") {
+		if errors.Is(rpc.ReplyError(response.Error), rpc.ErrUnknownMethod) {
 			t.Fatalf("%s is not registered", method)
 		}
 	}

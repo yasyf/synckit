@@ -35,7 +35,7 @@ func call(ctx context.Context, method string, params map[string]any, out any) er
 		return fmt.Errorf("%s: %w", method, err)
 	}
 	if !resp.OK {
-		return fmt.Errorf("%s: %s", method, resp.Error)
+		return fmt.Errorf("%s: %w", method, rpc.ReplyError(resp.Error))
 	}
 	if out == nil {
 		return nil

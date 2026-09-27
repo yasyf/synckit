@@ -203,3 +203,46 @@ func TestExclusiveDispatchSerializes(t *testing.T) {
 		t.Fatalf("max active = %d, want 1", maxActive)
 	}
 }
+
+func TestReplyErrorRecognizesAnUnknownMethod(t *testing.T) {
+	dispatcher := NewDispatcher()
+	dispatcher.Register("fail", func(context.Context, map[string]any) (any, error) { return nil, errors.New("boom") })
+	dispatcher.Register("prefixed", func(context.Context, map[string]any) (any, error) { return nil, errors.New("unknown method 'x'") })
+	tests := []struct {
+		name    string
+		message string
+		want    bool
+	}{
+		{"dispatcher reply", dispatcher.Dispatch(t.Context(), &Request{Method: "delivery.status"}).Error, true},
+		{"frozen reply", `unknown method "delivery.status"`, true},
+		{"handler error", dispatcher.Dispatch(t.Context(), &Request{Method: "fail"}).Error, false},
+		{"unquoted method", "unknown method delivery.status", false},
+		{"trailing text", `unknown method "delivery.status" here`, false},
+		{"bare prefix", "unknown method", false},
+		{"single-quoted rune", "unknown method 'x'", false},
+		{"raw string", "unknown method `delivery.status`", false},
+		{"non-canonical escape", `unknown method "\x64elivery.status"`, false},
+		{"handler error with the prefix", dispatcher.Dispatch(t.Context(), &Request{Method: "prefixed"}).Error, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ReplyError(tt.message)
+			if got := errors.Is(err, ErrUnknownMethod); got != tt.want {
+				t.Fatalf("errors.Is(ReplyError(%q), ErrUnknownMethod) = %v, want %v", tt.message, got, tt.want)
+			}
+			if err.Error() != tt.message {
+				t.Fatalf("ReplyError(%q) = %q, want the reply verbatim", tt.message, err.Error())
+			}
+		})
+	}
+}
+
+func TestReplyErrorDecodesTheFrozenWireReply(t *testing.T) {
+	response, err := DecodeResponse([]byte(`{"ok":false,"result":null,"error":"unknown method \"delivery.status\""}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplyError(response.Error); !errors.Is(err, ErrUnknownMethod) || err.Error() != `unknown method "delivery.status"` {
+		t.Fatalf("ReplyError = %v, want ErrUnknownMethod naming delivery.status", err)
+	}
+}

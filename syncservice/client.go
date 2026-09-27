@@ -110,7 +110,7 @@ func (c *Client) call(ctx context.Context, req *rpc.Request, out any) error {
 		return err
 	}
 	if !resp.OK {
-		return fmt.Errorf("%s: %s", req.Method, resp.Error)
+		return fmt.Errorf("%s: %w", req.Method, rpc.ReplyError(resp.Error))
 	}
 	if out != nil && len(resp.Result) > 0 && string(resp.Result) != "null" {
 		if err := json.Unmarshal(resp.Result, out); err != nil {
