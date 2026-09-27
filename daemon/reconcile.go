@@ -46,7 +46,7 @@ func reconcileResident(ctx context.Context) ([]reconcileResult, error) {
 		return nil, fmt.Errorf("reconcile: %w", err)
 	}
 	if !resp.OK {
-		return nil, fmt.Errorf("reconcile: %s", resp.Error)
+		return nil, fmt.Errorf("reconcile: %w", rpc.ReplyError(resp.Error))
 	}
 	var results []reconcileResult
 	if err := json.Unmarshal(resp.Result, &results); err != nil {
