@@ -112,13 +112,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails, the new plist is on disk and the old job is already gone. Either way
   the next install finishes the reload, instead of recording the new build
   while the old one keeps running.
-- **A failed `rpc.Client.Call` retires its lane within the caller's context.**
+- **A failed `rpc.Client.Call` retires its lane under the caller's context.**
   A call that failed because its own deadline or cancellation ended used to
   wait up to 5 s for the daemon to finish the abandoned request before
-  returning. The lane is now torn down once that context ends. When the peer
-  rejects a call while its context is still live, daemonkit v0.23.0's graceful
-  go-away can still run past the caller's deadline, bounded by daemonkit's
-  10 s write timeout.
+  returning. Retirement now inherits the caller's context, so it tears down a
+  lane with a call still pending once that context ends. Any close that
+  reaches daemonkit v0.23.0's graceful go-away can still outlast the caller's
+  context, because the go-away runs detached from it, bounded by daemonkit's
+  10 s write timeout. That covers a peer rejecting a call while its context is
+  still live, and a canceled or expired call whose pending calls had already
+  settled when retirement began.
 
 ## [0.39.2] - 2026-08-31
 
