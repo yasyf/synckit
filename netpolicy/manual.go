@@ -8,13 +8,15 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/yasyf/daemonkit/durable"
 	"github.com/yasyf/synckit/hostregistry"
 )
 
-const manualFileName = "netpolicy.json"
+const (
+	manualFileName = "netpolicy.json"
+	manualDirPerm  = 0o700
+)
 
 // Manual is the operator's persisted network override. Metered marks every
 // network this host joins as metered, pausing bulk transfer the OS would
@@ -50,7 +52,7 @@ func LoadManual(path string) (Manual, error) {
 
 // SaveManual durably replaces the override at path, creating its directory.
 func SaveManual(path string, m Manual) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), manualDirPerm); err != nil {
 		return fmt.Errorf("create manual network setting dir: %w", err)
 	}
 	data, err := json.Marshal(m)
@@ -64,14 +66,30 @@ func SaveManual(path string, m Manual) error {
 }
 
 type fileStamp struct {
-	exists  bool
-	size    int64
-	modTime int64
+	info       os.FileInfo
+	unreadable bool
+}
+
+func statStamp(path string) (fileStamp, error) {
+	info, err := os.Stat(path)
+	switch {
+	case err == nil:
+		return fileStamp{info: info}, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return fileStamp{}, nil
+	}
+	return fileStamp{unreadable: true}, err
+}
+
+func (a fileStamp) same(b fileStamp) bool {
+	if a.info == nil || b.info == nil {
+		return a.info == nil && b.info == nil && a.unreadable == b.unreadable
+	}
+	return os.SameFile(a.info, b.info) && a.info.Size() == b.info.Size() && a.info.ModTime().Equal(b.info.ModTime())
 }
 
 type manualSource struct {
 	path   string
-	mu     sync.Mutex
 	stamp  fileStamp
 	loaded bool
 	value  bool
@@ -81,27 +99,20 @@ func newManualSource(path string) *manualSource {
 	return &manualSource{path: path}
 }
 
-func (s *manualSource) metered() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var stamp fileStamp
-	info, err := os.Stat(s.path)
-	switch {
-	case err == nil:
-		stamp = fileStamp{exists: true, size: info.Size(), modTime: info.ModTime().UnixNano()}
-	case !errors.Is(err, fs.ErrNotExist):
-		slog.Warn("netpolicy: manual network setting unreadable; treating network as metered", "path", s.path, "err", err)
-		s.loaded = false
-		return true
+func (s *manualSource) refresh() bool {
+	stamp, err := statStamp(s.path)
+	if s.loaded && stamp.same(s.stamp) {
+		return false
 	}
-	if s.loaded && stamp == s.stamp {
-		return s.value
+	s.stamp, s.loaded = stamp, true
+	if err == nil {
+		var m Manual
+		m, err = LoadManual(s.path)
+		s.value = m.Metered
 	}
-	m, err := LoadManual(s.path)
 	if err != nil {
 		slog.Warn("netpolicy: manual network setting unreadable; treating network as metered", "path", s.path, "err", err)
-		m.Metered = true
+		s.value = true
 	}
-	s.stamp, s.loaded, s.value = stamp, true, m.Metered
-	return s.value
+	return true
 }

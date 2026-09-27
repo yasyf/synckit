@@ -29,6 +29,19 @@ type State struct {
 	Cellular      bool      `json:"cellular"`
 	ManualMetered bool      `json:"manual_metered"`
 	ObservedAt    time.Time `json:"observed_at"`
+	// RestrictedEpoch lets a transfer started on an Unrestricted State detect a
+	// restricted period that began and ended before its next read: when a
+	// later State from the same Monitor has the same RestrictedEpoch as an
+	// Unrestricted earlier one, the Monitor observed no restriction in between.
+	// The epoch advances on every OS path update after which the State is not
+	// Unrestricted, and on every observed change to the manual setting file
+	// except one that clears a metered mark the Monitor already observed; an
+	// unmetered rewrite counts too, since metered may have been switched on
+	// and off between two reads of the file. Each Current call re-checks the
+	// file's identity, size, and modification time, so a SaveManual between
+	// two reads is never missed. RestrictedEpoch never crosses the wire and
+	// compares only States from one Monitor.
+	RestrictedEpoch uint64 `json:"-"`
 }
 
 // Unrestricted reports whether s alone permits bulk transfer: connected and

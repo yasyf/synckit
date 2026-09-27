@@ -71,10 +71,11 @@ func TestUnrestricted(t *testing.T) {
 
 func TestStateWire(t *testing.T) {
 	s := State{
-		Status:        StatusConnected,
-		Cellular:      true,
-		ManualMetered: true,
-		ObservedAt:    time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC),
+		Status:          StatusConnected,
+		Cellular:        true,
+		ManualMetered:   true,
+		ObservedAt:      time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC),
+		RestrictedEpoch: 7,
 	}
 	data, err := json.Marshal(s)
 	if err != nil {

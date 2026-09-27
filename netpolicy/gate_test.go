@@ -13,14 +13,22 @@ type fakeMonitor struct {
 	*observed
 }
 
-func (fakeMonitor) Close() error {
-	return nil
+func (m fakeMonitor) Close() error {
+	return m.close()
 }
 
 func newFakeMonitor(t *testing.T, s State) (fakeMonitor, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), manualFileName)
-	o := newObserved(path)
+	o, err := newObserved(path)
+	if err != nil {
+		t.Fatalf("newObserved: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := o.close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
 	o.publish(s)
 	return fakeMonitor{o}, path
 }
@@ -155,7 +163,7 @@ func TestGateWaitRepollsRemote(t *testing.T) {
 func TestGateWaitResumesOnManualEdit(t *testing.T) {
 	m, path := newFakeMonitor(t, connected)
 	saveManual(t, path, Manual{Metered: true})
-	done := startWait(context.Background(), NewGate(m, 5*time.Millisecond), staticRemote(connected))
+	done := startWait(context.Background(), NewGate(m, time.Hour), staticRemote(connected))
 	select {
 	case r := <-done:
 		t.Fatalf("Wait returned while manually metered: %+v", r)

@@ -50,27 +50,68 @@ func TestManualPathUnderMeshDir(t *testing.T) {
 func TestManualSourceTracksEdits(t *testing.T) {
 	path := filepath.Join(t.TempDir(), manualFileName)
 	src := newManualSource(path)
+	unchanged := func(*testing.T) {}
 	steps := []struct {
-		name  string
-		write func(t *testing.T)
-		want  bool
+		name        string
+		write       func(t *testing.T)
+		wantChanged bool
+		wantMetered bool
 	}{
-		{"absent", func(*testing.T) {}, false},
-		{"metered", func(t *testing.T) { saveManual(t, path, Manual{Metered: true}) }, true},
-		{"unmetered", func(t *testing.T) { saveManual(t, path, Manual{}) }, false},
-		{"corrupt fails closed", func(t *testing.T) { writeRaw(t, path, "{not json") }, true},
-		{"repaired", func(t *testing.T) { saveManual(t, path, Manual{}) }, false},
+		{"absent", unchanged, true, false},
+		{"absent again", unchanged, false, false},
+		{"metered", func(t *testing.T) { saveManual(t, path, Manual{Metered: true}) }, true, true},
+		{"metered again", unchanged, false, true},
+		{"unmetered", func(t *testing.T) { saveManual(t, path, Manual{}) }, true, false},
+		{"unmetered rewritten", func(t *testing.T) { saveManual(t, path, Manual{}) }, true, false},
+		{"corrupt fails closed", func(t *testing.T) { writeRaw(t, path, "{not json") }, true, true},
+		{"corrupt again", unchanged, false, true},
+		{"repaired", func(t *testing.T) { saveManual(t, path, Manual{}) }, true, false},
 		{"removed", func(t *testing.T) {
 			if err := os.Remove(path); err != nil {
 				t.Fatalf("remove: %v", err)
 			}
-		}, false},
+		}, true, false},
 	}
 	for _, step := range steps {
 		step.write(t)
-		if got := src.metered(); got != step.want {
-			t.Fatalf("%s: metered() = %v, want %v", step.name, got, step.want)
+		if changed := src.refresh(); changed != step.wantChanged || src.value != step.wantMetered {
+			t.Fatalf("%s: refresh() = %v with metered %v, want %v with metered %v", step.name, changed, src.value, step.wantChanged, step.wantMetered)
 		}
+	}
+}
+
+func TestManualSourceUnreadableFailsClosed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads through directory permissions")
+	}
+	dir := filepath.Join(t.TempDir(), "locked")
+	path := filepath.Join(dir, manualFileName)
+	saveManual(t, path, Manual{})
+	src := newManualSource(path)
+	if !src.refresh() || src.value {
+		t.Fatalf("readable: metered %v, want false", src.value)
+	}
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, manualDirPerm) })
+	steps := []struct {
+		name        string
+		wantChanged bool
+	}{
+		{"unreadable", true},
+		{"still unreadable", false},
+	}
+	for _, step := range steps {
+		if changed := src.refresh(); changed != step.wantChanged || !src.value {
+			t.Fatalf("%s: refresh() = %v with metered %v, want %v with metered true", step.name, changed, src.value, step.wantChanged)
+		}
+	}
+	if err := os.Chmod(dir, manualDirPerm); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if !src.refresh() || src.value {
+		t.Fatalf("readable again: metered %v, want false", src.value)
 	}
 }
 

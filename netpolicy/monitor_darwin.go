@@ -74,13 +74,17 @@ type pathMonitor struct {
 }
 
 // NewMonitor starts a Network.framework path monitor on a private serial
-// dispatch queue. Until its first path update lands, Current reports
-// StatusUnknown.
+// dispatch queue and a watch on manualPath's directory, creating it if absent.
+// Until its first path update lands, Current reports StatusUnknown.
 func NewMonitor(manualPath string) (Monitor, error) {
 	if err := loadNetwork(); err != nil {
 		return nil, err
 	}
-	m := &pathMonitor{observed: newObserved(manualPath), cancelled: make(chan struct{})}
+	o, err := newObserved(manualPath)
+	if err != nil {
+		return nil, err
+	}
+	m := &pathMonitor{observed: o, cancelled: make(chan struct{})}
 	m.update = objc.NewBlock(func(_ objc.Block, path uintptr) {
 		m.publish(readPath(path))
 	})
@@ -122,5 +126,5 @@ func (m *pathMonitor) Close() error {
 		m.cancel.Release()
 		dispatchRelease(m.queue)
 	})
-	return nil
+	return m.close()
 }

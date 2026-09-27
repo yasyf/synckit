@@ -48,8 +48,8 @@ func (g *Gate) Check(ctx context.Context, remote State) error {
 }
 
 // Wait blocks until the policy allows bulk transfer, re-evaluating on every
-// local path change and every poll, and returns the remote State that allowed
-// it. A remote fetch error ends the wait.
+// local path change, manual setting edit, and poll, and returns the remote
+// State that allowed it. A remote fetch error ends the wait.
 func (g *Gate) Wait(ctx context.Context, remote RemoteFunc) (State, error) {
 	ticker := time.NewTicker(g.poll)
 	defer ticker.Stop()
