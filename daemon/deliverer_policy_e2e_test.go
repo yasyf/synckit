@@ -93,6 +93,80 @@ func TestE2EEveryPeerCallRechecksPolicy(t *testing.T) {
 	}
 }
 
+func TestE2EReceiverRestrictionClearedMidTransferRestartsIt(t *testing.T) {
+	tests := []struct {
+		name    string
+		maxAge  time.Duration
+		trigger string
+		nth     int
+		hold    int
+		want    map[string]int
+	}{
+		{"before have", 2 * time.Minute, artifact.MethodHave, 1, 2, map[string]int{artifact.MethodHave: 1}},
+		{"before batch.begin", 2 * time.Minute, artifact.MethodBatchBegin, 1, 2, map[string]int{artifact.MethodHave: 1, artifact.MethodBatchBegin: 1}},
+		{"before a later batch.put", 2 * time.Minute, artifact.MethodBatchPut, 2, 2, map[string]int{
+			artifact.MethodHave: 1, artifact.MethodBatchBegin: 1, artifact.MethodBatchPut: 2,
+		}},
+		{"before batch.commit", 2 * time.Minute, artifact.MethodBatchCommit, 1, 2, map[string]int{
+			artifact.MethodHave: 1, artifact.MethodBatchBegin: 1, artifact.MethodBatchPut: 10, artifact.MethodBatchCommit: 1,
+		}},
+		{"before apply.v2", 2 * time.Minute, syncservice.MethodApplyV2, 1, 2, map[string]int{
+			artifact.MethodHave: 1, artifact.MethodBatchBegin: 1, artifact.MethodBatchPut: 10, artifact.MethodBatchCommit: 1, syncservice.MethodApplyV2: 1,
+		}},
+		{"before a reprobe", 0, artifact.MethodNetStatus, 3, 4, map[string]int{artifact.MethodHave: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newE2EMesh(t, "a@node", "b@node")
+			peerStateMaxAge = tt.maxAge
+			a, b := m.hosts["a@node"], m.hosts["b@node"]
+			b.monitor.state.RestrictedEpoch = 5
+			content := randomBytes(t, 9*artifact.ChunkSize)
+			root := a.put(t, content)
+			a.consumer.publish(1, root)
+			link := m.link("a@node", "b@node")
+			release := make(chan struct{})
+			releaseOnce := sync.OnceFunc(func() { close(release) })
+			var mu sync.Mutex
+			seen := map[string]int{}
+			link.setHook(func(request *rpc.Request) error {
+				mu.Lock()
+				seen[request.Method]++
+				n := seen[request.Method]
+				mu.Unlock()
+				if request.Method == tt.trigger && n == tt.nth {
+					b.monitor.pulse()
+				}
+				if request.Method == artifact.MethodNetStatus && n == tt.hold {
+					<-release
+				}
+				return nil
+			})
+			d := m.deliver("a@node", "b@node")
+			t.Cleanup(releaseOnce)
+			status := d.await(t, "b@node", "pause or ack", func(s delivery.PeerStatus) bool {
+				return pausedWith(delivery.PausePeerRestrictedMidTransfer)(s) || acked(1)(s)
+			})
+			if !pausedWith(delivery.PausePeerRestrictedMidTransfer)(status) {
+				t.Fatalf("status = %+v, want a peer-restricted-mid-transfer pause", status)
+			}
+			for _, method := range []string{artifact.MethodHave, artifact.MethodBatchBegin, artifact.MethodBatchPut, artifact.MethodBatchCommit, syncservice.MethodApplyV2} {
+				if got := link.count(method); got != tt.want[method] {
+					t.Fatalf("%s ran %d times by the pause, want %d", method, got, tt.want[method])
+				}
+			}
+			requireNoApplies(t, b)
+
+			releaseOnce()
+			d.await(t, "b@node", "ack after the restart", acked(1))
+			b.requireContent(t, root, content)
+			if got := link.count(artifact.MethodNetStatus); got < tt.hold {
+				t.Fatalf("net.status ran %d times, want at least %d: the restart re-admits the transfer", got, tt.hold)
+			}
+		})
+	}
+}
+
 func TestE2EStalePeerStateIsReprobed(t *testing.T) {
 	tests := []struct {
 		name      string

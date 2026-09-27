@@ -14,7 +14,8 @@ const (
 	MethodNetStatus = "synckit.net.status.v1"
 	// MethodClosure pages through the closure of a root list.
 	MethodClosure = "synckit.artifact.closure.v1"
-	// MethodHave reports which digests the store lacks.
+	// MethodHave reports which digests the store lacks, or refuses with a
+	// PausedError.
 	MethodHave = "synckit.artifact.have.v1"
 	// MethodBatchBuild builds an outbox batch from stored objects.
 	MethodBatchBuild = "synckit.artifact.batch.build.v1"
@@ -29,7 +30,7 @@ const (
 	// PausedError before writing.
 	MethodBatchPut = "synckit.artifact.batch.put.v1"
 	// MethodBatchCommit verifies and stores every object of a fully staged
-	// incoming batch.
+	// incoming batch, or refuses with a PausedError.
 	MethodBatchCommit = "synckit.artifact.batch.commit.v1"
 	// MethodPinsSet replaces one owner's pinned roots.
 	MethodPinsSet = "synckit.artifact.pins.set.v1"
@@ -67,6 +68,9 @@ const (
 	PauseReceiverConstrained PauseCode = "receiver-constrained"
 	// PauseReceiverManualMetered means the receiver's user marked it metered.
 	PauseReceiverManualMetered PauseCode = "receiver-manual-metered"
+	// PauseReceiverRestrictedMidTransfer means the receiver's network was
+	// restricted at some point after the sender admitted the transfer.
+	PauseReceiverRestrictedMidTransfer PauseCode = "receiver-restricted-mid-transfer"
 	// PauseSenderDisconnected means the sender declared no usable route.
 	PauseSenderDisconnected PauseCode = "sender-disconnected"
 	// PauseSenderUnknown means the sender declared an unknown or absent state.
@@ -88,6 +92,7 @@ var pauseCodes = map[string]PauseCode{
 	"local: expensive":       PauseReceiverExpensive,
 	"local: constrained":     PauseReceiverConstrained,
 	"local: manual metered":  PauseReceiverManualMetered,
+	restrictedMidTransfer:    PauseReceiverRestrictedMidTransfer,
 	"remote: disconnected":   PauseSenderDisconnected,
 	"remote: unknown":        PauseSenderUnknown,
 	"remote: cellular":       PauseSenderCellular,
@@ -106,10 +111,11 @@ func (c PauseCode) Validate() error {
 	return fmt.Errorf("%w: pause code %q", ErrInvalid, string(c))
 }
 
-// PausedError is the typed refusal of batch.begin and batch.put: the
-// receiver evaluated its own live State against the sender's declared State
-// and wrote nothing. It crosses the wire in the result's Paused field, and
-// the syncservice client returns it as the call's error.
+// PausedError is the typed refusal of a bulk call: the receiver's live State
+// is restricted, has moved past the epoch the sender admitted the transfer
+// under, or blocks against the sender's declared State, and the receiver
+// wrote nothing. It crosses the wire in the result's Paused field, and the
+// syncservice client returns it as the call's error.
 type PausedError struct {
 	Code   PauseCode `json:"code"`
 	Reason string    `json:"reason"`
@@ -130,14 +136,33 @@ func PausedFor(verdict netpolicy.Verdict) *PausedError {
 	return &PausedError{Code: code, Reason: verdict.Reason}
 }
 
-// LiveRefusal returns the typed refusal for monitor's live State, or nil
-// when that State is unrestricted.
-func LiveRefusal(monitor netpolicy.Monitor) *PausedError {
+// AdmittedParam is the params key of the receiver's RestrictedEpoch that
+// every bulk call carries: the epoch net.status reported when the sender
+// admitted the transfer.
+const AdmittedParam = "admitted"
+
+const restrictedMidTransfer = "local: restricted mid-transfer"
+
+// Refusal reads monitor's live State once and returns it with the typed
+// refusal of the bulk call whose params are raw: the live State's own
+// refusal while it is not unrestricted, the restricted-mid-transfer refusal
+// once its RestrictedEpoch differs from raw's AdmittedParam, and nil
+// otherwise. It decodes no other param.
+func Refusal(monitor netpolicy.Monitor, raw map[string]any) (netpolicy.State, *PausedError, error) {
 	live, _ := monitor.Current()
-	if live.Unrestricted() {
-		return nil
+	if !live.Unrestricted() {
+		return live, PausedFor(netpolicy.Evaluate(live, live)), nil
 	}
-	return PausedFor(netpolicy.Evaluate(live, live))
+	var p struct {
+		Admitted uint64 `json:"admitted"`
+	}
+	if err := decodeParams(map[string]any{AdmittedParam: raw[AdmittedParam]}, &p); err != nil {
+		return live, nil, err
+	}
+	if p.Admitted != live.RestrictedEpoch {
+		return live, &PausedError{Code: PauseReceiverRestrictedMidTransfer, Reason: restrictedMidTransfer}, nil
+	}
+	return live, nil, nil
 }
 
 // NetStatusResult is the result of MethodNetStatus.
@@ -178,9 +203,11 @@ type ClosurePage struct {
 	TotalBytes   int64         `json:"total_bytes"`
 }
 
-// HaveParams asks which of Digests the store lacks.
+// HaveParams asks which of Digests the store lacks, for a transfer the
+// sender admitted under the receiver's RestrictedEpoch Admitted.
 type HaveParams struct {
-	Digests []Digest `json:"digests"`
+	Digests  []Digest `json:"digests"`
+	Admitted uint64   `json:"admitted"`
 }
 
 // Validate checks the query bound and every digest.
@@ -197,8 +224,7 @@ func (p HaveParams) Validate() error {
 }
 
 // HaveResult lists the queried digests the store lacks, in query order.
-// Paused is set, and nothing was queried, when the receiver's live State is
-// not unrestricted.
+// Paused is set, and nothing was queried, when the receiver refused.
 type HaveResult struct {
 	Missing []Digest     `json:"missing"`
 	Paused  *PausedError `json:"paused,omitempty"`
@@ -228,7 +254,7 @@ func (p BatchBuildParams) Validate() error {
 	return nil
 }
 
-// BatchRef names one batch; it is the params of batch.drop and batch.commit.
+// BatchRef names one batch; it is the params of batch.drop.
 type BatchRef struct {
 	ID Digest `json:"id"`
 }
@@ -261,11 +287,13 @@ type BatchReadResult struct {
 }
 
 // BatchBeginParams stages Batch on the receiver. Sender is the sender's live
-// State at the call; the receiver refuses unless both it and its own live
-// State are unrestricted.
+// State at the call, and Admitted the receiver's RestrictedEpoch the sender
+// admitted the transfer under; the receiver refuses unless both it and its
+// own live State are unrestricted and its epoch is still Admitted.
 type BatchBeginParams struct {
-	Batch  BatchDescriptor `json:"batch"`
-	Sender netpolicy.State `json:"sender"`
+	Batch    BatchDescriptor `json:"batch"`
+	Sender   netpolicy.State `json:"sender"`
+	Admitted uint64          `json:"admitted"`
 }
 
 // Validate checks the descriptor.
@@ -283,12 +311,15 @@ type BatchBeginResult struct {
 }
 
 // BatchPutParams writes part Index of batch ID. Sender is the sender's live
-// State at the call; the receiver re-evaluates before every write.
+// State at the call, and Admitted the receiver's RestrictedEpoch the sender
+// admitted the transfer under; the receiver re-evaluates both before every
+// write.
 type BatchPutParams struct {
-	ID     Digest          `json:"id"`
-	Index  int             `json:"index"`
-	Data   []byte          `json:"data"`
-	Sender netpolicy.State `json:"sender"`
+	ID       Digest          `json:"id"`
+	Index    int             `json:"index"`
+	Data     []byte          `json:"data"`
+	Sender   netpolicy.State `json:"sender"`
+	Admitted uint64          `json:"admitted"`
 }
 
 // Validate checks the batch ID, part index, and part length.
@@ -307,6 +338,25 @@ func (p BatchPutParams) Validate() error {
 type BatchPutResult struct {
 	Peer   netpolicy.State `json:"peer"`
 	Paused *PausedError    `json:"paused,omitempty"`
+}
+
+// BatchCommitParams commits batch ID, for a transfer the sender admitted
+// under the receiver's RestrictedEpoch Admitted.
+type BatchCommitParams struct {
+	ID       Digest `json:"id"`
+	Admitted uint64 `json:"admitted"`
+}
+
+// Validate checks the batch ID.
+func (p BatchCommitParams) Validate() error {
+	return p.ID.Validate()
+}
+
+// BatchCommitResult reports the commit. Paused is set, and nothing was
+// committed, when the receiver refused.
+type BatchCommitResult struct {
+	CommitReport
+	Paused *PausedError `json:"paused,omitempty"`
 }
 
 // PinsSetParams replaces Owner's pinned roots; empty Roots removes the pin

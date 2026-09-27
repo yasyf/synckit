@@ -1,6 +1,7 @@
 package netpolicy
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,13 +9,16 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/yasyf/daemonkit/durable"
 	"github.com/yasyf/synckit/hostregistry"
 )
 
-const manualFileName = "netpolicy.json"
+const (
+	manualFileName = "netpolicy.json"
+	editMarkSuffix = ".edit"
+	manualDirPerm  = 0o700
+)
 
 // Manual is the operator's persisted network override. Metered marks every
 // network this host joins as metered, pausing bulk transfer the OS would
@@ -48,9 +52,12 @@ func LoadManual(path string) (Manual, error) {
 	return m, nil
 }
 
-// SaveManual durably replaces the override at path, creating its directory.
+// SaveManual durably replaces the override at path, creating its directory,
+// then rewrites a random edit mark beside it. The mark outlives the
+// override's deletion, so a Monitor that finds the override absent still
+// detects a save that the deletion undid before the Monitor's next read.
 func SaveManual(path string, m Manual) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), manualDirPerm); err != nil {
 		return fmt.Errorf("create manual network setting dir: %w", err)
 	}
 	data, err := json.Marshal(m)
@@ -60,48 +67,91 @@ func SaveManual(path string, m Manual) error {
 	if err := durable.WriteFile(path, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write manual network setting %s: %w", path, err)
 	}
+	mark := editMarkPath(path)
+	if err := durable.WriteFile(mark, []byte(rand.Text()+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write manual network setting edit mark %s: %w", mark, err)
+	}
 	return nil
 }
 
+func editMarkPath(path string) string {
+	return path + editMarkSuffix
+}
+
+type editMark struct {
+	token      string
+	unreadable bool
+}
+
+func readEditMark(path string) (editMark, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is synckit's own state file.
+	switch {
+	case err == nil:
+		return editMark{token: string(data)}, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return editMark{}, nil
+	}
+	return editMark{unreadable: true}, fmt.Errorf("read manual network setting edit mark %s: %w", path, err)
+}
+
 type fileStamp struct {
-	exists  bool
-	size    int64
-	modTime int64
+	info       os.FileInfo
+	unreadable bool
+}
+
+func statStamp(path string) (fileStamp, error) {
+	info, err := os.Stat(path)
+	switch {
+	case err == nil:
+		return fileStamp{info: info}, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return fileStamp{}, nil
+	}
+	return fileStamp{unreadable: true}, err
+}
+
+func (a fileStamp) absent() bool {
+	return a.info == nil && !a.unreadable
+}
+
+func (a fileStamp) same(b fileStamp) bool {
+	if a.info == nil || b.info == nil {
+		return a.info == nil && b.info == nil && a.unreadable == b.unreadable
+	}
+	return os.SameFile(a.info, b.info) && a.info.Size() == b.info.Size() && a.info.ModTime().Equal(b.info.ModTime())
 }
 
 type manualSource struct {
-	path   string
-	mu     sync.Mutex
-	stamp  fileStamp
-	loaded bool
-	value  bool
+	path     string
+	markPath string
+	stamp    fileStamp
+	mark     editMark
+	loaded   bool
+	value    bool
 }
 
 func newManualSource(path string) *manualSource {
-	return &manualSource{path: path}
+	return &manualSource{path: path, markPath: editMarkPath(path)}
 }
 
-func (s *manualSource) metered() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var stamp fileStamp
-	info, err := os.Stat(s.path)
-	switch {
-	case err == nil:
-		stamp = fileStamp{exists: true, size: info.Size(), modTime: info.ModTime().UnixNano()}
-	case !errors.Is(err, fs.ErrNotExist):
-		slog.Warn("netpolicy: manual network setting unreadable; treating network as metered", "path", s.path, "err", err)
-		s.loaded = false
-		return true
+func (s *manualSource) refresh() bool {
+	stamp, err := statStamp(s.path)
+	var mark editMark
+	if stamp.absent() {
+		mark, err = readEditMark(s.markPath)
 	}
-	if s.loaded && stamp == s.stamp {
-		return s.value
+	if s.loaded && stamp.same(s.stamp) && mark == s.mark {
+		return false
 	}
-	m, err := LoadManual(s.path)
+	s.stamp, s.mark, s.loaded = stamp, mark, true
+	if err == nil {
+		var m Manual
+		m, err = LoadManual(s.path)
+		s.value = m.Metered
+	}
 	if err != nil {
 		slog.Warn("netpolicy: manual network setting unreadable; treating network as metered", "path", s.path, "err", err)
-		m.Metered = true
+		s.value = true
 	}
-	s.stamp, s.loaded, s.value = stamp, true, m.Metered
-	return s.value
+	return true
 }

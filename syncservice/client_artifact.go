@@ -21,16 +21,22 @@ func (c *Client) ExportV2(ctx context.Context, request ExportRequest) (ChangeEnv
 	return out, out.Validate(false)
 }
 
-// ApplyV2 delivers one immutable change that may carry artifact roots. The
+// ApplyV2 delivers one immutable change that may carry artifact roots, for
+// a transfer admitted under the receiver's RestrictedEpoch admitted. The
 // receiver acknowledges SourceRevision only once its own store holds every
 // root closure; otherwise the result is Partial, Stale, or NeedSnapshot. A
 // policy refusal returns its *artifact.PausedError as the error.
-func (c *Client) ApplyV2(ctx context.Context, change ChangeEnvelope) (ApplyResult, error) {
+func (c *Client) ApplyV2(ctx context.Context, change ChangeEnvelope, admitted uint64) (ApplyResult, error) {
 	if err := change.Validate(true); err != nil {
 		return ApplyResult{}, err
 	}
+	params, err := structParams(change)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	params[artifact.AdmittedParam] = admitted
 	var out ApplyResult
-	if err := c.callStruct(ctx, MethodApplyV2, change, &out); err != nil {
+	if err := c.call(ctx, &rpc.Request{Method: MethodApplyV2, Params: params}, &out); err != nil {
 		return ApplyResult{}, err
 	}
 	return out, pausedErr(out.Paused)
@@ -53,10 +59,11 @@ func (c *Client) ArtifactClosure(ctx context.Context, params artifact.ClosurePar
 	return out, err
 }
 
-// ArtifactHave returns the digests the store lacks, in query order. A policy
+// ArtifactHave returns the digests the store lacks, in query order, for a
+// transfer admitted under the receiver's RestrictedEpoch admitted. A policy
 // refusal returns its *artifact.PausedError as the error.
-func (c *Client) ArtifactHave(ctx context.Context, digests []artifact.Digest) ([]artifact.Digest, error) {
-	params := artifact.HaveParams{Digests: digests}
+func (c *Client) ArtifactHave(ctx context.Context, digests []artifact.Digest, admitted uint64) ([]artifact.Digest, error) {
+	params := artifact.HaveParams{Digests: digests, Admitted: admitted}
 	if err := params.Validate(); err != nil {
 		return nil, err
 	}
@@ -102,10 +109,11 @@ func (c *Client) BatchDrop(ctx context.Context, id artifact.Digest) error {
 }
 
 // BatchBegin stages batch on the receiver, declaring sender as this host's
-// live State. A policy refusal returns the result, whose Peer is the
+// live State and admitted as the receiver's RestrictedEpoch the transfer was
+// admitted under. A policy refusal returns the result, whose Peer is the
 // receiver's live State, with its *artifact.PausedError as the error.
-func (c *Client) BatchBegin(ctx context.Context, batch artifact.BatchDescriptor, sender netpolicy.State) (artifact.BatchBeginResult, error) {
-	params := artifact.BatchBeginParams{Batch: batch, Sender: sender}
+func (c *Client) BatchBegin(ctx context.Context, batch artifact.BatchDescriptor, sender netpolicy.State, admitted uint64) (artifact.BatchBeginResult, error) {
+	params := artifact.BatchBeginParams{Batch: batch, Sender: sender, Admitted: admitted}
 	if err := params.Validate(); err != nil {
 		return artifact.BatchBeginResult{}, err
 	}
@@ -117,10 +125,12 @@ func (c *Client) BatchBegin(ctx context.Context, batch artifact.BatchDescriptor,
 }
 
 // BatchPut writes part index of batch id on the receiver, declaring sender
-// as this host's live State. A policy refusal returns the result, whose Peer
-// is the receiver's live State, with its *artifact.PausedError as the error.
-func (c *Client) BatchPut(ctx context.Context, id artifact.Digest, index int, data []byte, sender netpolicy.State) (artifact.BatchPutResult, error) {
-	params := artifact.BatchPutParams{ID: id, Index: index, Data: data, Sender: sender}
+// as this host's live State and admitted as the receiver's RestrictedEpoch
+// the transfer was admitted under. A policy refusal returns the result, whose
+// Peer is the receiver's live State, with its *artifact.PausedError as the
+// error.
+func (c *Client) BatchPut(ctx context.Context, id artifact.Digest, index int, data []byte, sender netpolicy.State, admitted uint64) (artifact.BatchPutResult, error) {
+	params := artifact.BatchPutParams{ID: id, Index: index, Data: data, Sender: sender, Admitted: admitted}
 	if err := params.Validate(); err != nil {
 		return artifact.BatchPutResult{}, err
 	}
@@ -131,15 +141,19 @@ func (c *Client) BatchPut(ctx context.Context, id artifact.Digest, index int, da
 	return out, pausedErr(out.Paused)
 }
 
-// BatchCommit verifies and stores every object of a fully staged batch.
-func (c *Client) BatchCommit(ctx context.Context, id artifact.Digest) (artifact.CommitReport, error) {
-	params := artifact.BatchRef{ID: id}
+// BatchCommit verifies and stores every object of a fully staged batch, for
+// a transfer admitted under the receiver's RestrictedEpoch admitted. A policy
+// refusal returns its *artifact.PausedError as the error.
+func (c *Client) BatchCommit(ctx context.Context, id artifact.Digest, admitted uint64) (artifact.CommitReport, error) {
+	params := artifact.BatchCommitParams{ID: id, Admitted: admitted}
 	if err := params.Validate(); err != nil {
 		return artifact.CommitReport{}, err
 	}
-	var out artifact.CommitReport
-	err := c.callStruct(ctx, artifact.MethodBatchCommit, params, &out)
-	return out, err
+	var out artifact.BatchCommitResult
+	if err := c.callStruct(ctx, artifact.MethodBatchCommit, params, &out); err != nil {
+		return artifact.CommitReport{}, err
+	}
+	return out.CommitReport, pausedErr(out.Paused)
 }
 
 // PinsSet replaces owner's pinned roots on the consumer store; empty roots

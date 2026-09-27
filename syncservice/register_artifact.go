@@ -28,8 +28,9 @@ type acceptStore interface {
 }
 
 // RegisterArtifactConsumer binds svc's v1 and v2 sync methods and store's
-// artifact methods on d. apply.v2 returns the typed refusal, before decoding
-// the change, while monitor's live State is not unrestricted; it computes
+// artifact methods on d. apply.v2 returns the typed artifact.Refusal, before
+// decoding the change, while monitor's live State is not unrestricted or has
+// moved past the epoch the sender admitted the transfer under; it computes
 // root readiness from store and refuses an acknowledgement while any root
 // closure is incomplete. Each change's roots stay pinned under an owner of
 // their own from before svc sees them until svc refuses the change, fails an
@@ -67,7 +68,11 @@ func registerArtifactConsumer(d *rpc.Dispatcher, svc ArtifactConsumer, store acc
 		return change, nil
 	})
 	d.RegisterExclusive(MethodApplyV2, func(ctx context.Context, p map[string]any) (any, error) {
-		if refusal := artifact.LiveRefusal(monitor); refusal != nil {
+		_, refusal, err := artifact.Refusal(monitor, p)
+		if err != nil {
+			return nil, err
+		}
+		if refusal != nil {
 			return ApplyResult{AckedRevision: NewRevision(0), Paused: refusal}, nil
 		}
 		var change ChangeEnvelope
