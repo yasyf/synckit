@@ -6,6 +6,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`artifact` stores large sync payloads by content address.**
+  `Open` takes a per-service store under `ServiceRoot(serviceID)` and holds its
+  `store.lock` until `Close`. Blobs and encoded manifests are at most 1 MiB.
+  `Put` splits content into fixed 1 MiB chunks and reuses unchanged chunks.
+  `PutGroup`, `Closure`, `Complete`, and `Verify` work over whole root closures.
+  `Has` reports which supplied digests are missing. `SetPins`
+  and `GC` keep pinned closures and sweep the rest after `GCGrace`, except for
+  descendants of retained manifests. Batches ship
+  as zstd-compressed SKP1 packs with at most 32 MiB of uncompressed object bytes,
+  split into parts of at most 1 MiB; `CommitBatch` checks
+  every object's kind, digest, and size and stores nothing when any check fails.
+  Each object stays marked under `unsynced/` until its bytes are durable, and
+  every reader, including an `OpenReadOnly` reader in another process, treats a
+  marked object as missing. A failed rollback leaves its marks in place; the
+  next `Open` or `GC` makes those objects durable and clears the marks.
+  `Register` serves the store over RPC, and on every `batch.begin` and
+  `batch.put` the receiver checks its own live network state before writing.
+- **`netpolicy` gates bulk transfer on network cost.** On macOS,
+  `NewMonitor` reads the default path through Network.framework. `Monitor` reports
+  whether this host's route is connected, expensive, constrained, cellular, or
+  manually marked metered, and `Evaluate` allows a transfer only when both ends
+  are unrestricted. `synckitd net status [--json]` prints the local state and
+  each mesh peer's verdict or error. `synckitd net metered on|off` sets the manual
+  persisted override for every network the host joins; `off` clears only that
+  override.
+- **`netpolicy` catches a restriction that clears between two reads.**
+  `State.RestrictedEpoch` advances on every restricted path update and on every
+  manual setting save except one clearing a metered mark it already counted,
+  including a save undone before the next read. The delivery worker records the
+  epoch when it admits a transfer and stops the transfer once the epoch moves.
+  It pauses with `local-restricted-mid-transfer` and restarts at once the first
+  time, checking the network again before it sends. `Gate.Wait` also returns the
+  local `State` now, and `Gate.Check` takes it and pauses the same way.
+- **The receiver stops a transfer after its own restriction clears.**
+  `State.RestrictedEpoch` now crosses the wire. The delivery worker records the
+  peer's epoch from `net.status` when it admits a transfer and sends it with
+  every `have`, `batch.begin`, `batch.put`, `batch.commit`, and `apply.v2`
+  call. Once the receiver's own epoch has moved, it refuses each of those calls
+  with `receiver-restricted-mid-transfer` and writes nothing. The worker pauses
+  with `peer-restricted-mid-transfer` and restarts at once the first time.
+  A re-probe that reports a moved peer epoch pauses the same way before the
+  next call.
+  Further consecutive restarts back off from 1 s to 60 s until a batch commits
+  or the attempt ends another way.
+  `artifact.Refusal` replaces `artifact.LiveRefusal`, and the syncservice
+  client's bulk calls take the admitted epoch.
+- **syncservice v2 for artifact consumers.** `ChangeEnvelope.Artifacts` names a
+  change's roots. `BindDelivery` uses the v2 hash domain for artifact changes.
+  The hash includes the root count, then each root's kind followed by its digest
+  and size, preserving root order.
+  A change without artifacts
+  keeps its v1 ID byte for byte. `RegisterArtifactConsumer` serves `export.v2`,
+  `apply.v2`, and the store's artifact methods. `apply.v2` passes the roots whose
+  closures are complete in the receiver's own store to `ApplyArtifacts` and
+  refuses a consumer's
+  acknowledgement while any root closure is missing (`ErrIncompleteAck`). `Fence`
+  and `Receipt` give consumers replay, stale, and need-snapshot decisions, and
+  `ApplyResult` gains `Stale`, `HeldDigest`, and `Partial`. The v1 export and
+  apply paths refuse any change that carries artifacts.
+- **Delivery v2 and delivery status.** `synckitd serve` runs one worker per
+  configured service and peer. Artifact workers coalesce kicks for 10 s from
+  the oldest unrun kick; later kicks do not extend that deadline. Workers using v1
+  run without that delay. While a peer is offline, a newer export supersedes
+  the pending change, so one pending change remains. A kick during an artifact
+  transfer causes a new export at the next batch boundary, after at least one
+  batch completes. Before transferring artifacts, the worker checks both hosts'
+  network state. It then ships only the objects the peer
+  lacks and resumes an interrupted batch from the parts the peer already holds.
+  The change counts as delivered only after the peer acknowledges it with every
+  root complete. Pauses report a reason code such as `local-cellular`, `peer-unreachable`, or
+  `peer-incompatible`, and resume when the network changes. Errors back off from
+  30 s to 5 min. The new `delivery` package exposes `Status` and `Kick`, served
+  by the daemon's `delivery.status` and `delivery.kick` methods. A revision is
+  durable on a peer only once `PeerStatus.Acked` reaches it.
+- **In-process delivery tests with `daemon.NewHarness`.** `HarnessConfig`
+  supplies hosts with separate state directories, local service transports,
+  and network monitors. Its `Links` callback supplies peer transports, and
+  `ArtifactMaxWait` and `RetryInterval` control test timing. `Harness` runs
+  the real delivery workers and v2 state store without SSH or launchd.
+  `Kick` queues work, `Status` reports it, and `WaitIdle` waits for a selected
+  worker to have no queued kick or running attempt. It returns idle or paused
+  status. Failed workers keep retrying while `WaitIdle` waits; its context bounds
+  the wait. `Close` stops workers and closes local service transports.
+- **`rpc.ErrUnknownMethod` marks a daemon that predates a method.**
+  `rpc.ReplyError` turns a failed reply's `Error` into an error. It wraps
+  `ErrUnknownMethod` only for the dispatcher's own `unknown method "<name>"`
+  reply; any other text, including a handler error that starts with the same
+  words, stays an opaque error. The `delivery` and `syncservice` clients, the
+  `synckitd consent` commands, and `synckitd reconcile` wrap their reply errors
+  this way, so `errors.Is(err, rpc.ErrUnknownMethod)` tells a daemon that needs
+  upgrading from a failed handler. Their error text is unchanged.
+
+### Changed
+
+- **Delivery state moves to v2, with no downgrade.** synckitd now keeps
+  delivery state in `delivery-v2.json` under the mesh directory, with pending
+  change envelopes in `delivery-v2/pending/`. Migration is lazy: a delivery-state
+  access that finds `delivery-v2.json` missing reads and migrates
+  `delivery-v1.json`, if present. Startup only schedules workers for configured
+  pairs of services and peers; an empty set leaves migration for a later access.
+  A delivery status request also reads the store and can trigger migration.
+  The migration keeps each acknowledged revision, drops
+  the v1 pending change, which the next export re-stages, and removes the v1
+  file.
+  An older synckitd cannot read the v2 state, so do not downgrade after
+  upgrading.
+- **`synckitd reconcile` runs its pass inside the running daemon.** The CLI no
+  longer reconciles consumers or delivers itself. It sends the `reconcile` RPC
+  to synckitd, which reconciles every consumer, starts delivery lanes for hosts
+  registered since the daemon started, and kicks delivery. The command fails
+  when the daemon is not running.
+
+### Fixed
+
+- **`synckitd install` restarts a helper whose program was replaced in place.**
+  An upgraded helper keeps its program path, so its LaunchAgent plist used to
+  stay byte-identical and launchd kept running the old build. Each agent's
+  environment now carries `SYNCKIT_PROGRAM_SHA256`, the digest of its program:
+  a changed program changes the plist, so launchd reloads the job, while an
+  unchanged program leaves the job running. Install boots a job with a
+  changed plist out before it writes the new one. If that boot-out fails,
+  the old plist and the old job stay in place; if a later step of the reload
+  fails, the new plist is on disk and the old job is already gone. Either way
+  the next install finishes the reload, instead of recording the new build
+  while the old one keeps running.
+- **A failed `rpc.Client.Call` retires its lane under the caller's context.**
+  A call that failed because its own deadline or cancellation ended used to
+  wait up to 5 s for the daemon to finish the abandoned request before
+  returning. Retirement now inherits the caller's context, so it tears down a
+  lane with a call still pending once that context ends. Any close that
+  reaches daemonkit v0.23.0's graceful go-away can still outlast the caller's
+  context, because the go-away runs detached from it, bounded by daemonkit's
+  10 s write timeout. That covers a peer rejecting a call while its context is
+  still live, and a canceled or expired call whose pending calls had already
+  settled when retirement began.
+
 ## [0.39.2] - 2026-08-31
 
 ### Fixed

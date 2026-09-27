@@ -1,16 +1,18 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/yasyf/synckit/codec"
+	"github.com/yasyf/synckit/delivery"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/internal/rpctest"
 	"github.com/yasyf/synckit/manifest"
@@ -77,8 +79,6 @@ type fakeConsumer struct {
 
 	lastReconcileOrigin string
 	reconcileCalls      int
-	lastSyncOrigin      string
-	syncCalls           int
 	exportKind          syncservice.ChangeKind
 	exportBase          syncservice.Revision
 	exportSource        syncservice.Revision
@@ -127,17 +127,7 @@ func (f *fakeConsumer) Export(_ context.Context, request syncservice.ExportReque
 }
 
 func (f *fakeConsumer) Apply(_ context.Context, change syncservice.ChangeEnvelope) (syncservice.ApplyResult, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.lastSyncOrigin = change.Origin
-	f.syncCalls++
 	return syncservice.ApplyResult{AckedRevision: change.SourceRevision}, nil
-}
-
-func (f *fakeConsumer) syncOrigin() (string, int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.lastSyncOrigin, f.syncCalls
 }
 
 func (f *fakeConsumer) reconcileOrigin() (string, int) {
@@ -315,7 +305,11 @@ func TestManifestNotifierLocal(t *testing.T) {
 	fake := newFakeConsumer()
 	tx := serveFake(t, fake)
 	t.Cleanup(func() { _ = tx.Close() })
-	n := manifestNotifier{local: syncservice.NewClient(tx), m: testManifest(), self: "me@self"}
+	n := manifestNotifier{
+		self:  "me@self",
+		local: localReconciler{client: syncservice.NewClient(tx), name: "stub"},
+		kick:  func(peer string) error { t.Fatalf("local notify kicked %q", peer); return nil },
+	}
 
 	if err := n.Notify(context.Background(), "me@self", "site-a"); err != nil {
 		t.Fatalf("Notify local: %v", err)
@@ -324,93 +318,30 @@ func TestManifestNotifierLocal(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("local sync calls = %d, want 1", calls)
 	}
-	// Anti-echo: a local notify syncs with an empty origin.
 	if origin != "" {
 		t.Errorf("local sync origin = %q, want empty", origin)
 	}
 }
 
-func TestManifestNotifierPeer(t *testing.T) {
+func TestManifestNotifierPeerKicksItsLane(t *testing.T) {
 	self := newFakeConsumer()
-	peer := newFakeConsumer()
-	fakeMesh(t, map[string]*fakeConsumer{"me@self": self, "peer@node": peer})
-
+	var kicked []string
 	n := manifestNotifier{
-		local: syncservice.NewClient(serveFake(t, self)), m: testManifest(), self: "me@self",
-		delivery: newDeliveryStore(t.TempDir()),
+		self:  "me@self",
+		local: localReconciler{client: syncservice.NewClient(serveFake(t, self)), name: "stub"},
+		kick:  func(peer string) error { kicked = append(kicked, peer); return nil },
 	}
 	if err := n.Notify(context.Background(), "peer@node", "site-a"); err != nil {
 		t.Fatalf("Notify peer: %v", err)
 	}
-
-	origin, calls := peer.syncOrigin()
-	if calls != 1 {
-		t.Fatalf("peer sync calls = %d, want 1", calls)
+	if len(kicked) != 1 || kicked[0] != "peer@node" {
+		t.Fatalf("kicked = %v, want [peer@node]", kicked)
 	}
-	// Anti-echo: a peer notify syncs with origin=self so the peer skips notifying back.
-	if origin != "me@self" {
-		t.Errorf("peer sync origin = %q, want me@self", origin)
+	if _, calls := self.reconcileOrigin(); calls != 0 {
+		t.Errorf("peer notify reconciled locally %d times, want 0", calls)
 	}
-	if _, selfCalls := self.syncOrigin(); selfCalls != 0 {
-		t.Errorf("self consumer saw %d syncs on a peer notify, want 0", selfCalls)
-	}
-}
-
-func TestManifestNotifierSkipsUnchangedExport(t *testing.T) {
-	self := newFakeConsumer()
-	self.exportKind = syncservice.ChangeDelta
-	self.exportBase = syncservice.NewRevision(1)
-	self.exportSource = syncservice.NewRevision(1)
-	fakeMesh(t, map[string]*fakeConsumer{"me@self": self})
-
-	store := newDeliveryStore(t.TempDir())
-	settled, err := syncservice.NewExportedChange(
-		"stub", testManifest().Service.SchemaFingerprint, syncservice.ChangeDelta,
-		syncservice.NewRevision(0), syncservice.NewRevision(1), []byte(`{}`),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	settled, err = syncservice.BindDelivery(settled, "me@self")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.putPending(t.Context(), "peer@node", settled); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.acknowledge(t.Context(), "peer@node", settled, syncservice.ApplyResult{
-		AckedRevision: settled.SourceRevision,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(store.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	n := manifestNotifier{
-		local: syncservice.NewClient(serveFake(t, self)), m: testManifest(), self: "me@self", delivery: store,
-	}
-	if err := n.Notify(t.Context(), "peer@node", "site-a"); err != nil {
-		t.Fatalf("Notify unchanged peer: %v", err)
-	}
-	after, err := os.ReadFile(store.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(after, before) {
-		t.Fatalf("unchanged export rewrote delivery state\nbefore: %s\nafter:  %s", before, after)
-	}
-	acked, pending, err := store.load(t.Context(), "stub", "peer@node")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if acked != syncservice.NewRevision(1) || pending != nil {
-		t.Fatalf("unchanged delivery ack=%q pending=%#v", acked, pending)
-	}
-	request, calls := self.exportState()
-	if calls != 1 || request.SinceRevision != syncservice.NewRevision(1) {
-		t.Fatalf("export calls=%d request=%#v", calls, request)
+	if _, exports := self.exportState(); exports != 0 {
+		t.Errorf("peer notify exported %d times, want 0 (the lane stages)", exports)
 	}
 }
 
@@ -424,8 +355,7 @@ func TestEngineEventDrivesLocalSync(t *testing.T) {
 		local,
 		testManifest(),
 		&hostregistry.Registry{Self: "me@self"},
-		testProcessScope(t),
-		newDeliveryStore(t.TempDir()),
+		func(peer string) error { t.Errorf("single-host engine kicked %q", peer); return nil },
 	)
 
 	ctx := context.Background()
@@ -448,6 +378,67 @@ func TestEngineEventDrivesLocalSync(t *testing.T) {
 }
 
 func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
+	watched := t.TempDir()
+	fake := newFakeConsumer(syncservice.WatchItem{ID: "only", WatchDirs: []string{watched}, Fingerprint: "fp-1"})
+	startStubServe(t, map[string]*fakeConsumer{"me@self": fake})
+
+	resp := callReload(t)
+	if !resp.OK {
+		t.Fatalf("reload rpc: %s", resp.Error)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, calls := fake.reconcileOrigin(); calls > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no fs event drove a sync after the reload rpc returned: the watch generation died with the request ctx")
+		}
+		if err := os.WriteFile(filepath.Join(watched, "touch"), []byte(time.Now().String()), 0o600); err != nil {
+			t.Fatalf("touch watched dir: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if origin, _ := fake.reconcileOrigin(); origin != "" {
+		t.Errorf("event-driven local sync origin = %q, want empty", origin)
+	}
+}
+
+func TestReconcileCommandGivesAPeerRegisteredSinceStartALane(t *testing.T) {
+	startStubServe(t, map[string]*fakeConsumer{
+		"me@self":   newFakeConsumer(),
+		"peer@node": newFakeConsumer(),
+	})
+	if resp := callReload(t); !resp.OK {
+		t.Fatalf("reload rpc: %s", resp.Error)
+	}
+	fact, err := hostregistry.NewSSHHostFact("peer@node", "/opt/homebrew/bin/synckitd", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hostregistry.Mesh.RegisterHost(context.Background(), fact); err != nil {
+		t.Fatalf("register peer: %v", err)
+	}
+
+	cmd := newReconcileCmd()
+	cmd.SetArgs(nil)
+	cmd.SetOut(io.Discard)
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	statuses, err := delivery.Status(context.Background(), "stub")
+	if err != nil {
+		t.Fatalf("delivery status: %v", err)
+	}
+	if !slices.ContainsFunc(statuses, func(s delivery.PeerStatus) bool { return s.Peer == "peer@node" }) {
+		t.Fatalf("statuses = %+v, want a lane for peer@node after reconcile", statuses)
+	}
+}
+
+func startStubServe(t *testing.T, fakes map[string]*fakeConsumer) {
+	t.Helper()
 	cfgHome, err := os.MkdirTemp("", "skd")
 	if err != nil {
 		t.Fatalf("mkdir config home: %v", err)
@@ -466,9 +457,7 @@ func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
 		t.Fatalf("seed mesh: %v", err)
 	}
 
-	watched := t.TempDir()
-	fake := newFakeConsumer(syncservice.WatchItem{ID: "only", WatchDirs: []string{watched}, Fingerprint: "fp-1"})
-	fakeMesh(t, map[string]*fakeConsumer{"me@self": fake})
+	fakeMesh(t, fakes)
 
 	manifestsDir, err := ensureManifestsDir()
 	if err != nil {
@@ -496,28 +485,6 @@ func TestReloadRPCGenerationOutlivesRequest(t *testing.T) {
 			t.Error("serve did not stop after ctx cancel")
 		}
 	})
-
-	resp := callReload(t)
-	if !resp.OK {
-		t.Fatalf("reload rpc: %s", resp.Error)
-	}
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, calls := fake.reconcileOrigin(); calls > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("no fs event drove a sync after the reload rpc returned: the watch generation died with the request ctx")
-		}
-		if err := os.WriteFile(filepath.Join(watched, "touch"), []byte(time.Now().String()), 0o600); err != nil {
-			t.Fatalf("touch watched dir: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if origin, _ := fake.reconcileOrigin(); origin != "" {
-		t.Errorf("event-driven local sync origin = %q, want empty", origin)
-	}
 }
 
 // countingTransport is a Transport that records how many times it was closed, so a
@@ -597,7 +564,7 @@ func TestReloadClosesEveryTransport(t *testing.T) {
 	}
 	t.Cleanup(func() { dialTransport = prev })
 
-	sup := newSupervisor(testProcessScope(t), newDeliveryStore(t.TempDir()))
+	sup := newSupervisor(testProcessScope(t), newDeliveryStore(t.TempDir()), newFakeMonitor(unrestricted))
 	var stopOnce sync.Once
 	stop := func() { stopOnce.Do(sup.stop) }
 	t.Cleanup(stop)
@@ -865,4 +832,66 @@ func shrinkBackoff(t *testing.T) {
 		listBackoff = prevBackoff
 		listRetryBudget = prevBudget
 	})
+}
+
+func TestReconcileStartsLanesForNewlyRegisteredPeers(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hostregistry.Mesh.Update(context.Background(), func(g *hostregistry.Registry) error {
+		g.Self = "me@self"
+		return nil
+	}); err != nil {
+		t.Fatalf("seed mesh: %v", err)
+	}
+	manifestsDir, err := ensureManifestsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestsDir, "stub.json"), mustJSON(t, testManifest()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := dialTransport
+	dialTransport = func(processScope, manifest.Manifest, string, string) syncservice.Transport {
+		return &countingTransport{onClose: func() {}}
+	}
+	t.Cleanup(func() { dialTransport = prev })
+	sup := newSupervisor(testProcessScope(t), newDeliveryStore(t.TempDir()), newFakeMonitor(unrestricted))
+	t.Cleanup(sup.stop)
+	ctx := context.Background()
+	if err := sup.reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before, err := sup.deliveries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := before.Kick("stub", "peer@node"); err == nil {
+		t.Fatal("Kick before registration found a lane")
+	}
+
+	fact, err := hostregistry.NewSSHHostFact("peer@node", "/opt/homebrew/bin/synckitd", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hostregistry.Mesh.RegisterHost(ctx, fact); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sup.reconcile(ctx, ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	after, err := sup.deliveries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := after.Kick("stub", "peer@node"); err != nil {
+		t.Fatalf("Kick after reconcile = %v, want a lane for the registered peer", err)
+	}
+	if _, err := sup.reconcile(ctx, ctx); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if again, _ := sup.deliveries(); again != after {
+		t.Fatal("reconcile with unchanged membership restarted the delivery generation")
+	}
 }

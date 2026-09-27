@@ -159,7 +159,7 @@ func newConsentRequestCmd() *cobra.Command {
 				return err
 			}
 			if !resp.OK {
-				return fmt.Errorf("consent.request: %s", resp.Error)
+				return fmt.Errorf("consent.request: %w", rpc.ReplyError(resp.Error))
 			}
 			return printJSON(cmd.OutOrStdout(), resp.Result)
 		},
@@ -222,7 +222,7 @@ func relayReply(ctx context.Context, in io.Reader) (any, error) {
 		return nil, err
 	}
 	if !resp.OK {
-		return nil, fmt.Errorf("consent.relay: %s", resp.Error)
+		return nil, fmt.Errorf("consent.relay: %w", rpc.ReplyError(resp.Error))
 	}
 	return resp.Result, nil
 }
@@ -238,7 +238,7 @@ func newConsentPresenceCmd() *cobra.Command {
 				return err
 			}
 			if !resp.OK {
-				return fmt.Errorf("consent.presence: %s", resp.Error)
+				return fmt.Errorf("consent.presence: %w", rpc.ReplyError(resp.Error))
 			}
 			return printJSON(cmd.OutOrStdout(), resp.Result)
 		},

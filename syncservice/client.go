@@ -63,7 +63,8 @@ func (c *Client) Reconcile(ctx context.Context, origin string) (ReconcileResult,
 	return out, err
 }
 
-// Export asks the source service for one immutable full or delta change.
+// Export asks the source service for one immutable full or delta change and
+// refuses one carrying artifacts.
 func (c *Client) Export(ctx context.Context, request ExportRequest) (ChangeEnvelope, error) {
 	if err := request.Validate(); err != nil {
 		return ChangeEnvelope{}, err
@@ -73,16 +74,22 @@ func (c *Client) Export(ctx context.Context, request ExportRequest) (ChangeEnvel
 		return ChangeEnvelope{}, err
 	}
 	var out ChangeEnvelope
-	err = c.call(ctx, &rpc.Request{Method: MethodExport, Params: params}, &out)
-	if err == nil {
-		err = out.Validate(false)
+	if err := c.call(ctx, &rpc.Request{Method: MethodExport, Params: params}, &out); err != nil {
+		return ChangeEnvelope{}, err
 	}
-	return out, err
+	if err := out.Validate(false); err != nil {
+		return ChangeEnvelope{}, err
+	}
+	return out, out.refuseArtifacts()
 }
 
-// Apply delivers one immutable source change and returns its exact acknowledgement.
+// Apply delivers one immutable source change without artifacts and returns
+// its exact acknowledgement.
 func (c *Client) Apply(ctx context.Context, change ChangeEnvelope) (ApplyResult, error) {
 	if err := change.Validate(true); err != nil {
+		return ApplyResult{}, err
+	}
+	if err := change.refuseArtifacts(); err != nil {
 		return ApplyResult{}, err
 	}
 	params, err := structParams(change)
@@ -103,7 +110,7 @@ func (c *Client) call(ctx context.Context, req *rpc.Request, out any) error {
 		return err
 	}
 	if !resp.OK {
-		return fmt.Errorf("%s: %s", req.Method, resp.Error)
+		return fmt.Errorf("%s: %w", req.Method, rpc.ReplyError(resp.Error))
 	}
 	if out != nil && len(resp.Result) > 0 && string(resp.Result) != "null" {
 		if err := json.Unmarshal(resp.Result, out); err != nil {

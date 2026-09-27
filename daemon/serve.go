@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/yasyf/synckit/debug"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
+	"github.com/yasyf/synckit/netpolicy"
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 	"github.com/yasyf/synckit/watch"
@@ -84,14 +86,23 @@ func serve(ctx context.Context) error {
 //
 //nolint:contextcheck // c.Context is the lifetime Serve mints for the product; the caller's own ctx is deliberately not it.
 func startServe(c daemonkit.Ctx, dir string) (daemonkit.Product, error) {
-	sup := newSupervisor(c, newDeliveryStore(dir))
+	manualPath, err := netpolicy.ManualPath()
+	if err != nil {
+		return nil, err
+	}
+	monitor, err := netpolicy.NewMonitor(manualPath)
+	if err != nil {
+		return nil, err
+	}
+	sup := newSupervisor(c, newDeliveryStore(dir), monitor)
 	d := rpc.NewDispatcher()
 	d.Register("status", handleStatus)
+	registerDelivery(d, sup)
 	// reconcile and reload mutate the engine generation, so they serialize behind
 	// the exclusive mutex — a reload never tears down the clients a reconcile pass
 	// is mid-drive on; status is a pure read and stays concurrent.
 	d.RegisterExclusive("reconcile", func(hctx context.Context, _ map[string]any) (any, error) {
-		return reconcileAll(hctx, c)
+		return sup.reconcile(hctx, c.Context)
 	})
 	// The generation reload starts must outlive the request, so it parents to the
 	// daemon's own lifetime: the request ctx dies as soon as Dispatch returns,
@@ -112,6 +123,7 @@ func startServe(c daemonkit.Ctx, dir string) (daemonkit.Product, error) {
 		defer cancel()
 		sup.close()
 		_ = sup.wait(closeCtx)
+		_ = monitor.Close()
 		return nil, err
 	}
 	return &runtimeProduct{supervisor: sup, dispatcher: d}, nil
@@ -134,7 +146,7 @@ func (p *runtimeProduct) Drain(budget daemonkit.Budget) error {
 func (p *runtimeProduct) Close(budget daemonkit.Budget) error {
 	ctx, cancel := budget.Context(context.Background())
 	defer cancel()
-	return p.supervisor.wait(ctx)
+	return errors.Join(p.supervisor.wait(ctx), p.supervisor.monitor.Close())
 }
 
 // activateServe does the presentation work bound to the daemon's activation
@@ -159,24 +171,55 @@ func activateServe(lifetime context.Context, sup *supervisor) error {
 	return nil
 }
 
-// supervisor owns the current generation of watch goroutines and the long-lived
-// local clients those goroutines drive. reload tears the current generation down
-// and starts a fresh one from the manifests on disk, so a register/unregister
-// rebinds the watchers without restarting the process. It is safe for concurrent
-// reload.
 type supervisor struct {
-	scope    processScope
-	delivery *deliveryStore
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	wg       *sync.WaitGroup
-	clients  []*syncservice.Client
-	closed   bool
-	settled  bool
+	scope     processScope
+	delivery  *deliveryStore
+	monitor   netpolicy.Monitor
+	mu        sync.Mutex
+	cancel    context.CancelFunc
+	wg        *sync.WaitGroup
+	clients   []*syncservice.Client
+	scheduler *deliveryScheduler
+	mesh      hostregistry.Registry
+	closed    bool
+	settled   bool
 }
 
-func newSupervisor(scope processScope, delivery *deliveryStore) *supervisor {
-	return &supervisor{scope: scope, delivery: delivery}
+func newSupervisor(scope processScope, delivery *deliveryStore, monitor netpolicy.Monitor) *supervisor {
+	return &supervisor{scope: scope, delivery: delivery, monitor: monitor}
+}
+
+func (s *supervisor) reconcile(ctx, lifetime context.Context) ([]reconcileResult, error) {
+	results, err := reconcileAll(ctx, s.scope)
+	if err != nil {
+		return nil, err
+	}
+	reg, err := hostregistry.Mesh.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load mesh: %w", err)
+	}
+	s.mu.Lock()
+	current := s.mesh
+	s.mu.Unlock()
+	if current.Self != reg.Self || !slices.Equal(current.Hosts, reg.Hosts) {
+		if err := s.reload(lifetime); err != nil {
+			return nil, err
+		}
+	}
+	scheduler, err := s.deliveries()
+	if err != nil {
+		return nil, err
+	}
+	return results, scheduler.Kick("", "")
+}
+
+func (s *supervisor) deliveries() (*deliveryScheduler, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.scheduler == nil {
+		return nil, errors.New("delivery scheduler is not running")
+	}
+	return s.scheduler, nil
 }
 
 // reload cancels the running watch generation, waits for it to drain, closes the
@@ -204,6 +247,7 @@ func (s *supervisor) reload(parent context.Context) error {
 			_ = c.Close()
 		}
 		s.clients = nil
+		s.scheduler = nil
 	}
 
 	ctx, cancel := context.WithCancel(parent)
@@ -217,22 +261,31 @@ func (s *supervisor) reload(parent context.Context) error {
 		return fmt.Errorf("load mesh: %w", err)
 	}
 
-	for _, m := range manifests {
-		s.startEngine(ctx, wg, m, reg)
+	scheduler := newDeliveryScheduler(ctx, wg, s.scope, s.delivery, s.monitor, reg.Self)
+	locals := make([]*syncservice.Client, len(manifests))
+	for i, m := range manifests {
+		locals[i] = syncservice.NewClient(dialTransport(s.scope, m, reg.Self, reg.Self))
+		s.clients = append(s.clients, locals[i])
+		scheduler.add(m, locals[i], reg.Hosts)
 	}
+	for i, m := range manifests {
+		s.startEngine(ctx, wg, m, locals[i], reg, scheduler)
+	}
+	scheduler.start()
+	s.scheduler, s.mesh = scheduler, *reg
 	slog.InfoContext(ctx, "synckitd watch supervisor reloaded", "manifests", len(manifests))
 	return nil
 }
 
-// startEngine builds one manifest's long-lived local client and watch engine and
-// launches its supervised watch goroutine. The client is built without any I/O —
-// Socket does not dial and Stdio does not spawn until the first Do — so the first
-// round trip happens asynchronously under superviseWatch, keeping reload prompt.
-// The caller holds s.mu, so appending to s.clients is safe.
-func (s *supervisor) startEngine(ctx context.Context, wg *sync.WaitGroup, m manifest.Manifest, reg *hostregistry.Registry) {
-	local := syncservice.NewClient(dialTransport(s.scope, m, reg.Self, reg.Self))
-	s.clients = append(s.clients, local)
-	eng := buildEngine(ctx, local, m, reg, s.scope, s.delivery)
+func (s *supervisor) startEngine(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	m manifest.Manifest,
+	local *syncservice.Client,
+	reg *hostregistry.Registry,
+	scheduler *deliveryScheduler,
+) {
+	eng := buildEngine(ctx, local, m, reg, func(peer string) error { return scheduler.Kick(m.Name, peer) })
 
 	// run returns how long it spent inside the backend, so a run that dies in the
 	// list phase (never reaching the backend) reports zero and never counts healthy.
@@ -328,34 +381,23 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// buildEngine wires one manifest's watch engine: the resolver and notifier drive
-// the consumer's typed sync service, the digest is the identity (the id is already
-// the stable key), and the host fan-out is self first (local converge) then peers.
-// The notifier is wrapped in a per-peer circuit breaker under ctx (the generation
-// context its retry timers outlive single events on), so a repeatedly unreachable
-// peer is logged once and probed on a backoff instead of on every event. The gate
-// defers a busy item's evaluation at the debounce cadence, firing through after ten
-// windows so a persistently busy item can only delay a change, never park it.
 func buildEngine(
 	ctx context.Context,
 	local *syncservice.Client,
 	m manifest.Manifest,
 	reg *hostregistry.Registry,
-	scope processScope,
-	delivery *deliveryStore,
+	kick func(peer string) error,
 ) *watch.Engine[string] {
 	hosts := append([]string{reg.Self}, reg.Hosts...)
 	debounce := time.Duration(m.Watch.Debounce)
 	memo := newFingerprintMemo()
 	return watch.NewEngine[string](
 		manifestResolver{client: local, name: m.Name, memo: memo},
-		newBreakerNotifier(
-			ctx,
-			manifestNotifier{local: local, m: m, self: reg.Self, scope: scope, delivery: delivery},
-			m.Name,
-			reg.Self,
-			scope,
-		),
+		manifestNotifier{
+			self:  reg.Self,
+			local: newBreakerNotifier(ctx, localReconciler{client: local, name: m.Name}, m.Name),
+			kick:  kick,
+		},
 		func(id string) string { return id },
 		debounce,
 		hosts,
@@ -388,6 +430,7 @@ func (s *supervisor) wait(ctx context.Context) error {
 		_ = client.Close()
 	}
 	s.clients = nil
+	s.scheduler = nil
 	s.cancel = nil
 	s.settled = true
 	s.mu.Unlock()
@@ -486,82 +529,27 @@ func (m *fingerprintMemo) take(id string) (string, bool) {
 	return fingerprint, ok
 }
 
-// manifestNotifier drives the consumer's typed Sync for one peer: the self host
-// runs it locally over the long-lived local client with an empty origin, a remote
-// peer runs it over an ssh transport with origin set to this host so the peer
-// skips notifying back (anti-echo provenance). The typed Sync converges the whole
-// consumer, so the id is unused. One unreachable peer never blocks the others —
-// the engine fans out concurrently and isolates each error.
 type manifestNotifier struct {
-	local    *syncservice.Client
-	m        manifest.Manifest
-	self     string
-	scope    processScope
-	delivery *deliveryStore
+	self  string
+	local watch.Notifier[string]
+	kick  func(peer string) error
 }
 
-func (n manifestNotifier) Notify(ctx context.Context, peer, _ string) error {
+func (n manifestNotifier) Notify(ctx context.Context, peer, id string) error {
 	if peer == n.self {
-		if _, err := n.local.Reconcile(ctx, ""); err != nil {
-			return fmt.Errorf("local sync for %q: %w", n.m.Name, err)
-		}
-		return nil
+		return n.local.Notify(ctx, peer, id)
 	}
-	acked, pending, err := n.delivery.load(ctx, n.m.Name, peer)
-	if err != nil {
-		return err
-	}
-	if pending == nil {
-		change, err := n.local.Export(ctx, syncservice.ExportRequest{
-			ServiceID: n.m.Name, SchemaFingerprint: n.m.Service.SchemaFingerprint, SinceRevision: acked,
-		})
-		if err != nil {
-			return fmt.Errorf("export sync for %q: %w", n.m.Name, err)
-		}
-		if change.SourceRevision == acked {
-			return nil
-		}
-		change, err = syncservice.BindDelivery(change, n.self)
-		if err != nil {
-			return err
-		}
-		if err := n.delivery.putPending(ctx, peer, change); err != nil {
-			return err
-		}
-		pending = &change
-	}
-	c := syncservice.NewClient(dialTransport(n.scope, n.m, peer, n.self))
-	defer func() { _ = c.Close() }()
-	ack, err := c.Apply(ctx, *pending)
-	if err != nil {
-		return fmt.Errorf("ssh sync for %q on %s: %w", n.m.Name, peer, err)
-	}
-	if ack.NeedSnapshot {
-		change, err := n.local.Export(ctx, syncservice.ExportRequest{
-			ServiceID: n.m.Name, SchemaFingerprint: n.m.Service.SchemaFingerprint,
-			SinceRevision: syncservice.NewRevision(0),
-		})
-		if err != nil {
-			return err
-		}
-		change, err = syncservice.BindDelivery(change, n.self)
-		if err != nil {
-			return err
-		}
-		if change.Kind != syncservice.ChangeSnapshot {
-			return errors.New("syncservice: full export did not return a snapshot")
-		}
-		if err := n.delivery.putPending(ctx, peer, change); err != nil {
-			return err
-		}
-		pending = &change
-		ack, err = c.Apply(ctx, change)
-		if err != nil {
-			return err
-		}
-	}
-	if err := n.delivery.acknowledge(ctx, peer, *pending, ack); err != nil {
-		return err
+	return n.kick(peer)
+}
+
+type localReconciler struct {
+	client *syncservice.Client
+	name   string
+}
+
+func (r localReconciler) Notify(ctx context.Context, _, _ string) error {
+	if _, err := r.client.Reconcile(ctx, ""); err != nil {
+		return fmt.Errorf("local sync for %q: %w", r.name, err)
 	}
 	return nil
 }

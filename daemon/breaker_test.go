@@ -64,16 +64,12 @@ func (f *fakeInner) lastCall() notifyRec {
 	return f.calls[len(f.calls)-1]
 }
 
-// breakerHarness captures the breaker's timer, clock, and snapshot seams so a test
-// drives cooldowns deterministically instead of sleeping, and observes each armed
-// cooldown and every tailscale snapshot request.
 type breakerHarness struct {
 	mu    sync.Mutex
 	clock time.Time
 	armed []time.Duration
 	fns   []func()
 	fired int
-	snaps chan string
 }
 
 func (h *breakerHarness) nowFn() func() time.Time {
@@ -105,10 +101,6 @@ func (h *breakerHarness) armFn() func(time.Duration, func()) {
 	}
 }
 
-func (h *breakerHarness) snapFn() func(context.Context, string) {
-	return func(_ context.Context, peer string) { h.snaps <- peer }
-}
-
 func (h *breakerHarness) cooldowns() []time.Duration {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -128,40 +120,19 @@ func (h *breakerHarness) fire() {
 	fn()
 }
 
-func (h *breakerHarness) waitSnapshot(t *testing.T) string {
+func newTestBreaker(ctx context.Context, t *testing.T, inner watch.Notifier[string]) (*breakerNotifier, *breakerHarness) {
 	t.Helper()
-	select {
-	case p := <-h.snaps:
-		return p
-	case <-time.After(time.Second):
-		t.Fatal("no tailscale snapshot within 1s")
-		return ""
-	}
-}
-
-func (h *breakerHarness) noSnapshot(t *testing.T) {
-	t.Helper()
-	select {
-	case p := <-h.snaps:
-		t.Fatalf("unexpected tailscale snapshot for %q", p)
-	case <-time.After(50 * time.Millisecond):
-	}
-}
-
-func newTestBreaker(ctx context.Context, t *testing.T, inner watch.Notifier[string], self string) (*breakerNotifier, *breakerHarness) {
-	t.Helper()
-	h := &breakerHarness{clock: time.Unix(0, 0), snaps: make(chan string, 16)}
-	b := newBreakerNotifier(ctx, inner, "stub", self, testProcessScope(t))
+	h := &breakerHarness{clock: time.Unix(0, 0)}
+	b := newBreakerNotifier(ctx, inner, "stub")
 	b.now = h.nowFn()
 	b.afterFunc = h.armFn()
-	b.snapshot = h.snapFn()
 	return b, h
 }
 
 func TestBreakerPassthroughWhenClosed(t *testing.T) {
 	buf := captureSlog(t)
 	inner := &fakeInner{}
-	b, h := newTestBreaker(context.Background(), t, inner, "me@self")
+	b, h := newTestBreaker(context.Background(), t, inner)
 
 	for i := 0; i < 3; i++ {
 		if err := b.Notify(context.Background(), "peer@node", "id"); err != nil {
@@ -182,7 +153,7 @@ func TestBreakerPassthroughWhenClosed(t *testing.T) {
 func TestBreakerOpensOnFirstFailure(t *testing.T) {
 	buf := captureSlog(t)
 	inner := &fakeInner{fail: true}
-	b, h := newTestBreaker(context.Background(), t, inner, "me@self")
+	b, h := newTestBreaker(context.Background(), t, inner)
 
 	if err := b.Notify(context.Background(), "peer@node", "id"); err != nil {
 		t.Fatalf("Notify = %v, want nil (breaker swallows the failure so engine.go stays silent)", err)
@@ -196,15 +167,12 @@ func TestBreakerOpensOnFirstFailure(t *testing.T) {
 	if got := strings.Count(buf.String(), "watch: peer unreachable"); got != 1 {
 		t.Fatalf("unreachable warns = %d, want 1\n%s", got, buf.String())
 	}
-	if p := h.waitSnapshot(t); p != "peer@node" {
-		t.Fatalf("snapshot peer = %q, want peer@node", p)
-	}
 }
 
 func TestBreakerConcurrentFailuresOpenOnce(t *testing.T) {
 	buf := captureSlog(t)
 	inner := &fakeInner{fail: true}
-	b, h := newTestBreaker(context.Background(), t, inner, "me@self")
+	b, h := newTestBreaker(context.Background(), t, inner)
 
 	// Race the open transition: many goroutines fail Notify for the SAME peer with
 	// distinct ids at once. Extra inner attempts before the breaker latches are
@@ -242,13 +210,12 @@ func TestBreakerConcurrentFailuresOpenOnce(t *testing.T) {
 func TestBreakerSuppressesWhileOpen(t *testing.T) {
 	buf := captureSlog(t)
 	inner := &fakeInner{fail: true}
-	b, h := newTestBreaker(context.Background(), t, inner, "me@self")
+	b, _ := newTestBreaker(context.Background(), t, inner)
 	ctx := context.Background()
 
 	if err := b.Notify(ctx, "peer@node", "id"); err != nil {
 		t.Fatal(err)
 	}
-	h.waitSnapshot(t)
 	base := inner.count() // the single opening attempt
 
 	for i := 0; i < 5; i++ {
@@ -262,18 +229,16 @@ func TestBreakerSuppressesWhileOpen(t *testing.T) {
 	if got := strings.Count(buf.String(), "watch: peer unreachable"); got != 1 {
 		t.Fatalf("unreachable warns = %d, want still 1 (no log per suppressed notify)", got)
 	}
-	h.noSnapshot(t) // no second snapshot for the same open episode
 }
 
 func TestBreakerRetryBacksOffExponentially(t *testing.T) {
 	buf := captureSlog(t)
 	inner := &fakeInner{fail: true}
-	b, h := newTestBreaker(context.Background(), t, inner, "me@self")
+	b, h := newTestBreaker(context.Background(), t, inner)
 
 	if err := b.Notify(context.Background(), "peer@node", "id"); err != nil {
 		t.Fatal(err)
 	}
-	h.waitSnapshot(t)
 	for i := 0; i < 5; i++ {
 		h.fire() // each retry fails and re-arms at the doubled, capped cooldown
 	}
@@ -295,14 +260,13 @@ func TestBreakerRetryBacksOffExponentially(t *testing.T) {
 func TestBreakerRecoveryRetryIsCatchUpSync(t *testing.T) {
 	buf := captureSlog(t)
 	inner := &fakeInner{fail: true}
-	b, h := newTestBreaker(context.Background(), t, inner, "me@self")
+	b, h := newTestBreaker(context.Background(), t, inner)
 	ctx := context.Background()
 
 	h.setClock(time.Unix(1000, 0))
 	if err := b.Notify(ctx, "peer@node", "orig-id"); err != nil {
 		t.Fatal(err)
 	}
-	h.waitSnapshot(t)
 
 	inner.setFail(false)        // peer heals
 	h.advance(45 * time.Second) // 45s down before the retry probe
@@ -330,30 +294,15 @@ func TestBreakerRecoveryRetryIsCatchUpSync(t *testing.T) {
 	}
 }
 
-func TestBreakerSelfPeerSkipsSnapshot(t *testing.T) {
-	buf := captureSlog(t)
-	inner := &fakeInner{fail: true}
-	b, h := newTestBreaker(context.Background(), t, inner, "me@self")
-
-	if err := b.Notify(context.Background(), "me@self", "id"); err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Count(buf.String(), "watch: peer unreachable"); got != 1 {
-		t.Fatalf("unreachable warns = %d, want 1 even for the self host", got)
-	}
-	h.noSnapshot(t) // the local host takes no tailscale snapshot
-}
-
 func TestBreakerRetryNoopsAfterGenerationCancel(t *testing.T) {
 	captureSlog(t)
 	inner := &fakeInner{fail: true}
 	ctx, cancel := context.WithCancel(context.Background())
-	b, h := newTestBreaker(ctx, t, inner, "me@self")
+	b, h := newTestBreaker(ctx, t, inner)
 
 	if err := b.Notify(ctx, "peer@node", "id"); err != nil {
 		t.Fatal(err)
 	}
-	h.waitSnapshot(t)
 	before := inner.count()
 
 	cancel() // the watch generation is torn down
@@ -401,7 +350,7 @@ func (f *perPeerInner) callsFor(peer string) int {
 func TestBreakerIsolatesPeers(t *testing.T) {
 	captureSlog(t)
 	inner := &perPeerInner{down: map[string]bool{"down@node": true}}
-	b, h := newTestBreaker(context.Background(), t, inner, "me@self")
+	b, _ := newTestBreaker(context.Background(), t, inner)
 	ctx := context.Background()
 
 	if err := b.Notify(ctx, "down@node", "id"); err != nil {
@@ -410,7 +359,6 @@ func TestBreakerIsolatesPeers(t *testing.T) {
 	if err := b.Notify(ctx, "up@node", "id"); err != nil {
 		t.Fatal(err)
 	}
-	h.waitSnapshot(t) // only the opened (down) peer snapshots
 
 	b.mu.Lock()
 	_, downOpen := b.open["down@node"]

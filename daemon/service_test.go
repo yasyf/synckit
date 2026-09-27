@@ -3,10 +3,13 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -487,6 +490,9 @@ func TestServiceAgentsStageOnlyUnbundledHelperPrograms(t *testing.T) {
 				t.Fatal(err)
 			}
 			stagedPath := filepath.Join(resolvedTempDir(t), "staged-reposync")
+			if err := os.WriteFile(stagedPath, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+				t.Fatal(err)
+			}
 			var calls []string
 			useStaging(t, func(label, got string) (string, error) {
 				if label == reconcileAgentLabel {
@@ -544,6 +550,9 @@ func TestServiceAgentsFailWhenHelperStagingFails(t *testing.T) {
 	usePathBinaries(t, "reposync")
 	stageErr := errors.New("stage failed")
 	staged := filepath.Join(resolvedTempDir(t), "synckitd")
+	if err := os.WriteFile(staged, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+		t.Fatal(err)
+	}
 	useStaging(t, func(label, _ string) (string, error) {
 		if label == reconcileAgentLabel {
 			return staged, nil
@@ -632,6 +641,221 @@ func TestInstallEnsuresServeBeforeApplyingEveryPlannedAgent(t *testing.T) {
 	}
 	if !slices.Equal(recorded, []string{helper, reconcileAgentLabel}) {
 		t.Fatalf("record = %#v", recorded)
+	}
+}
+
+type launchctlRecorder map[string][]string
+
+func (r launchctlRecorder) run(_ context.Context, _ string, args ...string) (string, int, error) {
+	label := strings.TrimSuffix(filepath.Base(args[len(args)-1]), ".plist")
+	r[label] = append(r[label], args[0])
+	return "", 0, nil
+}
+
+func useLaunchctl(t *testing.T) launchctlRecorder {
+	t.Helper()
+	calls := launchctlRecorder{}
+	runner, ensure := launchctl, ensureServeAgent
+	launchctl = calls.run
+	ensureServeAgent = func(context.Context) error { return nil }
+	t.Cleanup(func() { launchctl, ensureServeAgent = runner, ensure })
+	return calls
+}
+
+func TestInstallReloadsOnlyAHelperWhoseProgramChangedInPlace(t *testing.T) {
+	tests := []struct {
+		name   string
+		source func(t *testing.T, binDir string) string
+	}{
+		{
+			name: "plain executable",
+			source: func(t *testing.T, binDir string) string {
+				target := filepath.Join(resolvedTempDir(t), "reposync")
+				if err := os.Symlink(target, filepath.Join(binDir, "reposync")); err != nil {
+					t.Fatal(err)
+				}
+				return target
+			},
+		},
+		{
+			name: "bundled executable",
+			source: func(t *testing.T, binDir string) string {
+				macos := filepath.Join(resolvedTempDir(t), "Reposync.app", "Contents", "MacOS")
+				if err := os.MkdirAll(macos, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(macos, "reposync")
+				if err := os.Symlink(target, filepath.Join(binDir, "reposync")); err != nil {
+					t.Fatal(err)
+				}
+				return target
+			},
+		},
+	}
+	reload := []string{"bootout", "enable", "bootstrap", "kickstart"}
+	retireThenReload := append([]string{"bootout"}, reload...)
+	kickstart := []string{"print", "kickstart"}
+	helper := labelPrefix + ".helper.reposync"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := useHome(t)
+			useMesh(t)
+			source := tt.source(t, usePathBinaries(t))
+			calls := useLaunchctl(t)
+			writeManifest(t, "reposync")
+
+			steps := []struct {
+				name    string
+				program string
+				want    map[string][]string
+			}{
+				{"first install", "#!/bin/sh\necho one\n", map[string][]string{helper: reload, reconcileAgentLabel: reload}},
+				{"same program", "#!/bin/sh\necho one\n", map[string][]string{helper: kickstart, reconcileAgentLabel: kickstart}},
+				{"program replaced in place", "#!/bin/sh\necho two\n", map[string][]string{helper: retireThenReload, reconcileAgentLabel: kickstart}},
+			}
+			for _, step := range steps {
+				if err := os.WriteFile(source, []byte(step.program), 0o755); err != nil { //nolint:gosec // executable test stub
+					t.Fatal(err)
+				}
+				clear(calls)
+				if err := install(t.Context()); err != nil {
+					t.Fatalf("%s: %v", step.name, err)
+				}
+				if !maps.EqualFunc(calls, step.want, slices.Equal[[]string]) {
+					t.Fatalf("%s: launchctl = %#v, want %#v", step.name, calls, step.want)
+				}
+				plist, err := os.ReadFile(filepath.Join(home, "Library", "LaunchAgents", helper+".plist")) //nolint:gosec // test-owned plist
+				if err != nil {
+					t.Fatal(err)
+				}
+				digest := sha256.Sum256([]byte(step.program))
+				if !strings.Contains(string(plist), hex.EncodeToString(digest[:])) {
+					t.Fatalf("%s: helper plist carries no digest of its program\n%s", step.name, plist)
+				}
+			}
+		})
+	}
+}
+
+var errLaunchctlInterrupted = errors.New("launchctl interrupted")
+
+type launchdJobs struct {
+	loaded              map[string][]byte
+	failLabel, failVerb string
+}
+
+func (j *launchdJobs) run(_ context.Context, _ string, args ...string) (string, int, error) {
+	verb, target := args[0], args[len(args)-1]
+	label := strings.TrimSuffix(filepath.Base(target), ".plist")
+	if label == j.failLabel && verb == j.failVerb {
+		j.failLabel, j.failVerb = "", ""
+		return "", 0, errLaunchctlInterrupted
+	}
+	_, loaded := j.loaded[label]
+	switch verb {
+	case "print", "kickstart":
+		if !loaded {
+			return "", 113, nil
+		}
+	case "bootout":
+		if !loaded {
+			return "", 3, nil
+		}
+		delete(j.loaded, label)
+	case "enable":
+	case "bootstrap":
+		plist, err := os.ReadFile(target) //nolint:gosec // test-owned plist
+		if err != nil {
+			return "", 0, err
+		}
+		j.loaded[label] = plist
+	default:
+		return "", 0, fmt.Errorf("unexpected launchctl %q", verb)
+	}
+	return "", 0, nil
+}
+
+func useLaunchdJobs(t *testing.T) *launchdJobs {
+	t.Helper()
+	jobs := &launchdJobs{loaded: map[string][]byte{}}
+	runner, ensure := launchctl, ensureServeAgent
+	launchctl = jobs.run
+	ensureServeAgent = func(context.Context) error { return nil }
+	t.Cleanup(func() { launchctl, ensureServeAgent = runner, ensure })
+	return jobs
+}
+
+func TestInstallKeepsAnInterruptedHelperReloadPendingUntilTheOldJobBootsOut(t *testing.T) {
+	helper := labelPrefix + ".helper.reposync"
+	original, upgraded := "#!/bin/sh\necho one\n", "#!/bin/sh\necho two\n"
+	tests := []struct {
+		verb        string
+		wantLoaded  bool
+		wantProgram string
+	}{
+		{"bootout", true, original},
+		{"enable", false, upgraded},
+		{"bootstrap", false, upgraded},
+		{"kickstart", true, upgraded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.verb, func(t *testing.T) {
+			home := useHome(t)
+			useMesh(t)
+			source := filepath.Join(resolvedTempDir(t), "reposync")
+			if err := os.Symlink(source, filepath.Join(usePathBinaries(t), "reposync")); err != nil {
+				t.Fatal(err)
+			}
+			jobs := useLaunchdJobs(t)
+			writeManifest(t, "reposync")
+			plistPath := filepath.Join(home, "Library", "LaunchAgents", helper+".plist")
+			published := func() []byte {
+				t.Helper()
+				plist, err := os.ReadFile(plistPath) //nolint:gosec // test-owned plist
+				if err != nil {
+					t.Fatal(err)
+				}
+				return plist
+			}
+			publishes := func(program string) bool {
+				digest := sha256.Sum256([]byte(program))
+				return strings.Contains(string(published()), hex.EncodeToString(digest[:]))
+			}
+
+			if err := os.WriteFile(source, []byte(original), 0o755); err != nil { //nolint:gosec // executable test stub
+				t.Fatal(err)
+			}
+			if err := install(t.Context()); err != nil {
+				t.Fatalf("first install: %v", err)
+			}
+			if err := os.WriteFile(source, []byte(upgraded), 0o755); err != nil { //nolint:gosec // executable test stub
+				t.Fatal(err)
+			}
+			jobs.failLabel, jobs.failVerb = helper, tt.verb
+			if err := install(t.Context()); !errors.Is(err, errLaunchctlInterrupted) {
+				t.Fatalf("interrupted upgrade: err = %v, want %v", err, errLaunchctlInterrupted)
+			}
+			running, loaded := jobs.loaded[helper]
+			if loaded != tt.wantLoaded {
+				t.Fatalf("interrupted upgrade: loaded = %t, want %t", loaded, tt.wantLoaded)
+			}
+			if loaded && !bytes.Equal(running, published()) {
+				t.Fatalf("interrupted upgrade published a plist launchd is not running\npublished:\n%s\nrunning:\n%s", published(), running)
+			}
+			if !publishes(tt.wantProgram) {
+				t.Fatalf("interrupted upgrade published no digest of %q\n%s", tt.wantProgram, published())
+			}
+
+			if err := install(t.Context()); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if running := jobs.loaded[helper]; !bytes.Equal(running, published()) {
+				t.Fatalf("retry left launchd running a stale generation\npublished:\n%s\nrunning:\n%s", published(), running)
+			}
+			if !publishes(upgraded) {
+				t.Fatalf("retry published no digest of the upgraded program\n%s", published())
+			}
+		})
 	}
 }
 

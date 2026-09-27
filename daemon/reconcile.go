@@ -2,13 +2,14 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
+	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 )
 
@@ -18,22 +19,40 @@ func newReconcileCmd() *cobra.Command {
 		Short: "Run one convergent reconcile pass for every registered consumer.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return withCLIProcessScope(cmd.Context(), func(owned *daemonkit.Owned) error {
-				results, err := reconcileAll(cmd.Context(), owned)
-				if err != nil {
-					return err
+			results, err := reconcileResident(cmd.Context())
+			if err != nil {
+				return err
+			}
+			for _, res := range results {
+				if res.Err != "" {
+					cmd.Printf("%s: error: %s\n", res.Name, res.Err)
+					continue
 				}
-				for _, res := range results {
-					if res.Err != "" {
-						cmd.Printf("%s: error: %s\n", res.Name, res.Err)
-						continue
-					}
-					cmd.Printf("%s: reconciled\n", res.Name)
-				}
-				return nil
-			})
+				cmd.Printf("%s: reconciled\n", res.Name)
+			}
+			return nil
 		},
 	}
+}
+
+func reconcileResident(ctx context.Context) ([]reconcileResult, error) {
+	client, err := daemonClient()
+	if err != nil {
+		return nil, fmt.Errorf("dial synckitd: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+	resp, err := client.Call(ctx, &rpc.Request{Method: "reconcile"})
+	if err != nil {
+		return nil, fmt.Errorf("reconcile: %w", err)
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("reconcile: %w", rpc.ReplyError(resp.Error))
+	}
+	var results []reconcileResult
+	if err := json.Unmarshal(resp.Result, &results); err != nil {
+		return nil, fmt.Errorf("decode reconcile result: %w", err)
+	}
+	return results, nil
 }
 
 // reconcileResult summarizes one consumer's reconcile pass for the tick output and
@@ -43,10 +62,6 @@ type reconcileResult struct {
 	Err  string `json:"err,omitempty"`
 }
 
-// reconcileAll discovers every manifest and drives each consumer's typed
-// reconcile over its local sync service — convergence happens in the consumer,
-// which pull-merges its peers from the mesh internally. A per-consumer failure
-// is captured in its result, never aborting the others.
 func reconcileAll(ctx context.Context, scope processScope) ([]reconcileResult, error) {
 	reg, err := hostregistry.Mesh.Load()
 	if err != nil {
@@ -56,39 +71,24 @@ func reconcileAll(ctx context.Context, scope processScope) ([]reconcileResult, e
 	if err != nil {
 		return nil, err
 	}
-	directory, err := hostregistry.Mesh.Dir()
-	if err != nil {
-		return nil, err
-	}
-	delivery := newDeliveryStore(directory)
 	results := make([]reconcileResult, 0, len(manifests))
 	for _, m := range manifests {
-		results = append(results, reconcileOne(ctx, scope, m, reg, delivery))
+		results = append(results, reconcileOne(ctx, scope, m, reg))
 	}
 	return results, nil
 }
 
-// reconcileOne runs a full reconcile against the consumer's exact-build typed
-// service. Any failure is captured in the result's Err rather than returned, so a
-// per-consumer fault never aborts the others.
 func reconcileOne(
 	ctx context.Context,
 	scope processScope,
 	m manifest.Manifest,
 	registry *hostregistry.Registry,
-	delivery *deliveryStore,
 ) reconcileResult {
 	c := syncservice.NewClient(dialTransport(scope, m, registry.Self, registry.Self))
 	defer func() { _ = c.Close() }()
 
 	if _, err := c.Reconcile(ctx, ""); err != nil {
 		return reconcileResult{Name: m.Name, Err: err.Error()}
-	}
-	notifier := manifestNotifier{local: c, m: m, self: registry.Self, scope: scope, delivery: delivery}
-	for _, peer := range registry.Hosts {
-		if err := notifier.Notify(ctx, peer, ""); err != nil {
-			return reconcileResult{Name: m.Name, Err: err.Error()}
-		}
 	}
 	return reconcileResult{Name: m.Name}
 }

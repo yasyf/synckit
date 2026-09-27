@@ -2,6 +2,7 @@ package syncservice
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -105,7 +106,7 @@ func TestHandlerErrorSurfaces(t *testing.T) {
 
 func TestUnknownMethodReturnsErrorResponse(t *testing.T) {
 	response, err := testTransport(&fakeConsumer{}).Do(t.Context(), &rpc.Request{Method: "svc.bogus"})
-	if err != nil || response.OK || !strings.Contains(response.Error, "unknown method") {
+	if err != nil || response.OK || !errors.Is(rpc.ReplyError(response.Error), rpc.ErrUnknownMethod) {
 		t.Fatalf("response = %#v, %v", response, err)
 	}
 }
