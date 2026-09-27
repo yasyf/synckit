@@ -190,13 +190,13 @@ type e2eMesh struct {
 
 func newE2EMesh(t *testing.T, names ...string) *e2eMesh {
 	t.Helper()
-	saved := []time.Duration{pauseRecheck, deliveryBackoffBase, deliveryBackoffMax, artifactMaxWait, peerStateMaxAge}
+	saved := []time.Duration{pauseRecheck, deliveryBackoffBase, deliveryBackoffMax, artifactMaxWait, peerStateMaxAge, restartBackoffBase}
 	savedLimit := batchObjectLimit
 	pauseRecheck, deliveryBackoffBase, deliveryBackoffMax, artifactMaxWait = time.Hour, time.Hour, time.Hour, 0
 	prev := dialTransport
 	t.Cleanup(func() {
 		pauseRecheck, deliveryBackoffBase, deliveryBackoffMax = saved[0], saved[1], saved[2]
-		artifactMaxWait, peerStateMaxAge, batchObjectLimit = saved[3], saved[4], savedLimit
+		artifactMaxWait, peerStateMaxAge, restartBackoffBase, batchObjectLimit = saved[3], saved[4], saved[5], savedLimit
 		dialTransport = prev
 	})
 	m := &e2eMesh{t: t, scope: testProcessScope(t), hosts: map[string]*e2eHost{}, links: map[[2]string]*wireLink{}}

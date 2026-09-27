@@ -167,6 +167,118 @@ func TestE2EReceiverRestrictionClearedMidTransferRestartsIt(t *testing.T) {
 	}
 }
 
+func TestE2ERepeatedRestrictionPulsesBackOffRestarts(t *testing.T) {
+	tests := []struct {
+		name  string
+		pulse string
+		want  delivery.PauseReason
+	}{
+		{"peer", "b@node", delivery.PausePeerRestrictedMidTransfer},
+		{"local", "a@node", delivery.PauseLocalRestrictedMidTransfer},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newE2EMesh(t, "a@node", "b@node")
+			restartBackoffBase = time.Hour
+			a, b := m.hosts["a@node"], m.hosts["b@node"]
+			a.consumer.publish(1, a.put(t, randomBytes(t, 4<<10)))
+			link := m.link("a@node", "b@node")
+			pulsed := m.hosts[tt.pulse].monitor
+			link.setHook(func(request *rpc.Request) error {
+				if request.Method == artifact.MethodHave {
+					pulsed.pulse()
+				}
+				return nil
+			})
+			d := m.deliver("a@node", "b@node")
+			status := d.await(t, "b@node", "a backed-off restart", func(s delivery.PeerStatus) bool {
+				return pausedWith(tt.want)(s) && s.NextAttemptAt.Sub(s.LastAttemptAt) >= time.Hour
+			})
+			if got := link.count(artifact.MethodHave); got != 2 {
+				t.Fatalf("have ran %d times by the backed-off restart, want 2: one attempt and one immediate restart", got)
+			}
+			local, _ := a.monitor.Current()
+			a.monitor.set(local)
+			time.Sleep(100 * time.Millisecond)
+			if got := link.count(artifact.MethodHave); got != 2 {
+				t.Fatalf("have ran %d times after a local path change, want 2: the change cut the restart backoff short", got)
+			}
+			if now := d.status(t, "b@node"); !now.NextAttemptAt.Equal(status.NextAttemptAt) {
+				t.Fatalf("next attempt moved from %s to %s", status.NextAttemptAt, now.NextAttemptAt)
+			}
+			requireNoApplies(t, b)
+		})
+	}
+}
+
+func TestE2ERestartAfterProgressStaysImmediate(t *testing.T) {
+	t.Run("a committed batch", func(t *testing.T) {
+		m := newE2EMesh(t, "a@node", "b@node")
+		restartBackoffBase = time.Hour
+		batchObjectLimit = 1
+		a, b := m.hosts["a@node"], m.hosts["b@node"]
+		contents := [][]byte{randomBytes(t, 4<<10), randomBytes(t, 4<<10)}
+		roots := []artifact.Ref{a.put(t, contents[0]), a.put(t, contents[1])}
+		closure, err := a.store.Closure(t.Context(), roots, artifact.DefaultClosureBound)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.consumer.publish(1, roots...)
+		link := m.link("a@node", "b@node")
+		var mu sync.Mutex
+		begins := 0
+		link.setHook(func(request *rpc.Request) error {
+			mu.Lock()
+			defer mu.Unlock()
+			switch request.Method {
+			case artifact.MethodNetStatus:
+				begins = 0
+			case artifact.MethodBatchBegin:
+				if begins++; begins == 2 {
+					b.monitor.pulse()
+				}
+			}
+			return nil
+		})
+		d := m.deliver("a@node", "b@node")
+		d.await(t, "b@node", "ack through a restart after every committed batch", acked(1))
+		for i, root := range roots {
+			b.requireContent(t, root, contents[i])
+		}
+		if attempts, commits := link.count(artifact.MethodNetStatus), link.count(artifact.MethodBatchCommit); attempts != len(closure.Objects) || commits != attempts {
+			t.Fatalf("%d attempts committed %d batches, want %d of each", attempts, commits, len(closure.Objects))
+		}
+	})
+
+	t.Run("an acknowledged delivery", func(t *testing.T) {
+		m := newE2EMesh(t, "a@node", "b@node")
+		restartBackoffBase = time.Hour
+		a := m.hosts["a@node"]
+		root := a.put(t, randomBytes(t, 4<<10))
+		a.consumer.publish(1, root)
+		d := m.deliver("a@node", "b@node")
+		d.await(t, "b@node", "first ack", acked(1))
+		link := m.link("a@node", "b@node")
+		var applies atomic.Int64
+		link.setHook(func(request *rpc.Request) error {
+			if request.Method == syncservice.MethodApplyV2 && applies.Add(1)%2 == 1 {
+				m.hosts["b@node"].monitor.pulse()
+			}
+			return nil
+		})
+		for revision := uint64(2); revision <= 3; revision++ {
+			a.consumer.publish(revision, root)
+			if err := d.sched.Kick("stub", "b@node"); err != nil {
+				t.Fatal(err)
+			}
+			d.await(t, "b@node", fmt.Sprintf("ack %d after one refused apply.v2", revision), acked(revision))
+		}
+		if got := applies.Load(); got != 4 {
+			t.Fatalf("apply.v2 ran %d times, want 4: one refusal and one immediate restart per revision", got)
+		}
+	})
+}
+
 func TestE2EStalePeerStateIsReprobed(t *testing.T) {
 	tests := []struct {
 		name      string

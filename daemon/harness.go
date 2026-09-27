@@ -45,9 +45,10 @@ type HarnessConfig struct {
 	// ArtifactMaxWait is how long a kicked artifact lane coalesces further kicks
 	// before it runs; synckitd waits 10 s.
 	ArtifactMaxWait time.Duration
-	// RetryInterval is how long a paused or failed lane waits before its next
-	// attempt; synckitd re-checks a pause after 60 s and backs a failure off
-	// from 30 s to 5 min.
+	// RetryInterval is the wait for paused or failed lanes and for consecutive
+	// mid-transfer restarts after the first, which is immediate. synckitd rechecks
+	// pauses after 60 s, backs failures off from 30 s to 5 min, and backs further
+	// consecutive restarts off from 1 s to 60 s.
 	RetryInterval time.Duration
 }
 
@@ -97,7 +98,7 @@ func NewHarness(ctx context.Context, cfg HarnessConfig) (*Harness, error) {
 	h := &Harness{ctx: hctx, cancel: cancel, wg: &sync.WaitGroup{}, schedulers: make(map[string]*deliveryScheduler, len(cfg.Hosts))}
 	timing := deliveryTiming{
 		backoffBase: cfg.RetryInterval, backoffMax: cfg.RetryInterval,
-		pauseRecheck: cfg.RetryInterval, artifactMaxWait: cfg.ArtifactMaxWait,
+		pauseRecheck: cfg.RetryInterval, restartBase: cfg.RetryInterval, artifactMaxWait: cfg.ArtifactMaxWait,
 	}
 	for _, host := range cfg.Hosts {
 		s := newDeliveryScheduler(hctx, h.wg, nil, newDeliveryStore(host.StateDir), host.Monitor, host.Name)

@@ -67,9 +67,9 @@ const (
 	PauseLocalConstrained PauseReason = "local-constrained"
 	// PauseLocalManualMetered means this host is manually marked metered.
 	PauseLocalManualMetered PauseReason = "local-manual-metered"
-	// PauseLocalRestrictedMidTransfer means this host's network was restricted
-	// at some point after the transfer was admitted and is unrestricted again;
-	// the deliverer stops the transfer and restarts it at once.
+	// PauseLocalRestrictedMidTransfer means a local restriction began and cleared
+	// after admission. The deliverer stops the transfer, restarts at once the first
+	// time, and backs off further consecutive restarts.
 	PauseLocalRestrictedMidTransfer PauseReason = "local-restricted-mid-transfer"
 	// PausePeerDisconnected means the peer has no usable route.
 	PausePeerDisconnected PauseReason = "peer-disconnected"
@@ -83,9 +83,9 @@ const (
 	PausePeerConstrained PauseReason = "peer-constrained"
 	// PausePeerManualMetered means the peer is manually marked metered.
 	PausePeerManualMetered PauseReason = "peer-manual-metered"
-	// PausePeerRestrictedMidTransfer means the peer's network was restricted at
-	// some point after the transfer was admitted and is unrestricted again;
-	// the deliverer stops the transfer and restarts it at once.
+	// PausePeerRestrictedMidTransfer means a peer restriction began and cleared
+	// after admission. The deliverer stops the transfer, restarts at once the first
+	// time, and backs off further consecutive restarts.
 	PausePeerRestrictedMidTransfer PauseReason = "peer-restricted-mid-transfer"
 	// PausePeerUnreachable means the peer's network status call failed.
 	PausePeerUnreachable PauseReason = "peer-unreachable"

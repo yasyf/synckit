@@ -38,17 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manual setting save except one clearing a metered mark it already counted,
   including a save undone before the next read. The delivery worker records the
   epoch when it admits a transfer and stops the transfer once the epoch moves.
-  It pauses with `local-restricted-mid-transfer` and retries at once, checking
-  the network again before it sends. `Gate.Wait` also returns the local `State`
-  now, and `Gate.Check` takes it and pauses the same way.
+  It pauses with `local-restricted-mid-transfer` and restarts at once the first
+  time, checking the network again before it sends. `Gate.Wait` also returns the
+  local `State` now, and `Gate.Check` takes it and pauses the same way.
 - **The receiver stops a transfer after its own restriction clears.**
   `State.RestrictedEpoch` now crosses the wire. The delivery worker records the
   peer's epoch from `net.status` when it admits a transfer and sends it with
   every `have`, `batch.begin`, `batch.put`, `batch.commit`, and `apply.v2`
   call. Once the receiver's own epoch has moved, it refuses each of those calls
   with `receiver-restricted-mid-transfer` and writes nothing. The worker pauses
-  with `peer-restricted-mid-transfer` and retries at once, and a re-probe that
-  reports a moved peer epoch pauses the same way before the next call.
+  with `peer-restricted-mid-transfer` and restarts at once the first time.
+  A re-probe that reports a moved peer epoch pauses the same way before the
+  next call.
+  Further consecutive restarts back off from 1 s to 60 s until a batch commits
+  or the attempt ends another way.
   `artifact.Refusal` replaces `artifact.LiveRefusal`, and the syncservice
   client's bulk calls take the admitted epoch.
 - **syncservice v2 for artifact consumers.** `ChangeEnvelope.Artifacts` names a

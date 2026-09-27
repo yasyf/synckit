@@ -1192,6 +1192,19 @@ func TestDelivererRestartsAfterAClearedRestriction(t *testing.T) {
 	}
 }
 
+func TestNextRestartDoublesUpToThePauseRecheck(t *testing.T) {
+	s := &deliveryScheduler{timing: deliveryTiming{restartBase: time.Second, pauseRecheck: 5 * time.Second}}
+	l := &lane{}
+	want := []time.Duration{0, time.Second, 2 * time.Second, 4 * time.Second, 5 * time.Second, 5 * time.Second}
+	got := make([]time.Duration, 0, len(want))
+	for range want {
+		got = append(got, s.nextRestart(l))
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("restart waits = %v, want %v", got, want)
+	}
+}
+
 func TestDelivererContinuesThroughAnUnrestrictedPathChange(t *testing.T) {
 	h := newDeliveryHarness(t, true, "peer@node")
 	sink := h.sinks["peer@node"]

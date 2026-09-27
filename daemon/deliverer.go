@@ -23,6 +23,7 @@ var (
 	deliveryBackoffBase = 30 * time.Second
 	deliveryBackoffMax  = 5 * time.Minute
 	pauseRecheck        = 60 * time.Second
+	restartBackoffBase  = time.Second
 	artifactMaxWait     = 10 * time.Second
 	peerStateMaxAge     = 2 * time.Minute
 	batchObjectLimit    = artifact.MaxBatchObjects
@@ -51,6 +52,10 @@ func (e *pauseError) Error() string {
 }
 
 func (e *pauseError) Unwrap() error { return e.cause }
+
+func (e *pauseError) restart() bool {
+	return e.reason == delivery.PauseLocalRestrictedMidTransfer || e.reason == delivery.PausePeerRestrictedMidTransfer
+}
 
 type laneKey struct {
 	service string
@@ -87,6 +92,7 @@ type lane struct {
 
 	pinsSettled bool
 	pinnedFor   string
+	restartWait time.Duration
 }
 
 func (l *lane) poke(now time.Time) {
@@ -145,6 +151,7 @@ type deliveryTiming struct {
 	backoffBase     time.Duration
 	backoffMax      time.Duration
 	pauseRecheck    time.Duration
+	restartBase     time.Duration
 	artifactMaxWait time.Duration
 }
 
@@ -191,7 +198,7 @@ func newDeliveryScheduler(
 		batches:  make(map[sharedBatchKey]*sharedBatch),
 		timing: deliveryTiming{
 			backoffBase: deliveryBackoffBase, backoffMax: deliveryBackoffMax,
-			pauseRecheck: pauseRecheck, artifactMaxWait: artifactMaxWait,
+			pauseRecheck: pauseRecheck, restartBase: restartBackoffBase, artifactMaxWait: artifactMaxWait,
 		},
 		now: time.Now,
 		dial: func(m manifest.Manifest, peer string) syncservice.Transport {
@@ -356,9 +363,16 @@ func (s *deliveryScheduler) work(l *lane) {
 			return
 		}
 		var paused *pauseError
+		restart := errors.As(err, &paused) && paused.restart()
+		if !restart {
+			l.restartWait = 0
+		}
 		switch {
-		case errors.As(err, &paused):
-			timer.Reset(s.pause(l, paused))
+		case restart:
+			timer.Reset(s.pause(l, paused, s.nextRestart(l)))
+			retry = timer.C
+		case paused != nil:
+			timer.Reset(s.pause(l, paused, s.timing.pauseRecheck))
 			retry, wake = timer.C, l.wake
 		case err != nil:
 			delay = min(max(2*delay, s.timing.backoffBase), s.timing.backoffMax)
@@ -390,12 +404,14 @@ func (s *deliveryScheduler) awaitCapabilities(l *lane) bool {
 	}
 }
 
-func (s *deliveryScheduler) pause(l *lane, paused *pauseError) time.Duration {
+func (s *deliveryScheduler) nextRestart(l *lane) time.Duration {
+	wait := l.restartWait
+	l.restartWait = min(max(2*wait, s.timing.restartBase), s.timing.pauseRecheck)
+	return wait
+}
+
+func (s *deliveryScheduler) pause(l *lane, paused *pauseError, recheck time.Duration) time.Duration {
 	now := s.now()
-	recheck := s.timing.pauseRecheck
-	if paused.reason == delivery.PauseLocalRestrictedMidTransfer || paused.reason == delivery.PausePeerRestrictedMidTransfer {
-		recheck = 0
-	}
 	var entered, down bool
 	l.update(func(v *laneLive) {
 		entered = v.state != delivery.StatePaused || v.pauseReason != paused.reason
@@ -949,6 +965,7 @@ func (r *deliveryRun) commit(ctx context.Context, objects []artifact.ObjectEntry
 		return "", refusal(fmt.Errorf("commit batch %s: %w", batch.ID, err))
 	}
 	r.sentBatches++
+	r.l.restartWait = 0
 	r.l.update(func(v *laneLive) {
 		v.progress.ObjectsSent += int64(len(objects))
 		v.progress.BytesSent += raw
