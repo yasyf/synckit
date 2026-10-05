@@ -2,6 +2,7 @@ package meshtrust
 
 import (
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -434,5 +435,116 @@ func TestBuildCollisionDeterministic(t *testing.T) {
 		if got, want := len(snap.peers), 1; got != want {
 			t.Fatalf("iteration %d: len(peers) = %d, want %d (self only)", i, got, want)
 		}
+	}
+}
+
+const ownerDevicesStatusFixture = `{
+  "BackendState": "Running",
+  "Self": {
+    "DNSName": "yasyf-home.tail71af5d.ts.net.",
+    "TailscaleIPs": ["100.88.252.58"],
+    "UserID": 182950608091393
+  },
+  "Peer": {
+    "nodekey:000000000001": {
+      "DNSName": "yphone.tail71af5d.ts.net.",
+      "TailscaleIPs": ["100.85.236.83", "fd7a:115c:a1e0::8601:ec61"],
+      "UserID": 182950608091393
+    },
+    "nodekey:000000000002": {
+      "DNSName": "ipad.tail71af5d.ts.net.",
+      "TailscaleIPs": ["100.118.111.31"],
+      "UserID": 182950608091393
+    },
+    "nodekey:000000000003": {
+      "DNSName": "metal.tail71af5d.ts.net.",
+      "TailscaleIPs": ["100.64.60.1"],
+      "UserID": 182950608091393,
+      "Tags": ["tag:metal"]
+    },
+    "nodekey:000000000004": {
+      "DNSName": "pool.tail71af5d.ts.net.",
+      "TailscaleIPs": ["100.94.57.18"],
+      "UserID": 3467447256583301,
+      "Tags": ["tag:pool"]
+    },
+    "nodekey:000000000005": {
+      "DNSName": "recipient.other.ts.net.",
+      "TailscaleIPs": ["100.77.77.5"],
+      "UserID": 182950608091393,
+      "ShareeNode": true
+    },
+    "nodekey:000000000006": {
+      "DNSName": "shared-in.other.ts.net.",
+      "TailscaleIPs": ["100.71.147.16"],
+      "UserID": 999
+    }
+  }
+}`
+
+func TestBuildOwnerDevices(t *testing.T) {
+	owned := []string{"100.85.236.83", "fd7a:115c:a1e0::8601:ec61", "100.118.111.31"}
+	foreign := []string{"100.64.60.1", "100.94.57.18", "100.77.77.5", "100.71.147.16"}
+	tests := []struct {
+		name        string
+		status      string
+		wantTrusted []string
+		wantDevices []string
+	}{
+		{
+			name:        "same untagged user",
+			status:      ownerDevicesStatusFixture,
+			wantTrusted: owned,
+			wantDevices: []string{"ipad.tail71af5d.ts.net", "yphone.tail71af5d.ts.net"},
+		},
+		{
+			name: "tagged self recognises no owner",
+			status: strings.Replace(ownerDevicesStatusFixture, `"UserID": 182950608091393
+  },`, `"UserID": 182950608091393, "Tags": ["tag:server"]
+  },`, 1),
+		},
+		{
+			name: "unknown self user recognises no owner",
+			status: strings.Replace(ownerDevicesStatusFixture, `"UserID": 182950608091393
+  },`, `"UserID": 0
+  },`, 1),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, err := parseStatus([]byte(tt.status))
+			if err != nil {
+				t.Fatalf("parseStatus() error: %v", err)
+			}
+			snap, err := build(registry{Self: "yasyf@yasyf-home.tail71af5d.ts.net"}, st)
+			if err != nil {
+				t.Fatalf("build() error: %v", err)
+			}
+			for _, s := range tt.wantTrusted {
+				if _, ok := snap.peers[addr(t, s)]; !ok {
+					t.Errorf("owner device address %s not trusted", s)
+				}
+			}
+			for _, s := range foreign {
+				if _, ok := snap.peers[addr(t, s)]; ok {
+					t.Errorf("tagged, shared, or other-user address %s trusted", s)
+				}
+			}
+			if got, want := len(snap.peers), len(tt.wantTrusted)+1; got != want {
+				t.Errorf("len(peers) = %d, want %d (owner devices + self)", got, want)
+			}
+			var devices []string
+			for _, d := range snap.devices {
+				devices = append(devices, d.Target)
+			}
+			if !slices.Equal(devices, tt.wantDevices) {
+				t.Errorf("devices = %v, want %v", devices, tt.wantDevices)
+			}
+			for _, o := range []string{"yphone.tail71af5d.ts.net", "yphone"} {
+				if _, ok := snap.origins[o]; ok {
+					t.Errorf("owner device name %q must never be a trusted origin", o)
+				}
+			}
+		})
 	}
 }
