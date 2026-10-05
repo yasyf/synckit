@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-04
+
 ### Added
 
 - **`meshtrust` trusts the owner's own tailnet devices.** `TrustedPeer` now
@@ -668,7 +670,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.39.2...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.40.0...HEAD
+[0.40.0]: https://github.com/yasyf/synckit/compare/v0.39.2...v0.40.0
 [0.39.2]: https://github.com/yasyf/synckit/compare/v0.39.1...v0.39.2
 [0.39.1]: https://github.com/yasyf/synckit/compare/v0.39.0...v0.39.1
 [0.39.0]: https://github.com/yasyf/synckit/compare/v0.38.0...v0.39.0
