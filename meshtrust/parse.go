@@ -73,8 +73,8 @@ func hostPart(target string) string {
 
 // build joins registry targets to tailnet nodes by MagicDNS name and adds the
 // owner's devices: every untagged peer logged in as this machine's own tailnet
-// user that is not a share recipient's node. The set stays fail-closed throughout (see meshtrust-dns-collision
-// note).
+// user that is not a share recipient's node. The set stays fail-closed
+// throughout (see meshtrust-dns-collision note).
 func build(reg registry, st tsStatus) (snapshot, error) {
 	snap := snapshot{
 		self:    reg.Self,
