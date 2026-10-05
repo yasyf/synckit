@@ -33,8 +33,8 @@ type tsStatus struct {
 
 // tsNode is one tailnet node: its MagicDNS name (with a trailing dot), its
 // tailnet addresses (one IPv4, one IPv6), the tailnet user that owns it, its ACL
-// tags (a tagged node is owned by the tags, not a person), and whether it is
-// shared in from another tailnet.
+// tags (a tagged node is owned by the tags, not a person), and whether it
+// belongs to a recipient of a node share (ShareeNode).
 type tsNode struct {
 	DNSName      string
 	TailscaleIPs []string
@@ -72,8 +72,8 @@ func hostPart(target string) string {
 }
 
 // build joins registry targets to tailnet nodes by MagicDNS name and adds the
-// owner's devices: every untagged, unshared peer logged in as this machine's own
-// tailnet user. The set stays fail-closed throughout (see meshtrust-dns-collision
+// owner's devices: every untagged peer logged in as this machine's own tailnet
+// user that is not a share recipient's node. The set stays fail-closed throughout (see meshtrust-dns-collision
 // note).
 func build(reg registry, st tsStatus) (snapshot, error) {
 	snap := snapshot{
@@ -159,8 +159,8 @@ func build(reg registry, st tsStatus) (snapshot, error) {
 }
 
 // ownedBySelfUser reports whether peer is one of the owner's own devices: logged
-// in as the same tailnet user as self, untagged, and not shared in from another
-// tailnet. A tagged self is owned by its tags rather than a person, so it
+// in as the same tailnet user as self, untagged, and not a share recipient's
+// node. A tagged self is owned by its tags rather than a person, so it
 // recognises no owner devices at all.
 func ownedBySelfUser(self, peer tsNode) bool {
 	if self.UserID == 0 || len(self.Tags) > 0 {

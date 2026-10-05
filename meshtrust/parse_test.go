@@ -469,13 +469,13 @@ const ownerDevicesStatusFixture = `{
       "Tags": ["tag:pool"]
     },
     "nodekey:000000000005": {
-      "DNSName": "friend.other.ts.net.",
+      "DNSName": "recipient.other.ts.net.",
       "TailscaleIPs": ["100.77.77.5"],
       "UserID": 182950608091393,
       "ShareeNode": true
     },
     "nodekey:000000000006": {
-      "DNSName": "colleague.tail71af5d.ts.net.",
+      "DNSName": "shared-in.other.ts.net.",
       "TailscaleIPs": ["100.71.147.16"],
       "UserID": 999
     }
