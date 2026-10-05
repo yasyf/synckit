@@ -391,3 +391,26 @@ func TestMesh(t *testing.T) {
 		t.Error("mutating returned SelfAddrs must not corrupt the snapshot")
 	}
 }
+
+func TestMeshDevices(t *testing.T) {
+	src := &testSources{
+		reg:    registry{Self: "yasyf@yasyf-home.tail71af5d.ts.net"},
+		status: []byte(ownerDevicesStatusFixture),
+	}
+	p := newTestProvider(src, &testClock{now: time.Unix(1000, 0)})
+
+	if !p.TrustedPeer(addr(t, "::ffff:100.85.236.83")) {
+		t.Error("owner device must be a trusted peer")
+	}
+	if p.TrustedPeer(addr(t, "100.64.60.1")) {
+		t.Error("tagged node must not be a trusted peer")
+	}
+	m := p.Mesh(context.Background())
+	if got, want := fmt.Sprint(m.Devices), "[{ipad.tail71af5d.ts.net [100.118.111.31]} {yphone.tail71af5d.ts.net [100.85.236.83 fd7a:115c:a1e0::8601:ec61]}]"; got != want {
+		t.Errorf("Devices = %s, want %s", got, want)
+	}
+	m.Devices[1].Addrs[0] = addr(t, "10.0.0.1")
+	if got := p.Mesh(context.Background()).Devices[1].Addrs[0]; got != addr(t, "100.85.236.83") {
+		t.Error("mutating returned Devices must not corrupt the snapshot")
+	}
+}

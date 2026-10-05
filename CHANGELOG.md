@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`meshtrust` trusts the owner's own tailnet devices.** `TrustedPeer` now
+  also admits every peer logged in as this machine's tailnet user, so a phone or
+  tablet on the owner's tailnet reaches a meshtrust daemon without joining the
+  mesh registry. Tagged nodes, nodes shared in from another tailnet, and other
+  users' nodes stay untrusted, and a tagged machine recognises no owner devices.
+  `Mesh.Devices` lists them by MagicDNS name. Device names never become trusted
+  origins.
 - **`artifact` stores large sync payloads by content address.**
   `Open` takes a per-service store under `ServiceRoot(serviceID)` and holds its
   `store.lock` until `Close`. Blobs and encoded manifests are at most 1 MiB.

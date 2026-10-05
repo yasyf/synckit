@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"strings"
 )
 
@@ -30,11 +31,16 @@ type tsStatus struct {
 	CertDomains  []string
 }
 
-// tsNode is one tailnet node: its MagicDNS name (with a trailing dot) and its
-// tailnet addresses (one IPv4, one IPv6).
+// tsNode is one tailnet node: its MagicDNS name (with a trailing dot), its
+// tailnet addresses (one IPv4, one IPv6), the tailnet user that owns it, its ACL
+// tags (a tagged node is owned by the tags, not a person), and whether it is
+// shared in from another tailnet.
 type tsNode struct {
 	DNSName      string
 	TailscaleIPs []string
+	UserID       int64
+	Tags         []string
+	ShareeNode   bool
 }
 
 func parseStatus(b []byte) (tsStatus, error) {
@@ -65,8 +71,10 @@ func hostPart(target string) string {
 	return target
 }
 
-// build joins registry targets to tailnet nodes by MagicDNS name; the set
-// stays fail-closed throughout (see meshtrust-dns-collision note).
+// build joins registry targets to tailnet nodes by MagicDNS name and adds the
+// owner's devices: every untagged, unshared peer logged in as this machine's own
+// tailnet user. The set stays fail-closed throughout (see meshtrust-dns-collision
+// note).
 func build(reg registry, st tsStatus) (snapshot, error) {
 	snap := snapshot{
 		self:    reg.Self,
@@ -101,6 +109,12 @@ func build(reg registry, st tsStatus) (snapshot, error) {
 		addrs, err := parseAddrs(n.TailscaleIPs)
 		if err != nil {
 			return snapshot{}, err
+		}
+		if ownedBySelfUser(st.Self, n) {
+			for _, a := range addrs {
+				snap.peers[a] = struct{}{}
+			}
+			snap.devices = append(snap.devices, HostTrust{Target: normalizeHost(n.DNSName), Addrs: addrs})
 		}
 		name := normalizeHost(n.DNSName)
 		if name == "" {
@@ -140,7 +154,19 @@ func build(reg registry, st tsStatus) (snapshot, error) {
 		}
 		snap.hosts = append(snap.hosts, HostTrust{Target: target, Addrs: addrs})
 	}
+	slices.SortFunc(snap.devices, func(a, b HostTrust) int { return strings.Compare(a.Target, b.Target) })
 	return snap, nil
+}
+
+// ownedBySelfUser reports whether peer is one of the owner's own devices: logged
+// in as the same tailnet user as self, untagged, and not shared in from another
+// tailnet. A tagged self is owned by its tags rather than a person, so it
+// recognises no owner devices at all.
+func ownedBySelfUser(self, peer tsNode) bool {
+	if self.UserID == 0 || len(self.Tags) > 0 {
+		return false
+	}
+	return peer.UserID == self.UserID && len(peer.Tags) == 0 && !peer.ShareeNode
 }
 
 func parseAddrs(raw []string) ([]netip.Addr, error) {

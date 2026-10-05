@@ -1,6 +1,7 @@
 // Package meshtrust derives a network-trust set from the shared host mesh
-// (hostregistry.Mesh): every machine registered in the mesh is trusted by its
-// tailnet addresses, resolved via `tailscale status`. A consuming daemon
+// (hostregistry.Mesh): every machine registered in the mesh, and every device
+// logged in as this machine's own tailnet user, is trusted by its tailnet
+// addresses, resolved via `tailscale status`. A consuming daemon
 // answers per-request trust verdicts through the Provider's TrustedPeer and
 // TrustedOrigin methods, whose shapes match cc-interact's daemon.Config hooks.
 package meshtrust
@@ -26,6 +27,7 @@ type snapshot struct {
 	selfDNS    string
 	certDomain string
 	hosts      []HostTrust
+	devices    []HostTrust
 	peers      map[netip.Addr]struct{}
 	origins    map[string]struct{}
 	selfAddrs  []netip.Addr
@@ -39,10 +41,13 @@ type HostTrust struct {
 	Addrs  []netip.Addr
 }
 
-// Mesh is the inspector's view of the current trust set.
+// Mesh is the inspector's view of the current trust set: the registered mesh
+// hosts, and the owner's devices trusted by tailnet user rather than
+// registration, each named by its MagicDNS name.
 type Mesh struct {
-	Self  string
-	Hosts []HostTrust
+	Self    string
+	Hosts   []HostTrust
+	Devices []HostTrust
 }
 
 // Provider answers per-request trust verdicts from a cached snapshot of the
@@ -85,7 +90,7 @@ func Detect() *Provider {
 }
 
 // TrustedPeer reports whether ip belongs to a machine in the mesh (including
-// this one). It matches cc-interact's TrustedPeer hook; the hook signature
+// this one) or to one of the owner's own tailnet devices. It matches cc-interact's TrustedPeer hook; the hook signature
 // carries no context, so refreshes run under the Provider's own timeout.
 func (p *Provider) TrustedPeer(ip netip.Addr) bool {
 	_, ok := p.current(context.Background()).peers[ip.Unmap()]
@@ -140,11 +145,15 @@ func (p *Provider) SelfCertDomain(ctx context.Context) string {
 // Mesh returns the inspector's view of the current trust set.
 func (p *Provider) Mesh(ctx context.Context) Mesh {
 	snap := p.current(ctx)
-	hosts := make([]HostTrust, len(snap.hosts))
-	for i, h := range snap.hosts {
-		hosts[i] = HostTrust{Target: h.Target, Addrs: slices.Clone(h.Addrs)}
+	return Mesh{Self: snap.self, Hosts: cloneTrust(snap.hosts), Devices: cloneTrust(snap.devices)}
+}
+
+func cloneTrust(in []HostTrust) []HostTrust {
+	out := make([]HostTrust, len(in))
+	for i, h := range in {
+		out[i] = HostTrust{Target: h.Target, Addrs: slices.Clone(h.Addrs)}
 	}
-	return Mesh{Self: snap.self, Hosts: hosts}
+	return out
 }
 
 // current returns a fresh snapshot, refreshing under the lock when the TTL has
