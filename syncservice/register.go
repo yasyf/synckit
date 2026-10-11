@@ -12,8 +12,12 @@ import (
 // svc, adapting each rpc handler's untyped params to the typed call and returning the
 // result struct. Apply, Export, and Reconcile may mutate service state, so they are
 // registered exclusive — they queue behind the dispatcher's exclusive mutex instead
-// of contending on a product's non-reentrant state lock.
+// of contending on a product's non-reentrant state lock. An [Enroller] also gets
+// the identity and enroll methods.
 func RegisterConsumer(d *rpc.Dispatcher, svc SyncConsumer) {
+	if enroller, ok := svc.(Enroller); ok {
+		registerEnroller(d, enroller)
+	}
 	d.Register(MethodCapabilities, func(ctx context.Context, _ map[string]any) (any, error) {
 		return svc.Capabilities(ctx)
 	})

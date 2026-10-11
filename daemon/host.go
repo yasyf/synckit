@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/spf13/cobra"
+	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/synckit/hostregistry"
 )
@@ -29,17 +30,26 @@ func newHostAddCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "add <user@node>",
-		Short: "Register a peer and SSH-bootstrap the mesh on it.",
+		Short: "Register a peer, SSH-bootstrap the mesh on it, and enroll its consumer identities.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withCLIExecRunner(cmd.Context(), func(runner hostregistry.Runner) error {
-				manifests, err := discoverManifests()
-				if err != nil {
-					return err
-				}
-				return AddHost(cmd.Context(), runner, manifests, args[0], self, noRecurse, func(msg string) {
-					cmd.Println(msg)
-				})
+			manifests, err := discoverManifests()
+			if err != nil {
+				return err
+			}
+			step := func(msg string) { cmd.Println(msg) }
+			if err := withCLIExecRunner(cmd.Context(), func(runner hostregistry.Runner) error {
+				return AddHost(cmd.Context(), runner, manifests, args[0], self, noRecurse, step)
+			}); err != nil {
+				return err
+			}
+			reg, err := hostregistry.Mesh.Load()
+			if err != nil {
+				return err
+			}
+			return withCLIProcessScope(cmd.Context(), func(owned *daemonkit.Owned) error {
+				enrollHost(cmd.Context(), owned, manifests, args[0], reg.Self, step)
+				return nil
 			})
 		},
 	}

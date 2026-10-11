@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`synckitd host add` enrolls consumer identities.** A consumer that
+  implements `syncservice.Enroller` serves `synckit.syncservice.identity.v1` and
+  `synckit.syncservice.enroll.v1`. After registering a host, `host add` reads the
+  peer consumer's identity over the pinned SSH bridge and pins it in the local
+  consumer with `Enroll`. A consumer without the methods, or a peer that cannot
+  answer, prints a `WARN` step and does not fail the add. The identity travels as
+  base64 bytes and holds at most 64 KiB of JSON.
+- The deliverer tests now drive a delta chain through `Fence`: two deltas apply on
+  their base, and a receiver that lost its receipt gets `NeedSnapshot` and then the
+  re-staged snapshot.
+
 ## [0.40.0] - 2026-10-04
 
 ### Added

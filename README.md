@@ -114,6 +114,16 @@ reposync and cookiesync import this one substrate, so the wire formats, lock sem
 
 `synckitd` is the one per-machine daemon behind every consumer: it owns the shared host mesh, the RPC socket, the reconcile tick, and the watch supervisor. `synckitd status` prints the mesh, registered manifests, the label-derived socket paths, and daemon liveness; `synckitd --help` carries the full command surface.
 
+### Pin a peer's identity when it joins
+
+A consumer that implements `syncservice.Enroller` and lists
+`syncservice.EnrollMethods` in its capabilities learns each host's identity when
+the host joins. `synckitd host add <user@node>` reads the peer consumer's
+`Identity` through the pinned SSH bridge and passes it to the local consumer's
+`Enroll`. The inverse `host add` on the peer enrolls this host there. A consumer
+can then verify a change against the identity it pinned for the delivering host,
+because `ChangeEnvelope.Origin` is self-asserted.
+
 ### Register an artifact consumer
 
 Implement `syncservice.ArtifactConsumer` and register it with
