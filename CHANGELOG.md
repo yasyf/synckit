@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `artifact`, and every package that imports it such as `syncservice` and
+  `delivery`, builds on Linux again. Off macOS, both batch syncs use
+  `File.Sync`; `F_FULLFSYNC` stays macOS-only. cc-inbox imports these packages
+  and runs its CI on Linux.
+
 ## [0.41.0] - 2026-10-11
 
 ### Added
