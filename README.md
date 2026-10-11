@@ -120,7 +120,9 @@ A consumer that implements `syncservice.Enroller` and lists
 `syncservice.EnrollMethods` in its capabilities learns each host's identity when
 the host joins. `synckitd host add <user@node>` reads the peer consumer's
 `Identity` through the pinned SSH bridge and passes it to the local consumer's
-`Enroll`. The inverse `host add` on the peer enrolls this host there. A consumer
+`Enroll`, then runs `synckitd host enroll <self>` on the peer once its services
+are installed. `synckitd host enroll <user@node>` repeats the step for a host
+that is already registered. A consumer
 can then verify a change against the identity it pinned for the delivering host,
 because `ChangeEnvelope.Origin` is self-asserted.
 

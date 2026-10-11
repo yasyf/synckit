@@ -2,10 +2,13 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
+	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
+	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 )
 
@@ -33,9 +36,24 @@ func enrollConsumer(ctx context.Context, scope processScope, m manifest.Manifest
 	}
 	remote := syncservice.NewClient(dialTransport(scope, m, target, self))
 	defer func() { _ = remote.Close() }()
-	identity, err := remote.Identity(ctx)
+	identity, err := peerIdentity(ctx, remote, target)
 	if err != nil {
 		return false, err
 	}
 	return true, local.Enroll(ctx, syncservice.EnrollRequest{Host: target, Identity: identity})
+}
+
+func peerIdentity(ctx context.Context, remote *syncservice.Client, target string) ([]byte, error) {
+	attempts := 1
+	if fact, err := hostregistry.Mesh.Host(target); err == nil {
+		attempts = max(attempts, len(fact.Addresses))
+	}
+	var transportErr *rpc.TransportError
+	for {
+		identity, err := remote.Identity(ctx)
+		attempts--
+		if err == nil || attempts == 0 || !errors.As(err, &transportErr) || !transportErr.Undispatched {
+			return identity, err
+		}
+	}
 }
