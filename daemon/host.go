@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 
 	"github.com/spf13/cobra"
+	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/manifest"
 )
 
 func newHostCmd() *cobra.Command {
@@ -18,7 +20,7 @@ func newHostCmd() *cobra.Command {
 			return cmd.Help()
 		},
 	}
-	cmd.AddCommand(newHostAddCmd(), newHostLsCmd(), newHostRmCmd(), newHostVerifyCmd())
+	cmd.AddCommand(newHostAddCmd(), newHostEnrollCmd(), newHostLsCmd(), newHostRmCmd(), newHostVerifyCmd())
 	return cmd
 }
 
@@ -29,23 +31,57 @@ func newHostAddCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "add <user@node>",
-		Short: "Register a peer and SSH-bootstrap the mesh on it.",
+		Short: "Register a peer, SSH-bootstrap the mesh on it, and enroll its consumer identities.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withCLIExecRunner(cmd.Context(), func(runner hostregistry.Runner) error {
-				manifests, err := discoverManifests()
-				if err != nil {
-					return err
-				}
-				return AddHost(cmd.Context(), runner, manifests, args[0], self, noRecurse, func(msg string) {
-					cmd.Println(msg)
-				})
-			})
+			manifests, err := discoverManifests()
+			if err != nil {
+				return err
+			}
+			step := func(msg string) { cmd.Println(msg) }
+			if err := withCLIExecRunner(cmd.Context(), func(runner hostregistry.Runner) error {
+				return AddHost(cmd.Context(), runner, manifests, args[0], self, noRecurse, step)
+			}); err != nil {
+				return err
+			}
+			if noRecurse {
+				return nil
+			}
+			return runEnrollHost(cmd.Context(), manifests, args[0], step)
 		},
 	}
 	cmd.Flags().StringVar(&self, "self", "", "Override the detected ssh target by which peers reach this machine.")
 	cmd.Flags().BoolVar(&noRecurse, "no-recurse", false, "Register the peer only; skip the remote bootstrap.")
 	return cmd
+}
+
+func newHostEnrollCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "enroll <user@node>",
+		Short: "Pin a registered peer's consumer identities in this host's consumers.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if _, err := hostregistry.Mesh.Host(args[0]); err != nil {
+				return err
+			}
+			manifests, err := discoverManifests()
+			if err != nil {
+				return err
+			}
+			return runEnrollHost(cmd.Context(), manifests, args[0], func(msg string) { cmd.Println(msg) })
+		},
+	}
+}
+
+func runEnrollHost(ctx context.Context, manifests []manifest.Manifest, target string, step func(string)) error {
+	reg, err := hostregistry.Mesh.Load()
+	if err != nil {
+		return err
+	}
+	return withCLIProcessScope(ctx, func(owned *daemonkit.Owned) error {
+		enrollHost(ctx, owned, manifests, target, reg.Self, step)
+		return nil
+	})
 }
 
 func newHostLsCmd() *cobra.Command {

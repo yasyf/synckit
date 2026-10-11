@@ -64,7 +64,7 @@ func TestAddHostStepSequence(t *testing.T) {
 	}
 
 	// The remote bootstrap ran in order: ensure daemon, ensure consumer,
-	// inverse-register, reconcile, install.
+	// inverse-register, reconcile, install, enroll this host on the peer.
 	cmds := mock.SSHCmds("peer@node")
 	wantContains := []string{
 		"uname -s",
@@ -74,6 +74,7 @@ func TestAddHostStepSequence(t *testing.T) {
 		"'/opt/homebrew/bin/synckitd' host add 'me@self' --no-recurse",
 		"'/opt/homebrew/bin/synckitd' reconcile",
 		"'/opt/homebrew/bin/synckitd' install",
+		"'/opt/homebrew/bin/synckitd' host enroll 'me@self'",
 	}
 	assertOrderedContains(t, cmds, wantContains)
 }

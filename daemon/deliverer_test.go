@@ -847,6 +847,40 @@ func TestDelivererReStagesSnapshotOnNeedSnapshot(t *testing.T) {
 	}
 }
 
+func TestDelivererFencesADeltaChain(t *testing.T) {
+	h := newDeliveryHarness(t, false, "peer@node")
+	sink := h.sinks["peer@node"]
+	h.source.kind = syncservice.ChangeDelta
+	h.source.publish(3)
+	h.start()
+	h.await("peer@node", "first snapshot", acked(3))
+	deliver := func(source uint64, kind syncservice.ChangeKind) {
+		t.Helper()
+		h.source.publish(source)
+		if err := h.sched.Kick("stub", "peer@node"); err != nil {
+			t.Fatal(err)
+		}
+		h.await("peer@node", fmt.Sprintf("%s ack at %d", kind, source), acked(source))
+		sink.with(func(k *fakeSink) {
+			if k.lastApplyKey != string(kind) || k.held.Revision != syncservice.NewRevision(source) {
+				t.Fatalf("applied %s holding %s, want %s at %d", k.lastApplyKey, k.held.Revision, kind, source)
+			}
+		})
+	}
+	deliver(5, syncservice.ChangeDelta)
+	deliver(9, syncservice.ChangeDelta)
+	sink.with(func(k *fakeSink) { k.held = nil })
+	deliver(12, syncservice.ChangeSnapshot)
+	sink.with(func(k *fakeSink) {
+		if k.applied != 4 {
+			t.Fatalf("applied %d changes, want snapshot, two deltas, snapshot", k.applied)
+		}
+	})
+	if got := sink.count(syncservice.MethodApply); got != 5 {
+		t.Fatalf("apply calls = %d, want 5 with one NeedSnapshot refusal", got)
+	}
+}
+
 func TestDelivererStaleAnswers(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -22,7 +22,8 @@ var (
 // AddHost registers target as a peer in the shared mesh and, unless noRecurse,
 // SSH-bootstraps the mesh on it: ensure synckitd is installed, install every
 // manifest's consumer binary that declares a Brew formula, register the inverse
-// host, then reconcile and install services on the peer. onStep (may be nil) is
+// host, reconcile and install services on the peer, then enroll this host's
+// consumer identities there. onStep (may be nil) is
 // called with each step as it happens. synckit names no consumer — every consumer
 // specific comes from the manifests slice.
 func AddHost(ctx context.Context, r hostregistry.Runner, manifests []manifest.Manifest, target, self string, noRecurse bool, onStep func(string)) error {
@@ -114,6 +115,12 @@ func AddHost(ctx context.Context, r hostregistry.Runner, manifests []manifest.Ma
 		step(fmt.Sprintf("WARN install services on %s: %v", target, err))
 	} else {
 		step("installed services on " + target)
+	}
+
+	if out, err := r.SSH(ctx, target, remote+" host enroll "+hostregistry.ShellQuote(self)); err != nil {
+		step(fmt.Sprintf("WARN enroll %s on %s: %v", self, target, err))
+	} else if out = strings.TrimSpace(out); out != "" {
+		step(target + ": " + out)
 	}
 
 	return nil
