@@ -196,6 +196,7 @@ type fakeSource struct {
 	kind      syncservice.ChangeKind
 	source    uint64
 	roots     []artifact.Ref
+	payload   []byte
 	pins      map[string][]artifact.Ref
 	batches   map[artifact.Digest][][]byte
 	block     chan struct{}
@@ -240,8 +241,12 @@ func (f *fakeSource) change(since uint64) (syncservice.ChangeEnvelope, error) {
 	if since == 0 || kind == syncservice.ChangeSnapshot {
 		kind, base = syncservice.ChangeSnapshot, 0
 	}
+	payload := fmt.Appendf(nil, `{"v":%d}`, f.source)
+	if f.payload != nil {
+		payload = fmt.Appendf(nil, `{"v":%d,"pad":%q}`, f.source, f.payload)
+	}
 	return syncservice.NewExportedArtifactChange("stub", testManifest().Service.SchemaFingerprint, kind,
-		syncservice.NewRevision(base), syncservice.NewRevision(f.source), fmt.Appendf(nil, `{"v":%d}`, f.source), f.roots)
+		syncservice.NewRevision(base), syncservice.NewRevision(f.source), payload, f.roots)
 }
 
 func (f *fakeSource) pinned(owner string) []artifact.Ref {
@@ -354,6 +359,7 @@ type fakeSink struct {
 	mu           sync.Mutex
 	artifacts    bool
 	unreachable  bool
+	rejectApply  bool
 	state        netpolicy.State
 	objects      objectSet
 	incoming     map[artifact.Digest]*stagedBatch
@@ -390,6 +396,9 @@ func (k *fakeSink) apply(change syncservice.ChangeEnvelope) (any, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	time.Sleep(time.Millisecond)
+	if k.rejectApply {
+		return nil, errors.New("mesh: decode change: json: cannot unmarshal string into an int field")
+	}
 	if k.partial {
 		return syncservice.ApplyResult{AckedRevision: k.heldRevision(), Partial: true}, nil
 	}
@@ -739,27 +748,45 @@ func TestDelivererPauseReasons(t *testing.T) {
 	}
 }
 
-func TestDelivererSupersedesWhileOffline(t *testing.T) {
+func TestDelivererCoalescesKicksWhileOffline(t *testing.T) {
 	h := newDeliveryHarness(t, true, "peer@node")
 	sink := h.sinks["peer@node"]
 	sink.unreachable = true
+	h.source.payload = bytes.Repeat([]byte("x"), 1<<20)
 	h.source.publish(1, h.source.blob([]byte("v1")))
 	h.start()
-	h.await("peer@node", "unreachable", pausedWith(delivery.PausePeerUnreachable))
+	paused := h.await("peer@node", "unreachable", pausedWith(delivery.PausePeerUnreachable))
+	exports, probes := h.source.count(syncservice.MethodExportV2), sink.count(artifact.MethodNetStatus)
+
 	var latest artifact.Ref
-	for source := uint64(2); source <= 4; source++ {
+	for source := uint64(2); source <= 101; source++ {
 		latest = h.source.blob(fmt.Appendf(nil, "v%d", source))
 		h.source.publish(source, latest)
 		if err := h.sched.Kick("stub", "peer@node"); err != nil {
 			t.Fatal(err)
 		}
-		h.await("peer@node", "supersede", func(s delivery.PeerStatus) bool {
-			return s.Pending != nil && s.Pending.SourceRevision == syncservice.NewRevision(source)
-		})
 	}
-	status := h.status("peer@node")
-	if status.Pending.Superseded != 3 || status.Acked != "0" || status.State != delivery.StatePaused {
-		t.Fatalf("offline status %+v", status)
+	time.Sleep(50 * time.Millisecond)
+	if got := h.source.count(syncservice.MethodExportV2) - exports; got != 0 {
+		t.Fatalf("100 kicks while paused exported %d times, want 0 before the retry", got)
+	}
+	if held := h.status("peer@node"); held.Generation != paused.Generation || held.Pending.ChangeID != paused.Pending.ChangeID {
+		t.Fatalf("kicks while paused rewrote the pending change: %+v, want %+v", held, paused)
+	}
+
+	h.monitor.set(unrestricted)
+	status := h.await("peer@node", "one restage at the retry", func(s delivery.PeerStatus) bool {
+		return s.State == delivery.StatePaused && !s.NextAttemptAt.IsZero() && s.LastAttemptAt.After(paused.LastAttemptAt) &&
+			s.Pending != nil && s.Pending.SourceRevision == syncservice.NewRevision(101)
+	})
+	if got := sink.count(artifact.MethodNetStatus) - probes; got != 1 {
+		t.Fatalf("the retry probed the peer %d times, want 1", got)
+	}
+	if got := h.source.count(syncservice.MethodExportV2) - exports; got != 1 {
+		t.Fatalf("the retry exported %d times, want 1", got)
+	}
+	if status.Generation != paused.Generation+1 || status.Pending.Superseded != 1 || status.Acked != "0" {
+		t.Fatalf("retry status %+v, want one supersede over %+v", status, paused)
 	}
 	if files := pendingFiles(t, h.store); len(files) != 1 || files[0] != status.Pending.ChangeID+".json" {
 		t.Fatalf("pending files = %v", files)
@@ -767,9 +794,51 @@ func TestDelivererSupersedesWhileOffline(t *testing.T) {
 	if pins := h.source.pinned(deliveryPinOwnerPrefix + "peer@node"); !slices.Equal(pins, []artifact.Ref{latest}) {
 		t.Fatalf("delivery pins = %v, want only %v", pins, latest)
 	}
-	if got := sink.count(artifact.MethodNetStatus); got != 1 {
-		t.Fatalf("kicks while paused dialed the peer: %d net.status calls, want 1", got)
+
+	sink.with(func(k *fakeSink) { k.unreachable = false })
+	h.monitor.set(unrestricted)
+	acknowledged := h.await("peer@node", "ack of the latest", acked(101))
+	if acknowledged.AckedChangeID != status.Pending.ChangeID {
+		t.Fatalf("acked change %s, want the latest %s", acknowledged.AckedChangeID, status.Pending.ChangeID)
 	}
+	sink.with(func(k *fakeSink) {
+		if k.applied != 1 || k.held.ChangeID != status.Pending.ChangeID {
+			t.Fatalf("receiver applied %d changes holding %+v, want only %s", k.applied, k.held, status.Pending.ChangeID)
+		}
+	})
+}
+
+func TestDelivererCoalescesKicksDuringBackoff(t *testing.T) {
+	h := newDeliveryHarness(t, false, "peer@node")
+	deliveryBackoffBase = 20 * time.Millisecond
+	sink := h.sinks["peer@node"]
+	sink.rejectApply = true
+	h.source.payload = bytes.Repeat([]byte("x"), 1<<20)
+	h.source.publish(1)
+	h.start()
+	h.await("peer@node", "rejected apply", backoff)
+
+	for source := uint64(2); source <= 101; source++ {
+		h.source.publish(source)
+		if err := h.sched.Kick("stub", "peer@node"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sink.with(func(k *fakeSink) { k.rejectApply = false })
+	status := h.await("peer@node", "ack of the latest", acked(101))
+
+	attempts := sink.count(syncservice.MethodApply)
+	if exports := h.source.count(syncservice.MethodExport); exports != attempts {
+		t.Fatalf("%d exports for %d delivery attempts across 100 kicks, want one export per attempt", exports, attempts)
+	}
+	sink.with(func(k *fakeSink) {
+		if writes := uint64(attempts + k.applied); status.Generation > writes { //nolint:gosec // G115: call counts are never negative.
+			t.Fatalf("generation %d, want at most one stage per attempt and one ack per apply (%d)", status.Generation, writes)
+		}
+		if k.held.Revision != syncservice.NewRevision(101) || k.held.ChangeID != status.AckedChangeID {
+			t.Fatalf("receiver holds %+v, want the latest revision 101 acked as %s", k.held, status.AckedChangeID)
+		}
+	})
 }
 
 func TestDelivererResumesOnLocalTransition(t *testing.T) {

@@ -353,6 +353,7 @@ func TestE2ESupersedePinsAUnionPastMaxRoots(t *testing.T) {
 	if err := d.sched.Kick("stub", "b@node"); err != nil {
 		t.Fatal(err)
 	}
+	a.monitor.set(unrestricted)
 	status := d.await(t, "b@node", "superseded pending", func(s delivery.PeerStatus) bool {
 		return s.Pending != nil && s.Pending.SourceRevision == syncservice.NewRevision(2)
 	})

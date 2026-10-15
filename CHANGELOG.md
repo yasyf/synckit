@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A peer that stays down no longer costs an export and a durable rewrite per
+  kick.** A kick that arrived while a delivery worker waited out a restart, a
+  pause, or a backoff exported the consumer and restaged the pending change at
+  once. On one host the two `cci` lanes rewrote a 9.8 MB snapshot every few
+  seconds for peers that never acknowledged it. The kick now only marks the
+  worker dirty, and the attempt that ends the wait exports and stages the latest
+  revision once. Attempts run when they did before, the peer still receives the
+  latest revision, and acknowledgements, the supersede compare-and-swap, and
+  crash recovery are unchanged. A `daemon.Harness` test that kicked a paused
+  peer and waited for the restage must now end the wait, for example with a
+  local network change.
+
 ## [0.41.1] - 2026-10-11
 
 ### Fixed
