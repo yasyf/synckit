@@ -338,13 +338,7 @@ func (s *deliveryScheduler) work(l *lane) {
 		case <-s.ctx.Done():
 			return
 		case <-l.kick:
-			switch {
-			case retry != nil:
-				if _, _, err := s.prepare(s.ctx, l); err != nil && s.ctx.Err() == nil {
-					slog.WarnContext(s.ctx, "delivery: stage failed", "manifest", l.service, "peer", l.peer, "err", err)
-					l.update(func(v *laneLive) { v.lastError = err.Error() })
-				}
-			case due == nil:
+			if retry == nil && due == nil {
 				coalesce.Reset(l.due(s.timing.artifactMaxWait).Sub(s.now()))
 				due = coalesce.C
 			}

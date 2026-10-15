@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"maps"
 	"path/filepath"
@@ -562,21 +561,24 @@ func TestE2EOfflinePeerSupersedesThenAcksLatest(t *testing.T) {
 	if err != nil || stale == nil {
 		t.Fatalf("load() = %v, %v; want the first pending change", stale, err)
 	}
+	before := d.status(t, "b@node")
 	for revision := uint64(2); revision <= 3; revision++ {
 		a.consumer.publish(revision, shared, revisions[revision-1])
 		if err := d.sched.Kick("stub", "b@node"); err != nil {
 			t.Fatal(err)
 		}
-		d.await(t, "b@node", fmt.Sprintf("pending %d", revision), func(s delivery.PeerStatus) bool {
-			return s.Pending != nil && s.Pending.SourceRevision == syncservice.NewRevision(revision)
-		})
 	}
-	if err := d.sched.Kick("stub", "b@node"); err != nil {
-		t.Fatal(err)
+	time.Sleep(50 * time.Millisecond)
+	if held := d.status(t, "b@node"); held.Generation != before.Generation || held.Pending.ChangeID != stale.ChangeID {
+		t.Fatalf("offline kicks restaged before the retry: %+v", held)
 	}
-	status := d.status(t, "b@node")
-	if status.Acked != syncservice.NewRevision(0) || status.Pending.Superseded != 2 || status.State != delivery.StatePaused {
-		t.Fatalf("status after three offline kicks = %+v", status)
+	a.monitor.set(unrestricted)
+	status := d.await(t, "b@node", "pending 3 at the retry", func(s delivery.PeerStatus) bool {
+		return s.State == delivery.StatePaused && !s.NextAttemptAt.IsZero() && s.LastAttemptAt.After(before.LastAttemptAt) &&
+			s.Pending != nil && s.Pending.SourceRevision == syncservice.NewRevision(3)
+	})
+	if status.Acked != syncservice.NewRevision(0) || status.Pending.Superseded != 1 {
+		t.Fatalf("status after the offline retry = %+v", status)
 	}
 	files, err := filepath.Glob(filepath.Join(a.deliveries.pending, "*.json"))
 	if err != nil || len(files) != 1 || filepath.Base(files[0]) != status.Pending.ChangeID+".json" {

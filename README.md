@@ -210,10 +210,11 @@ ordinary reason, such as `local-cellular` or `peer-cellular`. For the two
 mid-transfer reasons, the first restart is immediate; further consecutive
 restarts wait 1 second, doubling up to 60 seconds. A committed batch, an
 acknowledged delivery, a different pause, or a failure resets the sequence.
-Local network changes do not shorten restart waits, and a kick during any wait
-only restages the change.
+Local network changes do not shorten restart waits.
 Every other pause rechecks after 60 seconds or a local network change;
-failures back off from 30 seconds to 5 minutes.
+failures back off from 30 seconds to 5 minutes. A kick during any of these
+waits only marks the worker dirty. The attempt that ends the wait exports and
+stages the latest change once, however many kicks arrived.
 
 | Command | Effect |
 |---|---|
