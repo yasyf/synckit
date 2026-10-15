@@ -832,7 +832,7 @@ func TestDelivererCoalescesKicksDuringBackoff(t *testing.T) {
 		t.Fatalf("%d exports for %d delivery attempts across 100 kicks, want one export per attempt", exports, attempts)
 	}
 	sink.with(func(k *fakeSink) {
-		if writes := uint64(attempts + k.applied); status.Generation > writes {
+		if writes := uint64(attempts + k.applied); status.Generation > writes { //nolint:gosec // G115: call counts are never negative.
 			t.Fatalf("generation %d, want at most one stage per attempt and one ack per apply (%d)", status.Generation, writes)
 		}
 		if k.held.Revision != syncservice.NewRevision(101) || k.held.ChangeID != status.AckedChangeID {
