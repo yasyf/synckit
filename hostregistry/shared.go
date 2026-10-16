@@ -45,11 +45,11 @@ func ManifestsDir() (string, error) {
 	return filepath.Join(dir, manifestsDirName), nil
 }
 
-// RegisteredManifestPath returns the file `synckitd register` installs the
+// RegisteredPath returns the file `synckitd register` installs the
 // manifest named name to, <ManifestsDir>/<name>.json, so a consumer can read its
 // own registration with manifest.Load. It refuses a name that is not a plain
 // file base name.
-func RegisteredManifestPath(name string) (string, error) {
+func RegisteredPath(name string) (string, error) {
 	if name != filepath.Base(name) || strings.ContainsAny(name, `/\`) {
 		return "", fmt.Errorf("manifest name %q is not a plain file base name", name)
 	}

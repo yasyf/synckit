@@ -160,7 +160,7 @@ func manifestPayload(name string) string {
 
 func removeManifest(t *testing.T, name string) {
 	t.Helper()
-	path, err := hostregistry.RegisteredManifestPath(name)
+	path, err := hostregistry.RegisteredPath(name)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -27,7 +27,7 @@ func newRegisterCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			dest, err := hostregistry.RegisteredManifestPath(m.Name)
+			dest, err := hostregistry.RegisteredPath(m.Name)
 			if err != nil {
 				return err
 			}
@@ -38,7 +38,7 @@ func newRegisterCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("read manifest %q: %w", args[0], err)
 			}
-			//nolint:gosec // G703: RegisteredManifestPath refuses any name that is not a plain base name, so dest stays within the manifests dir.
+			//nolint:gosec // G703: RegisteredPath refuses any name that is not a plain base name, so dest stays within the manifests dir.
 			if err := os.WriteFile(dest, raw, 0o600); err != nil {
 				return fmt.Errorf("install manifest to %s: %w", dest, err)
 			}
@@ -56,11 +56,11 @@ func newUnregisterCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			path, err := hostregistry.RegisteredManifestPath(name)
+			path, err := hostregistry.RegisteredPath(name)
 			if err != nil {
 				return err
 			}
-			//nolint:gosec // G703: RegisteredManifestPath refuses any name that is not a plain base name, so path stays within the manifests dir.
+			//nolint:gosec // G703: RegisteredPath refuses any name that is not a plain base name, so path stays within the manifests dir.
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("remove manifest %s: %w", path, err)
 			}

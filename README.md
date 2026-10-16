@@ -63,7 +63,7 @@ synckitd register manifest.json
 
 `synckitd` installs the manifest under `~/.config/synckit/manifests` and drives your tool's typed sync service — list, reconcile, sync — through either a resident Unix socket or a socketpair-confined local spawned session. Remote calls use Synckit's fixed `rpc-serve-v1` command over strict host-key-pinned SSH. The daemon never imports your code.
 
-To read your own registration back, pass `hostregistry.RegisteredManifestPath(name)` to `manifest.Load`.
+To read your own registration back, pass `hostregistry.RegisteredPath(name)` to `manifest.Load`.
 
 Process-backed transports are private to `synckitd` and run within a daemonkit
 `Ctx` or `Owned` scope. Resident socket helpers use `helperruntime.New` with their

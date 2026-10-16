@@ -2,7 +2,7 @@ package hostregistry
 
 import "testing"
 
-func TestRegisteredManifestPath(t *testing.T) {
+func TestRegisteredPath(t *testing.T) {
 	tests := []struct {
 		name          string
 		xdgConfigHome string
@@ -24,23 +24,23 @@ func TestRegisteredManifestPath(t *testing.T) {
 			if dir != tt.wantDir {
 				t.Errorf("ManifestsDir() = %q, want %q", dir, tt.wantDir)
 			}
-			path, err := RegisteredManifestPath(tt.manifest)
+			path, err := RegisteredPath(tt.manifest)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if path != tt.wantPath {
-				t.Errorf("RegisteredManifestPath(%q) = %q, want %q", tt.manifest, path, tt.wantPath)
+				t.Errorf("RegisteredPath(%q) = %q, want %q", tt.manifest, path, tt.wantPath)
 			}
 		})
 	}
 }
 
-func TestRegisteredManifestPathRefusesNonBaseNames(t *testing.T) {
+func TestRegisteredPathRefusesNonBaseNames(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/xdg")
 	for _, name := range []string{"", "nested/cci", "../cci", `nested\cci`} {
 		t.Run(name, func(t *testing.T) {
-			if path, err := RegisteredManifestPath(name); err == nil {
-				t.Fatalf("RegisteredManifestPath(%q) = %q, want an error", name, path)
+			if path, err := RegisteredPath(name); err == nil {
+				t.Fatalf("RegisteredPath(%q) = %q, want an error", name, path)
 			}
 		})
 	}
