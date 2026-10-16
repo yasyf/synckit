@@ -40,7 +40,7 @@ func TestServeAdmitsBusinessAfterActivation(t *testing.T) {
 		t.Fatalf("daemon never admitted business: %v", err)
 	}
 
-	dir, err := manifestsDir()
+	dir, err := hostregistry.ManifestsDir()
 	if err != nil {
 		t.Fatalf("manifests dir: %v", err)
 	}
