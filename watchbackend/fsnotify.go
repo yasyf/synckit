@@ -16,10 +16,16 @@ import (
 // It is a package var so tests can shrink it.
 var rewatchInterval = 30 * time.Second
 
-// Run recursively watches every directory tree in dirsByID and fans each
-// filesystem event out to every id whose declared tree covers it, until ctx is
-// canceled — so overlapping declared roots each fire. A declared path may be a
-// directory (watched recursively) or a regular file (watched individually). On kqueue it
+// readDir lists a directory for walkDirs; a package var so tests can observe which
+// directories a walk descends.
+var readDir = os.ReadDir
+
+// Run watches every Target in targets and fans each filesystem event out to every
+// id whose declared tree covers it, until ctx is canceled — so overlapping declared
+// roots each fire. A declared path may be a directory (watched recursively) or a
+// regular file (watched individually). A Target with Names watches each declared
+// directory alone, never listing or descending into its subdirectories, and fires
+// on an entry directly inside it only when the entry's base name is in Names. On kqueue it
 // costs one fd per watched directory and file; on inotify, one watch descriptor per path.
 // Every rewatchInterval it re-walks each declared root, so a root missing at startup,
 // deleted and recreated, or grown a nested directory is watched again and its id fired on
@@ -30,7 +36,7 @@ var rewatchInterval = 30 * time.Second
 // by rename while a reader still holds the old inode open delays watch teardown — fsnotify
 // emits Chmod until the last handle closes — so sweep recovery of the new inode waits for
 // that close; the reconcile floor covers the gap. Returns ctx.Err() on cancellation.
-func Run(ctx context.Context, dirsByID map[string][]string, onEvent EventFunc) error {
+func Run(ctx context.Context, targets map[string]Target, onEvent EventFunc) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
@@ -39,13 +45,34 @@ func Run(ctx context.Context, dirsByID map[string][]string, onEvent EventFunc) e
 
 	// Clean once so routing keys, watcher.Add args, and filepath.Dir lookups agree
 	// for a trailing-slash or "./" declared path.
-	declared := make(map[string][]string, len(dirsByID))
-	for id, dirs := range dirsByID {
-		cleaned := make([]string, len(dirs))
-		for i, dir := range dirs {
+	declared := make(map[string][]string, len(targets))
+	namesByID := map[string]map[string]struct{}{}
+	for id, target := range targets {
+		cleaned := make([]string, len(target.Dirs))
+		for i, dir := range target.Dirs {
 			cleaned[i] = filepath.Clean(dir)
 		}
 		declared[id] = cleaned
+		if len(target.Names) == 0 {
+			continue
+		}
+		names := make(map[string]struct{}, len(target.Names))
+		for _, name := range target.Names {
+			names[name] = struct{}{}
+		}
+		namesByID[id] = names
+	}
+	recursive := func(id string) bool {
+		_, named := namesByID[id]
+		return !named
+	}
+	firesOnChild := func(id, child string) bool {
+		names, named := namesByID[id]
+		if !named {
+			return true
+		}
+		_, ok := names[filepath.Base(child)]
+		return ok
 	}
 
 	// A dir maps to every id whose tree covers it, so an event fans out to all of
@@ -71,7 +98,7 @@ func Run(ctx context.Context, dirsByID map[string][]string, onEvent EventFunc) e
 	// the pass-wide pre-pass snapshot; it is not updated as dirs are added.
 	addTree := func(dir, id string, watched map[string]struct{}) []string {
 		var fired []string
-		walkDirs(dir, func(path string) {
+		walkDirs(dir, recursive(id), func(path string) {
 			_, wasWatched := watched[path]
 			if !wasWatched {
 				if err := watcher.Add(path); err != nil {
@@ -147,7 +174,9 @@ func Run(ctx context.Context, dirsByID map[string][]string, onEvent EventFunc) e
 				ids[id] = struct{}{}
 			}
 			for id := range dirIDs {
-				ids[id] = struct{}{}
+				if firesOnChild(id, event.Name) {
+					ids[id] = struct{}{}
+				}
 			}
 			// Watch a newly created subdir before firing, so an event in it before
 			// the next sweep is not missed; the triggering event fans out below.
@@ -158,7 +187,9 @@ func Run(ctx context.Context, dirsByID map[string][]string, onEvent EventFunc) e
 				if info, err := os.Lstat(event.Name); err == nil && info.Mode().IsDir() {
 					watched := watchedSet()
 					for id := range dirIDs {
-						addTree(event.Name, id, watched)
+						if recursive(id) {
+							addTree(event.Name, id, watched)
+						}
 					}
 				}
 			}
@@ -182,12 +213,13 @@ func Run(ctx context.Context, dirsByID map[string][]string, onEvent EventFunc) e
 }
 
 // walkDirs visits dir: a regular file is visited alone (watched individually), a
-// directory is visited along with every real subdirectory beneath it. os.Stat follows
+// directory is visited along with every real subdirectory beneath it, or alone when
+// recursive is false. os.Stat follows
 // a symlinked declared root, so a consumer may declare a symlink (e.g. macOS /tmp),
 // while os.ReadDir with entry.IsDir() keeps Lstat semantics on nested entries so a
 // symlinked subdirectory is never descended. A path that vanishes or is neither a
 // regular file nor a directory is skipped.
-func walkDirs(dir string, visit func(path string)) {
+func walkDirs(dir string, recursive bool, visit func(path string)) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		return
@@ -200,13 +232,16 @@ func walkDirs(dir string, visit func(path string)) {
 		return
 	}
 	visit(dir)
-	entries, err := os.ReadDir(dir)
+	if !recursive {
+		return
+	}
+	entries, err := readDir(dir)
 	if err != nil {
 		return
 	}
 	for _, entry := range entries {
 		if entry.IsDir() {
-			walkDirs(filepath.Join(dir, entry.Name()), visit)
+			walkDirs(filepath.Join(dir, entry.Name()), true, visit)
 		}
 	}
 }

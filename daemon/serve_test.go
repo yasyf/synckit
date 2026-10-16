@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
+	"github.com/yasyf/synckit/watchbackend"
 )
 
 func TestServeAdmitsBusinessAfterActivation(t *testing.T) {
@@ -434,6 +436,20 @@ func TestReconcileCommandGivesAPeerRegisteredSinceStartALane(t *testing.T) {
 	}
 	if !slices.ContainsFunc(statuses, func(s delivery.PeerStatus) bool { return s.Peer == "peer@node" }) {
 		t.Fatalf("statuses = %+v, want a lane for peer@node after reconcile", statuses)
+	}
+}
+
+func TestWatchTargetsCarryWatchNames(t *testing.T) {
+	items := []syncservice.WatchItem{
+		{ID: "records", WatchDirs: []string{"/home"}, WatchNames: []string{"inbox.db", "inbox.db-wal"}, Fingerprint: "fp-1"},
+		{ID: "tree", WatchDirs: []string{"/a", "/b"}, Fingerprint: "fp-2"},
+	}
+	want := map[string]watchbackend.Target{
+		"records": {Dirs: []string{"/home"}, Names: []string{"inbox.db", "inbox.db-wal"}},
+		"tree":    {Dirs: []string{"/a", "/b"}},
+	}
+	if got := watchTargets(items); !reflect.DeepEqual(got, want) {
+		t.Fatalf("watchTargets = %#v, want %#v", got, want)
 	}
 }
 
