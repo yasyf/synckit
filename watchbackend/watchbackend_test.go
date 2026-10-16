@@ -140,11 +140,24 @@ func awaitBoth(t *testing.T, h *fsHarness, id1, id2 string, poke func()) {
 	}
 }
 
-// awaitOnly pokes until want fires, then asserts other never fires within a grace
-// window, proving the event routed to only the one covering id.
 func awaitOnly(t *testing.T, h *fsHarness, want, other string, poke func()) {
 	t.Helper()
-	awaitEvent(t, h, want, poke)
+	deadline := time.After(2 * time.Second)
+	for fired := false; !fired; {
+		if poke != nil {
+			poke()
+		}
+		select {
+		case got := <-h.events:
+			if got == other {
+				t.Fatalf("event fired %q, want only %q", other, want)
+			}
+			fired = got == want
+		case <-time.After(25 * time.Millisecond):
+		case <-deadline:
+			t.Fatalf("timed out waiting for fsnotify event %q", want)
+		}
+	}
 	grace := time.After(200 * time.Millisecond)
 	for {
 		select {
