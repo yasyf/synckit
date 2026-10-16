@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`hostregistry.RegisteredManifestPath(name)` returns where `synckitd
+  register` installs a consumer's manifest**, `<ManifestsDir>/<name>.json`, and
+  `hostregistry.ManifestsDir()` returns the directory synckitd discovers
+  manifests in. A consumer can read its own registration with
+  `manifest.Load` without copying Synckit's `manifests` layout. Both resolve
+  under `$XDG_CONFIG_HOME/synckit`, or `~/.config/synckit` when it is unset.
+  `register`, `unregister`, and discovery now use them, so the daemon and its
+  consumers share one definition of the path. `RegisteredManifestPath` refuses
+  a name that is not a plain file base name, the same guard `register` and
+  `unregister` applied before.
+
 ### Changed
 
 - **A peer that stays down no longer costs an export and a durable rewrite per

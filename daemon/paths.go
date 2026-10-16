@@ -3,27 +3,14 @@ package daemon
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
 )
 
-const manifestsDirName = "manifests"
-
-// manifestsDir returns ~/.config/synckit/manifests, the directory consumers
-// register their manifests under.
-func manifestsDir() (string, error) {
-	dir, err := hostregistry.Mesh.Dir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, manifestsDirName), nil
-}
-
 // ensureManifestsDir returns the manifests directory, creating it if absent.
 func ensureManifestsDir() (string, error) {
-	dir, err := manifestsDir()
+	dir, err := hostregistry.ManifestsDir()
 	if err != nil {
 		return "", err
 	}
@@ -45,7 +32,7 @@ func discoverManifests() ([]manifest.Manifest, error) {
 // discoverScan loads every manifest registered under the manifests dir and
 // reports the ones that would not load.
 func discoverScan() ([]manifest.Manifest, []manifest.Skipped, error) {
-	dir, err := manifestsDir()
+	dir, err := hostregistry.ManifestsDir()
 	if err != nil {
 		return nil, nil, err
 	}

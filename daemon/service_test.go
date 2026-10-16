@@ -21,6 +21,7 @@ import (
 	"github.com/yasyf/daemonkit/paths"
 
 	"github.com/yasyf/synckit/codec"
+	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
 )
 
@@ -159,11 +160,11 @@ func manifestPayload(name string) string {
 
 func removeManifest(t *testing.T, name string) {
 	t.Helper()
-	directory, err := manifestsDir()
+	path, err := hostregistry.RegisteredManifestPath(name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(directory, name+".json")); err != nil {
+	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
 }
