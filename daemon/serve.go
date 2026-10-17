@@ -294,12 +294,8 @@ func (s *supervisor) startEngine(
 		if err != nil {
 			return 0, err
 		}
-		dirsByID := make(map[string][]string, len(items))
-		for _, it := range items {
-			dirsByID[it.ID] = it.WatchDirs
-		}
 		start := time.Now()
-		err = watchbackend.Run(rctx, dirsByID, func(id string) {
+		err = watchbackend.Run(rctx, watchTargets(items), func(id string) {
 			eng.OnEvent(rctx, id)
 		})
 		return time.Since(start), err
@@ -310,6 +306,14 @@ func (s *supervisor) startEngine(
 		defer wg.Done()
 		superviseWatch(ctx, m.Name, run)
 	}()
+}
+
+func watchTargets(items []syncservice.WatchItem) map[string]watchbackend.Target {
+	targets := make(map[string]watchbackend.Target, len(items))
+	for _, it := range items {
+		targets[it.ID] = watchbackend.Target{Dirs: it.WatchDirs, Names: it.WatchNames}
+	}
+	return targets
 }
 
 // superviseWatch runs the watch backend, restarting it with exponential backoff

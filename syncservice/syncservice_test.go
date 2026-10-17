@@ -2,7 +2,9 @@ package syncservice
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -108,5 +110,46 @@ func TestUnknownMethodReturnsErrorResponse(t *testing.T) {
 	response, err := testTransport(&fakeConsumer{}).Do(t.Context(), &rpc.Request{Method: "svc.bogus"})
 	if err != nil || response.OK || !errors.Is(rpc.ReplyError(response.Error), rpc.ErrUnknownMethod) {
 		t.Fatalf("response = %#v, %v", response, err)
+	}
+}
+
+func TestWatchItemWatchNamesWire(t *testing.T) {
+	tests := []struct {
+		name string
+		item WatchItem
+		want string
+	}{
+		{
+			"named",
+			WatchItem{ID: "records", WatchDirs: []string{"/home"}, WatchNames: []string{"inbox.db", "inbox.db-wal"}, Fingerprint: "fp"},
+			`{"id":"records","watch_dirs":["/home"],"watch_names":["inbox.db","inbox.db-wal"],"fingerprint":"fp"}`,
+		},
+		{
+			"unnamed",
+			WatchItem{ID: "tree", WatchDirs: []string{"/a"}, Fingerprint: "fp"},
+			`{"id":"tree","watch_dirs":["/a"],"fingerprint":"fp"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := json.Marshal(tt.item)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(raw) != tt.want {
+				t.Fatalf("Marshal = %s, want %s", raw, tt.want)
+			}
+			var older struct {
+				ID          string   `json:"id"`
+				WatchDirs   []string `json:"watch_dirs"`
+				Fingerprint string   `json:"fingerprint"`
+			}
+			if err := json.Unmarshal(raw, &older); err != nil {
+				t.Fatalf("older decode: %v", err)
+			}
+			if older.ID != tt.item.ID || !slices.Equal(older.WatchDirs, tt.item.WatchDirs) || older.Fingerprint != tt.item.Fingerprint {
+				t.Fatalf("older decode = %+v, want %+v without watch_names", older, tt.item)
+			}
+		})
 	}
 }

@@ -262,12 +262,16 @@ func exactDigest(value string) bool {
 }
 
 // WatchItem is one tracked unit of sync: a stable id, the directories whose changes
-// trigger a sync, and a fingerprint of its current state. A consumer that can tell
-// an item is mid-operation reports it busy with a human-readable reason, so a
-// watcher defers acting on it until it goes idle.
+// trigger a sync, and a fingerprint of its current state. WatchNames, when set,
+// narrows the watch: each WatchDirs directory is watched without its
+// subdirectories, and only a change to an entry directly inside it whose base name
+// is in WatchNames triggers a sync. A consumer that can tell an item is
+// mid-operation reports it busy with a human-readable reason, so a watcher defers
+// acting on it until it goes idle.
 type WatchItem struct {
 	ID          string   `json:"id"`
 	WatchDirs   []string `json:"watch_dirs"`
+	WatchNames  []string `json:"watch_names,omitempty"`
 	Fingerprint string   `json:"fingerprint"`
 	Busy        bool     `json:"busy,omitempty"`
 	BusyReason  string   `json:"busy_reason,omitempty"`

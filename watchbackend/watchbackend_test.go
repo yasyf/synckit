@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -27,12 +28,12 @@ type fsHarness struct {
 	done   chan error
 }
 
-func startFsnotify(t *testing.T, dirsByID map[string][]string) *fsHarness {
+func startFsnotify(t *testing.T, targets map[string]Target) *fsHarness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &fsHarness{events: make(chan string, 128), done: make(chan error, 1)}
 	go func() {
-		h.done <- Run(ctx, dirsByID, func(id string) {
+		h.done <- Run(ctx, targets, func(id string) {
 			select {
 			case h.events <- id:
 			default:
@@ -139,11 +140,24 @@ func awaitBoth(t *testing.T, h *fsHarness, id1, id2 string, poke func()) {
 	}
 }
 
-// awaitOnly pokes until want fires, then asserts other never fires within a grace
-// window, proving the event routed to only the one covering id.
 func awaitOnly(t *testing.T, h *fsHarness, want, other string, poke func()) {
 	t.Helper()
-	awaitEvent(t, h, want, poke)
+	deadline := time.After(2 * time.Second)
+	for fired := false; !fired; {
+		if poke != nil {
+			poke()
+		}
+		select {
+		case got := <-h.events:
+			if got == other {
+				t.Fatalf("event fired %q, want only %q", other, want)
+			}
+			fired = got == want
+		case <-time.After(25 * time.Millisecond):
+		case <-deadline:
+			t.Fatalf("timed out waiting for fsnotify event %q", want)
+		}
+	}
 	grace := time.After(200 * time.Millisecond)
 	for {
 		select {
@@ -196,7 +210,7 @@ func TestRunFsnotify(t *testing.T) {
 	events := make(chan string, 16)
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, map[string][]string{"x": {dir}}, func(id string) {
+		done <- Run(ctx, map[string]Target{"x": {Dirs: []string{dir}}}, func(id string) {
 			events <- id
 		})
 	}()
@@ -238,7 +252,7 @@ func TestRunFsnotifyRecoversDeletedDir(t *testing.T) {
 	if err := os.MkdirAll(nested, 0o700); err != nil {
 		t.Fatalf("seed nested: %v", err)
 	}
-	h := startFsnotify(t, map[string][]string{"x": {root}})
+	h := startFsnotify(t, map[string]Target{"x": {Dirs: []string{root}}})
 
 	// The tree is live: a create under the root fires.
 	awaitEvent(t, h, "x", createPoke(t, root))
@@ -270,7 +284,7 @@ func TestRunFsnotifyPicksUpLateDir(t *testing.T) {
 	parent := t.TempDir()
 	late := filepath.Join(parent, "late") // does not exist when Run starts
 	sentinel := t.TempDir()               // exists at startup, a deterministic barrier
-	h := startFsnotify(t, map[string][]string{"late": {late}, "sentinel": {sentinel}})
+	h := startFsnotify(t, map[string]Target{"late": {Dirs: []string{late}}, "sentinel": {Dirs: []string{sentinel}}})
 
 	// The startup walk and the select loop share one goroutine, so a sentinel event
 	// can only arrive once startup finished — proving the late root was already
@@ -299,7 +313,7 @@ func TestRunFsnotifyWatchesNestedDirs(t *testing.T) {
 	t.Cleanup(func() { rewatchInterval = prev })
 
 	root := t.TempDir()
-	h := startFsnotify(t, map[string][]string{"x": {root}})
+	h := startFsnotify(t, map[string]Target{"x": {Dirs: []string{root}}})
 
 	// Establish the root watch.
 	awaitEvent(t, h, "x", createPoke(t, root))
@@ -338,7 +352,7 @@ func TestRunFsnotifySymlinkRoot(t *testing.T) {
 
 	// Declare the symlink itself as the root: the walker's os.Stat follows it, so the
 	// real directory is watched under the declared (symlink) path.
-	h := startFsnotify(t, map[string][]string{"x": {link}})
+	h := startFsnotify(t, map[string]Target{"x": {Dirs: []string{link}}})
 
 	// A write through the symlink fires: fsnotify reports the event under the watched
 	// (symlink) path, which is the routing key.
@@ -352,7 +366,7 @@ func TestRunFsnotifyOverlappingRoots(t *testing.T) {
 	if err := os.MkdirAll(child, 0o700); err != nil {
 		t.Fatalf("seed child: %v", err)
 	}
-	h := startFsnotify(t, map[string][]string{"A": {parent}, "B": {child}})
+	h := startFsnotify(t, map[string]Target{"A": {Dirs: []string{parent}}, "B": {Dirs: []string{child}}})
 
 	// A write in the child dir is covered by both roots — A via its recursive walk of
 	// parent, and B as its own declared root — so both ids fire for the one event.
@@ -374,7 +388,7 @@ func TestRunFsnotifyRecoveryFansOutToOverlappingOwners(t *testing.T) {
 		t.Fatalf("seed nested: %v", err)
 	}
 	// A covers parent recursively; B declares the overlapped nested dir directly.
-	h := startFsnotify(t, map[string][]string{"A": {parent}, "B": {nested}})
+	h := startFsnotify(t, map[string]Target{"A": {Dirs: []string{parent}}, "B": {Dirs: []string{nested}}})
 
 	// Both trees are live: a write in the overlapped nested dir fires both owners.
 	awaitBoth(t, h, "A", "B", createPoke(t, nested))
@@ -413,7 +427,7 @@ func TestRunFsnotifySameIDOverlapDedupes(t *testing.T) {
 		t.Fatalf("seed child: %v", err)
 	}
 	// x declares parent and its own child: overlapping same-id roots.
-	h := startFsnotify(t, map[string][]string{"x": {parent, child}})
+	h := startFsnotify(t, map[string]Target{"x": {Dirs: []string{parent, child}}})
 
 	// Live: a write in child (covered by both declarations) fires x.
 	awaitEvent(t, h, "x", createPoke(t, child))
@@ -455,7 +469,7 @@ func TestRunFsnotifyDoesNotFollowNestedSymlink(t *testing.T) {
 	if err := os.MkdirAll(deep, 0o700); err != nil {
 		t.Fatalf("seed deep: %v", err)
 	}
-	h := startFsnotify(t, map[string][]string{"x": {root}})
+	h := startFsnotify(t, map[string]Target{"x": {Dirs: []string{root}}})
 
 	// Establish the root watch.
 	awaitEvent(t, h, "x", createPoke(t, root))
@@ -497,7 +511,7 @@ func TestRunWatchedFile(t *testing.T) {
 	}
 	// Declare the regular file itself, not its parent: walkDirs visits it alone and
 	// watches it individually, so the parent dir stays unwatched.
-	h := startFsnotify(t, map[string][]string{"x": {file}})
+	h := startFsnotify(t, map[string]Target{"x": {Dirs: []string{file}}})
 
 	// A write to the declared file fires its own watch. (Parent unwatched, so there is
 	// no sibling to isolate here — that is TestRunFileAndDirOverlap's job.)
@@ -511,7 +525,7 @@ func TestRunWatchedFileRecoversReplace(t *testing.T) {
 	if err := os.WriteFile(file, []byte("init"), 0o600); err != nil {
 		t.Fatalf("seed file: %v", err)
 	}
-	h := startFsnotify(t, map[string][]string{"x": {file}})
+	h := startFsnotify(t, map[string]Target{"x": {Dirs: []string{file}}})
 
 	// Live: a write to the watched file fires.
 	awaitEvent(t, h, "x", writePoke(t, file))
@@ -541,7 +555,7 @@ func TestRunWatchedFilePicksUpLateFile(t *testing.T) {
 	dir := t.TempDir()
 	late := filepath.Join(dir, "data") // does not exist when Run starts
 	sentinel := t.TempDir()            // exists at startup, a deterministic barrier
-	h := startFsnotify(t, map[string][]string{"late": {late}, "sentinel": {sentinel}})
+	h := startFsnotify(t, map[string]Target{"late": {Dirs: []string{late}}, "sentinel": {Dirs: []string{sentinel}}})
 
 	// The startup walk and the select loop share one goroutine, so a sentinel event can
 	// only arrive once startup finished — proving the late path was already recorded as
@@ -570,7 +584,7 @@ func TestRunFileAndDirOverlap(t *testing.T) {
 		t.Fatalf("seed file: %v", err)
 	}
 	// A watches the parent dir recursively; B declares the file inside it directly.
-	h := startFsnotify(t, map[string][]string{"A": {parent}, "B": {file}})
+	h := startFsnotify(t, map[string]Target{"A": {Dirs: []string{parent}}, "B": {Dirs: []string{file}}})
 
 	// Prove both watches are live: a create in parent fires A, and B's file watch is
 	// established in the same synchronous startup pass. Then settle.
@@ -601,7 +615,7 @@ func TestRunSameIDFileAndDirFiresOnce(t *testing.T) {
 	}
 	// x declares BOTH the parent dir and the file: the file matches x as an exact-path
 	// owner and a parent-dir owner, but the union must collapse them to one fire per event.
-	h := startFsnotify(t, map[string][]string{"x": {dir, file}})
+	h := startFsnotify(t, map[string]Target{"x": {Dirs: []string{dir, file}}})
 
 	// Prove the watches are live (a create in dir fires x, and the file watch is set in the
 	// same synchronous startup pass), then settle.
@@ -635,4 +649,179 @@ func TestRunSameIDFileAndDirFiresOnce(t *testing.T) {
 	if counts["x"] < 1 || len(counts) != 1 {
 		t.Fatalf("fires = %v, want x>=1 and only x", counts)
 	}
+}
+
+func startNamed(t *testing.T, dir string, names ...string) *fsHarness {
+	t.Helper()
+	sentinel := t.TempDir()
+	h := startFsnotify(t, map[string]Target{
+		"named":    {Dirs: []string{dir}, Names: names},
+		"sentinel": {Dirs: []string{sentinel}},
+	})
+	awaitEvent(t, h, "sentinel", createPoke(t, sentinel))
+	h.drainUntilQuiet(200 * time.Millisecond)
+	return h
+}
+
+func assertNoFire(t *testing.T, h *fsHarness, id string, window time.Duration) {
+	t.Helper()
+	deadline := time.After(window)
+	for {
+		select {
+		case got := <-h.events:
+			if got == id {
+				t.Fatalf("event fired %q, want none", id)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
+func seedFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("init"), 0o600); err != nil {
+		t.Fatalf("seed %s: %v", path, err)
+	}
+}
+
+func TestRunNamedFiresOnLateCreate(t *testing.T) {
+	dir := t.TempDir()
+	wal := filepath.Join(dir, "inbox.db-wal")
+	h := startNamed(t, dir, "inbox.db", "inbox.db-wal")
+
+	seedFile(t, wal)
+	awaitEvent(t, h, "named", nil)
+	h.drainUntilQuiet(200 * time.Millisecond)
+
+	awaitEvent(t, h, "named", writePoke(t, wal))
+}
+
+func TestRunNamedFiresOnRemove(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "inbox.db")
+	seedFile(t, db)
+	h := startNamed(t, dir, "inbox.db")
+
+	if err := os.Remove(db); err != nil {
+		t.Fatalf("remove %s: %v", db, err)
+	}
+	awaitEvent(t, h, "named", nil)
+}
+
+func TestRunNamedRenameOverStaysArmed(t *testing.T) {
+	dir := t.TempDir()
+	wal := filepath.Join(dir, "inbox.db-wal")
+	seedFile(t, wal)
+	h := startNamed(t, dir, "inbox.db-wal")
+
+	staged := filepath.Join(dir, "inbox.db-wal.stage")
+	seedFile(t, staged)
+	assertNoFire(t, h, "named", 200*time.Millisecond)
+	if err := os.Rename(staged, wal); err != nil {
+		t.Fatalf("rename over %s: %v", wal, err)
+	}
+	awaitEvent(t, h, "named", nil)
+	h.drainUntilQuiet(200 * time.Millisecond)
+
+	awaitEvent(t, h, "named", writePoke(t, wal))
+}
+
+func TestRunNamedIgnoresSiblingsAndSubdirs(t *testing.T) {
+	dir := t.TempDir()
+	blobs := filepath.Join(dir, "blobs")
+	if err := os.Mkdir(blobs, 0o700); err != nil {
+		t.Fatalf("mkdir blobs: %v", err)
+	}
+	db := filepath.Join(dir, "inbox.db")
+	seedFile(t, db)
+	h := startNamed(t, dir, "inbox.db")
+
+	seedFile(t, filepath.Join(dir, "inbox.db-shm"))
+	seedFile(t, filepath.Join(blobs, "inbox.db"))
+	mesh := filepath.Join(dir, "mesh")
+	if err := os.Mkdir(mesh, 0o700); err != nil {
+		t.Fatalf("mkdir mesh: %v", err)
+	}
+	assertNoFire(t, h, "named", 200*time.Millisecond)
+	seedFile(t, filepath.Join(mesh, "inbox.db"))
+	writePoke(t, filepath.Join(blobs, "inbox.db"))()
+	assertNoFire(t, h, "named", 300*time.Millisecond)
+
+	awaitEvent(t, h, "named", writePoke(t, db))
+}
+
+func TestRunNamedNeverListsSubdirs(t *testing.T) {
+	shrinkRewatch(t)
+	var mu sync.Mutex
+	listed := map[string]int{}
+	prev := readDir
+	readDir = func(name string) ([]os.DirEntry, error) {
+		mu.Lock()
+		listed[name]++
+		mu.Unlock()
+		return os.ReadDir(name)
+	}
+	t.Cleanup(func() { readDir = prev })
+	listings := func(dir string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return listed[dir]
+	}
+
+	dir := t.TempDir()
+	blobs := filepath.Join(dir, "blobs")
+	if err := os.Mkdir(blobs, 0o700); err != nil {
+		t.Fatalf("mkdir blobs: %v", err)
+	}
+	for i := range 500 {
+		seedFile(t, filepath.Join(blobs, fmt.Sprintf("%d.txt", i)))
+	}
+	control := t.TempDir()
+	startFsnotify(t, map[string]Target{
+		"named":     {Dirs: []string{dir}, Names: []string{"inbox.db"}},
+		"recursive": {Dirs: []string{control}},
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for listings(control) < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("control dir listed %d times, want at least 3 sweeps", listings(control))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := listings(dir); got != 0 {
+		t.Errorf("named dir listed %d times, want 0", got)
+	}
+	if got := listings(blobs); got != 0 {
+		t.Errorf("blobs listed %d times, want 0", got)
+	}
+}
+
+func TestRunNamedLeavesRecursiveOwnerOfSameDir(t *testing.T) {
+	dir := t.TempDir()
+	blobs := filepath.Join(dir, "blobs")
+	if err := os.Mkdir(blobs, 0o700); err != nil {
+		t.Fatalf("mkdir blobs: %v", err)
+	}
+	h := startFsnotify(t, map[string]Target{
+		"named":     {Dirs: []string{dir}, Names: []string{"inbox.db"}},
+		"recursive": {Dirs: []string{dir}},
+	})
+
+	awaitOnly(t, h, "recursive", "named", createPoke(t, blobs))
+	h.drainUntilQuiet(200 * time.Millisecond)
+	awaitOnly(t, h, "recursive", "named", createPoke(t, dir))
+	h.drainUntilQuiet(200 * time.Millisecond)
+
+	late := filepath.Join(dir, "late")
+	if err := os.Mkdir(late, 0o700); err != nil {
+		t.Fatalf("mkdir late: %v", err)
+	}
+	awaitOnly(t, h, "recursive", "named", nil)
+	h.drainUntilQuiet(200 * time.Millisecond)
+	awaitOnly(t, h, "recursive", "named", createPoke(t, late))
+	h.drainUntilQuiet(200 * time.Millisecond)
+
+	awaitBoth(t, h, "named", "recursive", writePoke(t, filepath.Join(dir, "inbox.db")))
 }

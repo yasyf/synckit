@@ -18,9 +18,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumers share one definition of the path. `RegisteredPath` refuses
   a name that is not a plain file base name, the same guard `register` and
   `unregister` applied before.
+- **`syncservice.WatchItem.WatchNames` narrows a watch to named entries.** When
+  the new `watch_names` list is set, synckitd watches each `WatchDirs` directory
+  without its subdirectories, and neither the 30-second sweep nor the
+  new-subdirectory fast path lists or descends into them. The item fires only
+  for an event on an entry directly inside the directory whose base name is in
+  `WatchNames`. A create, write, remove, or rename over a named entry fires at
+  once. An event on the declared path itself and a queue overflow fire as
+  before, and another item's recursive watch of the same directory is
+  unaffected. A consumer such as cc-inbox can declare `WatchDirs: [home]` with
+  `WatchNames: [inbox.db, inbox.db-wal]` instead of watching all of `home`,
+  including a `blobs` directory that held 9,913 files on one host. A synckitd
+  without this release decodes `List` with a plain `json.Unmarshal`, ignores
+  `watch_names`, and keeps watching the directories recursively, so a consumer
+  and the daemon can upgrade in either order.
 
 ### Changed
 
+- **`watchbackend.Run` takes `map[string]watchbackend.Target`** in place of
+  `map[string][]string`. `Target.Dirs` holds the old dirs and `Target.Names`
+  carries `WatchNames`. A direct caller wraps each id's dirs as
+  `watchbackend.Target{Dirs: dirs}`.
 - **A peer that stays down no longer costs an export and a durable rewrite per
   kick.** A kick that arrived while a delivery worker waited out a restart, a
   pause, or a backoff exported the consumer and restaged the pending change at

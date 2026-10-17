@@ -101,7 +101,7 @@ A pass fetches every peer's registry read-only, folds them in with the CRDT merg
 | `delivery` | The daemon's delivery status and kick client API |
 | `netpolicy` | Network.framework monitoring and the network cost policy for artifact transfers |
 | `watch` | The generic anti-echo watch engine: debounce, fingerprint dedupe, record-before-notify, concurrent peer fan-out, busy gating |
-| `watchbackend` | Filesystem events mapped to watch ids over recursive fsnotify (inotify/kqueue) |
+| `watchbackend` | Filesystem events mapped to watch ids over fsnotify (inotify/kqueue), recursive or narrowed to named entries |
 | `hostregistry` | The host mesh: reachability detection, Tailscale and Bonjour discovery, an ssh runner, flock-guarded `state.json` |
 | `cregistry` | LWW-element-set CRDT registry with per-item payloads; pure and clock-free |
 | `converge` | The pull-only convergent-reconcile pass over a `cregistry` registry |
@@ -115,6 +115,37 @@ reposync and cookiesync import this one substrate, so the wire formats, lock sem
 ## The synckitd daemon
 
 `synckitd` is the one per-machine daemon behind every consumer: it owns the shared host mesh, the RPC socket, the reconcile tick, and the watch supervisor. `synckitd status` prints the mesh, registered manifests, the label-derived socket paths, and daemon liveness; `synckitd --help` carries the full command surface.
+
+### Choose what a watch item watches
+
+`List` returns one `syncservice.WatchItem` per unit of sync. synckitd watches
+each item's `WatchDirs` and hands every change to the watch engine, which
+debounces it and syncs when the item's `Fingerprint` changes.
+
+- A directory in `WatchDirs` is watched recursively. The daemon watches a new
+  subdirectory as soon as it appears, re-walks the tree every 30 seconds, and
+  does not follow symlinked subdirectories.
+- A regular file in `WatchDirs` is watched by itself. Its parent stays
+  unwatched, so a file created or replaced at that path is picked up by the
+  next 30-second sweep.
+- `WatchNames` narrows the item to named entries. Each directory in `WatchDirs`
+  is watched without its subdirectories, which synckitd never lists. Only an
+  event on an entry directly inside the directory whose base name is in
+  `WatchNames` fires the item, so creating, writing, removing, or renaming over
+  a named entry fires at once. An event on the directory itself, such as its
+  removal, still fires.
+
+```go
+syncservice.WatchItem{
+	ID:          "records",
+	WatchDirs:   []string{home},
+	WatchNames:  []string{"inbox.db", "inbox.db-wal"},
+	Fingerprint: fingerprint,
+}
+```
+
+A synckitd release without `WatchNames` decodes `List` with a plain
+`json.Unmarshal`, ignores `watch_names`, and watches `home` recursively.
 
 ### Pin a peer's identity when it joins
 
