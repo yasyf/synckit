@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-10-17
+
 ### Added
 
 - **`hostregistry.RegisteredPath(name)` returns where `synckitd
@@ -39,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `map[string][]string`. `Target.Dirs` holds the old dirs and `Target.Names`
   carries `WatchNames`. A direct caller wraps each id's dirs as
   `watchbackend.Target{Dirs: dirs}`.
+
+## [0.41.2] - 2026-10-15
+
+### Changed
+
 - **A peer that stays down no longer costs an export and a durable rewrite per
   kick.** A kick that arrived while a delivery worker waited out a restart, a
   pause, or a backoff exported the consumer and restaged the pending change at
