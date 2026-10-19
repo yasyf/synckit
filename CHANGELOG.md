@@ -8,10 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`hostregistry.SSHError.Exited` and `SSHError.ConnFailure`** report whether
-  ssh ran and exited unsuccessfully, and whether that exit was ssh's own
-  connection failure (255). An attempt that failed before ssh ran, such as
-  a refused spawn, reports neither.
+- **`hostregistry.SSHError.Exited` reports whether a failed ssh attempt carries
+  ssh's exit**: a remote non-zero exit, ssh's own 255, or a fatal signal. A
+  refused spawn reports false, and so does a run whose only reported failure
+  was stdin delivery or its output.
+
+### Changed
+
+- **A relay leg that fails at ssh is fatal, as it has been since 0.37.0.** The
+  router's relay leg was documented to fail over on ssh's exit 255. It matched
+  an exit-255 `*exec.ExitError`, which `ExecSSH` stopped returning when
+  it moved to the daemonkit runner, so the failover never fired. The dead check
+  is gone, and only a timed-out relay leg moves to the next candidate. A 255
+  cannot tell a refused connection from a session dropped after the peer
+  prompted, so failing over could ask a second person after the first one's
+  answer was lost.
 
 ### Fixed
 
@@ -20,17 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe returned a `*hostregistry.SSHError`, including one where the local spawn
   was refused before ssh ran. A resident whose descriptor table had grown past
   `OPEN_MAX` (10240) got `EBADF` from `posix_spawn_file_actions_adddup2` on
-  every spawn, so every routed consent answered `unavailable` and the cause was
-  lost. A probe now routes around only when its ssh exited or timed out. A probe
-  whose ssh never ran fails the request with its cause. A peer that is offline,
-  locked, screen-shared, or slow still routes around. `consent.ProbeRoutesAround`
-  callers get the same split, and a test fake that wraps `*exec.ExitError` must
-  wrap `*daemonkit.ExitError`, the type `ExecSSH` returns.
-- **A relay leg that fails at ssh's transport fails over again.** The relay
-  failover matched an exit-255 `*exec.ExitError`, which `ExecSSH` stopped
-  returning when it moved to the daemonkit runner, so a relay leg's connection
-  failure ended the walk as fatal. It now reads `*daemonkit.ExitError`. A relay
-  leg's real remote exit is still fatal.
+  every spawn. Every routed consent then answered `unavailable`, and the cause
+  was lost. A probe now routes around only when it timed out or its failure carries
+  ssh's exit. Any other probe failure fails the request with its cause. A peer
+  that is offline, locked, screen-shared, or slow still routes around.
+  `consent.ProbeRoutesAround` callers get the same split, and a test fake that
+  wraps `*exec.ExitError` must wrap `*daemonkit.ExitError`, the type `ExecSSH`
+  returns.
 
 ## [0.42.0] - 2026-10-17
 

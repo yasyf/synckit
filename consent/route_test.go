@@ -200,34 +200,6 @@ func TestRouteFailsOverUnavailableApprover(t *testing.T) {
 	}
 }
 
-// TestRouteFailsOverUnreachableApprover proves a transport failure (ssh exit
-// 255) on the relay leg advances to the next live approver.
-func TestRouteFailsOverUnreachableApprover(t *testing.T) {
-	unreachable := "unreachable@box"
-	healthy := "healthy@box"
-	nonce := "transport-nonce"
-	endpoint := "me@laptop:sha256:cafe"
-
-	runner := &approverMesh{
-		// unreachable answers presence live but has no relay reply scripted,
-		// so its relay leg fails at the transport.
-		presence: map[string]string{unreachable: livePresence, healthy: livePresence},
-		relay:    map[string]string{healthy: approvedReply(t, nonce, endpoint)},
-	}
-	r := pinnedRouter(runner, nonce)
-
-	reply, err := r.Route(context.Background(), []string{unreachable, healthy}, endpoint, testAttempt)
-	if err != nil {
-		t.Fatalf("Route across an unreachable approver: %v", err)
-	}
-	if reply.Peer != healthy {
-		t.Fatalf("Route bound %s, want %s", reply.Peer, healthy)
-	}
-	if asked := runner.relayTargets(); len(asked) != 2 || asked[1] != healthy {
-		t.Fatalf("relay dials = %v, want the failover to %s", asked, healthy)
-	}
-}
-
 // probeErrMesh wraps an approverMesh, failing the presence leg for one target
 // with a fixed error; every other call delegates to the embedded mesh.
 type probeErrMesh struct {
@@ -374,31 +346,44 @@ func TestRouteAdvancesPastWedgedRelayLeg(t *testing.T) {
 	}
 }
 
-// TestRouteNon255SSHErrorIsFatal proves a relay-leg SSHError wrapping a real
-// remote exit (not ssh's own exit-255 connection failure) propagates fatally:
-// no later approver is asked.
-func TestRouteNon255SSHErrorIsFatal(t *testing.T) {
+// TestRouteRelaySSHFailureIsFatal proves a relay-leg ssh failure propagates
+// fatally whatever its shape: no later approver is asked.
+func TestRouteRelaySSHFailureIsFatal(t *testing.T) {
 	broken := "broken@box"
 	next := "next@box"
 	endpoint := "me@laptop:sha256:cafe"
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"transport 255", sshTransportFailure(broken)},
+		{"remote exit", remoteExitFailure(broken)},
+		{"refused spawn", spawnFailure(broken)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &approverMesh{
+				presence: map[string]string{broken: livePresence, next: livePresence},
+				relayErr: map[string]error{broken: tt.err},
+				relay:    map[string]string{next: approvedReply(t, "n", endpoint)},
+			}
+			r := pinnedRouter(runner, "n")
 
-	runner := &approverMesh{
-		presence: map[string]string{broken: livePresence, next: livePresence},
-		relayErr: map[string]error{broken: remoteExitFailure(broken)},
-		relay:    map[string]string{next: approvedReply(t, "n", endpoint)},
-	}
-	r := pinnedRouter(runner, "n")
-
-	_, err := r.Route(context.Background(), []string{broken, next}, endpoint, testAttempt)
-	if err == nil || !strings.Contains(err.Error(), "consent relay to") {
-		t.Fatalf("non-255 SSHError = %v, want the fatal relay failure", err)
-	}
-	var sshErr *hostregistry.SSHError
-	if !errors.As(err, &sshErr) {
-		t.Fatalf("non-255 SSHError = %v, want the wrapped *hostregistry.SSHError", err)
-	}
-	if asked := runner.relayTargets(); len(asked) != 1 || asked[0] != broken {
-		t.Fatalf("relay dials = %v, want only %s (a real remote exit is fatal, not a skip)", asked, broken)
+			_, err := r.Route(context.Background(), []string{broken, next}, endpoint, testAttempt)
+			if err == nil || !strings.Contains(err.Error(), "consent relay to") {
+				t.Fatalf("Route = %v, want the fatal relay failure", err)
+			}
+			var sshErr *hostregistry.SSHError
+			if !errors.As(err, &sshErr) {
+				t.Fatalf("Route = %v, want the wrapped *hostregistry.SSHError", err)
+			}
+			if v := Classify(err); v != VerdictFatal {
+				t.Fatalf("Classify(%v) = %s, want fatal", err, v)
+			}
+			if asked := runner.relayTargets(); len(asked) != 1 || asked[0] != broken {
+				t.Fatalf("relay dials = %v, want only %s", asked, broken)
+			}
+		})
 	}
 }
 

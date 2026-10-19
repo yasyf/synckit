@@ -3,6 +3,7 @@ package hostregistry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -456,22 +457,21 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 	})
 }
 
-// TestSSHErrorReportsWhetherSSHRan proves Exited and ConnFailure read the cause a real
-// daemonkit runner produces: ssh's 255 and a remote exit both ran, and an ssh binary
-// that cannot spawn never did.
-func TestSSHErrorReportsWhetherSSHRan(t *testing.T) {
+// TestSSHErrorExitedFromARealRunner proves Exited reads the cause a real daemonkit
+// runner produces: ssh's 255 and a remote exit both carry an exit, and an ssh binary
+// that cannot spawn does not.
+func TestSSHErrorExitedFromARealRunner(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "attempts.log")
 	fake := fakeSSH(t, logPath)
 	tests := []struct {
-		name        string
-		bin         string
-		addr        string
-		exited      bool
-		connFailure bool
+		name   string
+		bin    string
+		addr   string
+		exited bool
 	}{
-		{"connection failure", fake, "me@connfail-lan", true, true},
-		{"remote exit", fake, "me@remotefail-lan", true, false},
-		{"never spawned", filepath.Join(t.TempDir(), "missing-ssh"), "me@peer", false, false},
+		{"connection failure", fake, "me@connfail-lan", true},
+		{"remote exit", fake, "me@remotefail-lan", true},
+		{"never spawned", filepath.Join(t.TempDir(), "missing-ssh"), "me@peer", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -484,8 +484,31 @@ func TestSSHErrorReportsWhetherSSHRan(t *testing.T) {
 			if got := sshErr.Exited(); got != tt.exited {
 				t.Errorf("Exited() = %v, want %v (err %v)", got, tt.exited, err)
 			}
-			if got := sshErr.ConnFailure(); got != tt.connFailure {
-				t.Errorf("ConnFailure() = %v, want %v (err %v)", got, tt.connFailure, err)
+		})
+	}
+}
+
+// TestSSHErrorExitedShapes pins Exited over every cause shape daemonkit's Run returns:
+// an exit, alone or joined with truncation, reads true; a run that reported no exit reads
+// false, even when ssh ran.
+func TestSSHErrorExitedShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"remote exit", &daemonkit.ExitError{Exit: daemonkit.Exit{Code: 3}}, true},
+		{"ssh 255 with truncated output", errors.Join(daemonkit.ErrTruncated, &daemonkit.ExitError{Exit: daemonkit.Exit{Code: 255}}), true},
+		{"signal at the deadline", errors.Join(&daemonkit.ExitError{Exit: daemonkit.Exit{Code: -1, Signal: syscall.SIGKILL}}, context.DeadlineExceeded), true},
+		{"clean exit with truncated output", daemonkit.ErrTruncated, false},
+		{"output collection failure", fmt.Errorf("proc: collect run output: %w", syscall.EIO), false},
+		{"refused spawn", fmt.Errorf("posix_spawn_file_actions_adddup2 0: %w", syscall.EBADF), false},
+		{"budget spent before spawn", fmt.Errorf("daemonkit: Run was handed a context with no budget left: %w", context.DeadlineExceeded), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := (&SSHError{Addr: "me@peer", Err: tt.err}).Exited(); got != tt.want {
+				t.Fatalf("Exited() over %v = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

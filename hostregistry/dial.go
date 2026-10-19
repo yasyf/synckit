@@ -36,9 +36,9 @@ var dialOpts = []string{
 }
 
 // SSHError is the failure ExecSSH returns for every ssh attempt that does not succeed: a
-// remote command's non-zero exit, ssh's own 255 connection failure, or cancellation.
-// Unwrap Err to reach the typed ExitCode cause that isConnFailure keys failover off;
-// Stderr carries whatever the attempt captured (possibly empty).
+// remote command's non-zero exit, ssh's own 255 connection failure, cancellation, or a
+// local failure before ssh ran, such as a refused spawn. Unwrap Err to reach the typed
+// cause; Stderr carries whatever the attempt captured (possibly empty).
 type SSHError struct {
 	Addr   string
 	Stderr string
@@ -57,16 +57,13 @@ func (e *SSHError) Error() string {
 // Unwrap returns the underlying error so errors.Is / errors.As reach the ssh exit cause.
 func (e *SSHError) Unwrap() error { return e.Err }
 
-// Exited reports whether ssh ran and exited unsuccessfully (a remote non-zero exit, ssh's
-// own 255, or a fatal signal); false means the attempt failed before ssh executed.
+// Exited reports whether the failure carries ssh's exit (a remote non-zero exit, ssh's
+// own 255, or a fatal signal). False means no exit was observed: the spawn was refused,
+// or a stdin or output failure was all the run reported.
 func (e *SSHError) Exited() bool {
 	var exit *daemonkit.ExitError
 	return errors.As(e.Err, &exit)
 }
-
-// ConnFailure reports whether ssh exited with its own connection failure (exit 255),
-// the one exit that means the remote command never ran.
-func (e *SSHError) ConnFailure() bool { return isConnFailure(e.Err) }
 
 // brewWrap wraps remoteCmd so a non-interactive ssh on macOS sources brew's shellenv
 // and finds a brew-installed tool on PATH.
