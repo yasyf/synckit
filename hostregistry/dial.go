@@ -36,9 +36,9 @@ var dialOpts = []string{
 }
 
 // SSHError is the failure ExecSSH returns for every ssh attempt that does not succeed: a
-// remote command's non-zero exit, ssh's own 255 connection failure, or cancellation.
-// Unwrap Err to reach the typed ExitCode cause that isConnFailure keys failover off;
-// Stderr carries whatever the attempt captured (possibly empty).
+// remote command's non-zero exit, ssh's own 255 connection failure, cancellation, or a
+// local failure before ssh ran, such as a refused spawn. Unwrap Err to reach the typed
+// cause; Stderr carries whatever the attempt captured (possibly empty).
 type SSHError struct {
 	Addr   string
 	Stderr string
@@ -56,6 +56,13 @@ func (e *SSHError) Error() string {
 
 // Unwrap returns the underlying error so errors.Is / errors.As reach the ssh exit cause.
 func (e *SSHError) Unwrap() error { return e.Err }
+
+// Exited reports whether ssh exited with a status: a remote non-zero exit or ssh's own
+// 255. A local signal death, a refused spawn, or a stdin or output failure reports false.
+func (e *SSHError) Exited() bool {
+	var exit *daemonkit.ExitError
+	return errors.As(e.Err, &exit) && exit.Exit.Signal == 0
+}
 
 // brewWrap wraps remoteCmd so a non-interactive ssh on macOS sources brew's shellenv
 // and finds a brew-installed tool on PATH.
@@ -79,7 +86,7 @@ func brewWrap(remoteCmd string) string {
 // addresses, keepalives that drop a dead peer); a connected command's runtime belongs
 // to the caller's ctx deadline — only the caller knows how long its command should take.
 // Every failing attempt surfaces as a [*SSHError] naming the dial address, its captured
-// stderr, and the unwrappable typed exit cause.
+// stderr, and the unwrappable cause.
 func ExecSSH(ctx context.Context, runner Commander, target, remoteCmd string, stdin []byte) (string, error) {
 	addrs, err := DialAddrs(target)
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -427,6 +428,23 @@ func TestDecideRouteExhaustedIsUnavailable(t *testing.T) {
 	}
 	if d.Verdict != VerdictUnavailable || !d.Routed {
 		t.Fatalf("Decide = %+v, want a routed unavailable", d)
+	}
+}
+
+// TestDecideRouteSpawnFailureIsFatal proves a routed walk whose probe ssh
+// never ran fails Decide with that cause instead of answering the routed
+// unavailable an offline mesh earns.
+func TestDecideRouteSpawnFailureIsFatal(t *testing.T) {
+	peer := "you@desktop"
+	runner := &probeErrMesh{approverMesh: &approverMesh{}, target: peer, err: spawnFailure(peer)}
+	e := newTestEngine(t, &fakePrompter{}, staticProbe(presence.SessionSnapshot{}), runner, peer)
+
+	d, err := e.Decide(context.Background(), decideReq(0))
+	if !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("Decide = (%+v, %v), want the probe's spawn failure", d, err)
+	}
+	if d.Verdict == VerdictUnavailable || d.Routed {
+		t.Fatalf("Decide = %+v, want no decision: a local spawn failure must not answer unavailable", d)
 	}
 }
 

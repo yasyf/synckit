@@ -5,17 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
 	"time"
 
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/presence"
 	"github.com/yasyf/synckit/rpc"
 )
-
-// sshConnFailureExit is ssh's own connection-failure exit status — the only
-// exit code the relay-leg failover treats as a transport failure.
-const sshConnFailureExit = 255
 
 // The wire statuses a relay reply carries.
 const (
@@ -81,18 +76,13 @@ func NewRouter(runner Runner, probeCmd string) *Router {
 	}
 }
 
-// Route walks candidates in order and returns the first bound approval. A peer
-// that is not live, whose probe failed at ssh (ProbeRoutesAround), whose relay
-// leg timed out or failed at the ssh transport (exit-255), or that answered an
-// explicit unavailable is routed around: the next candidate is tried. Any
-// other failure — a probe or relay reply that does not parse, an unexpected
-// status, a relay leg's real remote exit — propagates fatally rather than
-// masquerading as peer-offline. A denial is terminal (*Denied) — a human said
-// no, and no other peer is ever asked — and an approval that fails to echo the
-// exact nonce and endpoint this host sent stops the walk with
-// *BindingMismatch: an unbound approval is fatal, never a retry. Each attempt
-// binds its own fresh nonce, minted inside the per-peer loop. Candidates
-// exhausted is *AuthRequired.
+// Route walks candidates in order and returns the first bound approval, or
+// *AuthRequired once they are exhausted. A candidate that is not live, whose
+// probe trips ProbeRoutesAround, whose relay leg timed out, or that answers
+// unavailable is skipped; any other failure is fatal.
+//
+// A denial (*Denied) is terminal. Each attempt mints its own nonce, and an
+// approval that fails to echo it and the endpoint is *BindingMismatch.
 func (r *Router) Route(ctx context.Context, candidates []string, endpoint string, attempt Attempt) (*Reply, error) {
 	var lastErr error
 	for _, peer := range candidates {
@@ -117,10 +107,10 @@ func (r *Router) Route(ctx context.Context, candidates []string, endpoint string
 
 // relay runs one routed-consent attempt against peer, minting a fresh nonce
 // for it. next reports whether Route should advance to another approver — the
-// relay leg failed at the transport (routesAround), or the peer answered an
+// relay leg timed out (routesAround), or the peer answered an
 // explicit unavailable; next false carries the terminal outcome: the bound
-// reply, a denial, an unbound approval's *BindingMismatch, or a fatal protocol
-// failure (an unparseable reply or an unexpected status).
+// reply, a denial, an unbound approval's *BindingMismatch, or a fatal failure
+// (an ssh failure, an unparseable reply, or an unexpected status).
 func (r *Router) relay(ctx context.Context, peer, endpoint string, attempt Attempt) (reply *Reply, next bool, err error) {
 	nonce, err := r.Nonce()
 	if err != nil {
@@ -135,7 +125,7 @@ func (r *Router) relay(ctx context.Context, peer, endpoint string, attempt Attem
 	out, err := r.Runner.Run(cctx, peer, cmd, stdin)
 	if err != nil {
 		if routesAround(err) {
-			return nil, true, &AuthRequired{Msg: fmt.Sprintf("consent unreachable at %s: %v", peer, err)}
+			return nil, true, &AuthRequired{Msg: fmt.Sprintf("consent relay to %s timed out: %v", peer, err)}
 		}
 		return nil, false, fmt.Errorf("consent relay to %s: %w", peer, err)
 	}
@@ -177,30 +167,20 @@ func (r *Router) Live(ctx context.Context, peer string) (bool, error) {
 	return snap.OnConsole && !snap.Locked && !snap.ScreenShared, nil
 }
 
-// routesAround reports whether a relay-leg failure is a genuine transport
-// failure the failover may route around: a timed-out leg, or an
-// *hostregistry.SSHError caused by ssh's own exit-255 connection failure.
-// Anything else is a protocol failure the caller propagates.
+// routesAround reports whether a relay-leg failure moves to the next candidate:
+// only a timed-out leg. An ssh failure, exit 255 included, is fatal, because a
+// 255 cannot tell a refused connection from a session dropped mid-prompt.
 func routesAround(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	var sshErr *hostregistry.SSHError
-	if !errors.As(err, &sshErr) {
-		return false
-	}
-	var exitErr *exec.ExitError
-	return errors.As(sshErr.Err, &exitErr) && exitErr.ExitCode() == sshConnFailureExit
+	return errors.Is(err, context.DeadlineExceeded)
 }
 
-// ProbeRoutesAround reports whether a liveness-probe failure routes to the
-// next candidate: a timed-out probe, or ANY *hostregistry.SSHError — a peer
-// that cannot answer liveness is not a live approver, whatever the exit code.
-// A probe reply that fails to parse stays fatal.
+// ProbeRoutesAround reports whether a liveness-probe failure skips to the next
+// candidate: a timeout, or an *hostregistry.SSHError whose ssh exited with a
+// status. Any other failure, such as an ssh that never ran, stays fatal.
 func ProbeRoutesAround(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
 	var sshErr *hostregistry.SSHError
-	return errors.As(err, &sshErr)
+	return errors.As(err, &sshErr) && sshErr.Exited()
 }

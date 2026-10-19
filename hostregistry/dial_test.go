@@ -3,6 +3,7 @@ package hostregistry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -454,6 +455,112 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 			t.Fatalf("SSHError.Stderr = %q, want the captured stderr populated on the ctx-kill path", sshErr.Stderr)
 		}
 	})
+}
+
+// TestSSHErrorExitedFromARealRunner proves Exited reads the cause a real daemonkit
+// runner produces: ssh's 255 and a remote exit both carry an exit, and an ssh binary
+// that cannot spawn does not.
+func TestSSHErrorExitedFromARealRunner(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "attempts.log")
+	fake := fakeSSH(t, logPath)
+	tests := []struct {
+		name   string
+		bin    string
+		addr   string
+		exited bool
+	}{
+		{"connection failure", fake, "me@connfail-lan", true},
+		{"remote exit", fake, "me@remotefail-lan", true},
+		{"never spawned", filepath.Join(t.TempDir(), "missing-ssh"), "me@peer", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			swapSSHBin(t, tt.bin)
+			_, err := execSSHAddrs(context.Background(), testOwned(t), []string{tt.addr}, "echo hi", nil)
+			var sshErr *SSHError
+			if !errors.As(err, &sshErr) {
+				t.Fatalf("error %v (%T) is not a *SSHError", err, err)
+			}
+			if got := sshErr.Exited(); got != tt.exited {
+				t.Errorf("Exited() = %v, want %v (err %v)", got, tt.exited, err)
+			}
+		})
+	}
+}
+
+// TestSSHErrorExitedShapes pins Exited over the cause shapes daemonkit's Run returns: a
+// status exit, alone or joined with truncation, reads true; a signal death or a run that
+// reported no exit reads false, even when ssh ran.
+func TestSSHErrorExitedShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"remote exit", &daemonkit.ExitError{Exit: daemonkit.Exit{Code: 3}}, true},
+		{"ssh 255 with truncated output", errors.Join(daemonkit.ErrTruncated, &daemonkit.ExitError{Exit: daemonkit.Exit{Code: 255}}), true},
+		{"local signal death", &daemonkit.ExitError{Exit: daemonkit.Exit{Code: -1, Signal: syscall.SIGKILL}}, false},
+		{"signal at the deadline", errors.Join(&daemonkit.ExitError{Exit: daemonkit.Exit{Code: -1, Signal: syscall.SIGKILL}}, context.DeadlineExceeded), false},
+		{"clean exit with truncated output", daemonkit.ErrTruncated, false},
+		{"output collection failure", fmt.Errorf("proc: collect run output: %w", syscall.EIO), false},
+		{"refused spawn", fmt.Errorf("posix_spawn_file_actions_adddup2 0: %w", syscall.EBADF), false},
+		{"budget spent before spawn", fmt.Errorf("daemonkit: Run was handed a context with no budget left: %w", context.DeadlineExceeded), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := (&SSHError{Addr: "me@peer", Err: tt.err}).Exited(); got != tt.want {
+				t.Fatalf("Exited() over %v = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExecSSHPastOpenMaxNeverRunsSSH reproduces a process whose descriptor table is full
+// past OPEN_MAX: posix_spawn_file_actions_adddup2 refuses every new descriptor with EBADF,
+// so ssh never runs and the SSHError must not read as a peer's exit.
+func TestExecSSHPastOpenMaxNeverRunsSSH(t *testing.T) {
+	const openMax = 10240
+	var limit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &limit); err != nil {
+		t.Fatalf("read RLIMIT_NOFILE: %v", err)
+	}
+	if limit.Cur < openMax+64 {
+		t.Skipf("RLIMIT_NOFILE %d cannot fill the table past OPEN_MAX", limit.Cur)
+	}
+	logPath := filepath.Join(t.TempDir(), "attempts.log")
+	swapSSHBin(t, fakeSSH(t, logPath))
+	owned := testOwned(t)
+
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	held := make([]int, 0, openMax)
+	t.Cleanup(func() {
+		for _, fd := range held {
+			_ = syscall.Close(fd)
+		}
+		_ = devNull.Close()
+	})
+	for len(held) == 0 || held[len(held)-1] < openMax {
+		fd, err := syscall.Dup(int(devNull.Fd())) //nolint:gosec // G115: a file descriptor always fits in an int.
+		if err != nil {
+			t.Fatalf("fill descriptor table: %v", err)
+		}
+		held = append(held, fd)
+	}
+
+	_, err = execSSHAddrs(context.Background(), owned, []string{"me@peer"}, "echo hi", nil)
+	if !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("execSSHAddrs past OPEN_MAX = %v, want the EBADF spawn refusal", err)
+	}
+	var sshErr *SSHError
+	if !errors.As(err, &sshErr) || sshErr.Exited() {
+		t.Fatalf("error %v must be an *SSHError that did not exit", err)
+	}
+	if _, statErr := os.Stat(logPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("fake ssh ran (attempts log stat: %v), want no process at all", statErr)
+	}
 }
 
 func TestDialAddrsDefaultsToTarget(t *testing.T) {
