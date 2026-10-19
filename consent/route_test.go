@@ -6,7 +6,6 @@ import (
 	"errors"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -218,72 +217,93 @@ func (r *probeErrMesh) Run(ctx context.Context, target, cmd string, stdin []byte
 	return r.approverMesh.Run(ctx, target, cmd, stdin)
 }
 
-// TestRouteFailsOverProbeErrorApprover proves a presence leg that fails with
-// an SSHError — even a non-255 remote exit, the shape an approver-side hard
-// RPC error produces — routes to the next candidate: a peer that cannot
-// answer liveness is not a live approver.
+// TestRouteFailsOverProbeErrorApprover proves a presence leg whose ssh exited
+// with a status — a remote exit, the shape an approver-side hard RPC error
+// produces, or ssh's own 255 — routes to the next candidate: a peer that
+// cannot answer liveness is not a live approver.
 func TestRouteFailsOverProbeErrorApprover(t *testing.T) {
 	broken := "broken@box"
 	healthy := "healthy@box"
 	nonce := "probe-err-nonce"
 	endpoint := "me@laptop:sha256:cafe"
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"remote exit", remoteExitFailure(broken)},
+		{"ssh 255", sshTransportFailure(broken)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &probeErrMesh{
+				approverMesh: &approverMesh{
+					presence: map[string]string{healthy: livePresence},
+					relay:    map[string]string{healthy: approvedReply(t, nonce, endpoint)},
+				},
+				target: broken,
+				err:    tt.err,
+			}
+			r := pinnedRouter(runner, nonce)
 
-	runner := &probeErrMesh{
-		approverMesh: &approverMesh{
-			presence: map[string]string{healthy: livePresence},
-			relay:    map[string]string{healthy: approvedReply(t, nonce, endpoint)},
-		},
-		target: broken,
-		err:    remoteExitFailure(broken),
-	}
-	r := pinnedRouter(runner, nonce)
-
-	reply, err := r.Route(context.Background(), []string{broken, healthy}, endpoint, testAttempt)
-	if err != nil {
-		t.Fatalf("Route across a probe-erroring approver: %v", err)
-	}
-	if reply.Peer != healthy {
-		t.Fatalf("Route bound %s, want %s", reply.Peer, healthy)
-	}
-	if probed := runner.probedTargets(); len(probed) != 2 || probed[0] != broken || probed[1] != healthy {
-		t.Fatalf("presence probes = %v, want [%s %s]", probed, broken, healthy)
-	}
-	if asked := runner.relayTargets(); len(asked) != 1 || asked[0] != healthy {
-		t.Fatalf("relay dials = %v, want only %s", asked, healthy)
+			reply, err := r.Route(context.Background(), []string{broken, healthy}, endpoint, testAttempt)
+			if err != nil {
+				t.Fatalf("Route across a probe-erroring approver: %v", err)
+			}
+			if reply.Peer != healthy {
+				t.Fatalf("Route bound %s, want %s", reply.Peer, healthy)
+			}
+			if probed := runner.probedTargets(); len(probed) != 2 || probed[0] != broken || probed[1] != healthy {
+				t.Fatalf("presence probes = %v, want [%s %s]", probed, broken, healthy)
+			}
+			if asked := runner.relayTargets(); len(asked) != 1 || asked[0] != healthy {
+				t.Fatalf("relay dials = %v, want only %s", asked, healthy)
+			}
+		})
 	}
 }
 
-// TestRouteProbeSpawnFailureIsFatal proves a probe whose ssh never ran stops
-// the walk with the local cause: the peer was never asked, so it is not
-// skipped as offline, and no later candidate is probed or dialed.
-func TestRouteProbeSpawnFailureIsFatal(t *testing.T) {
+// TestRouteProbeLocalFailureIsFatal proves a probe that failed on this host —
+// its ssh never spawned, or this host killed it before its deadline — stops
+// the walk with that cause: the peer is not skipped as offline, and no later
+// candidate is probed or dialed.
+func TestRouteProbeLocalFailureIsFatal(t *testing.T) {
 	stuck := "stuck@box"
 	healthy := "healthy@box"
-	nonce := "spawn-nonce"
+	nonce := "local-nonce"
 	endpoint := "me@laptop:sha256:cafe"
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"refused spawn", spawnFailure(stuck)},
+		{"local signal death", localSignalDeath(stuck)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &probeErrMesh{
+				approverMesh: &approverMesh{
+					presence: map[string]string{healthy: livePresence},
+					relay:    map[string]string{healthy: approvedReply(t, nonce, endpoint)},
+				},
+				target: stuck,
+				err:    tt.err,
+			}
+			r := pinnedRouter(runner, nonce)
 
-	runner := &probeErrMesh{
-		approverMesh: &approverMesh{
-			presence: map[string]string{healthy: livePresence},
-			relay:    map[string]string{healthy: approvedReply(t, nonce, endpoint)},
-		},
-		target: stuck,
-		err:    spawnFailure(stuck),
-	}
-	r := pinnedRouter(runner, nonce)
-
-	_, err := r.Route(context.Background(), []string{stuck, healthy}, endpoint, testAttempt)
-	if !errors.Is(err, syscall.EBADF) {
-		t.Fatalf("Route = %v, want the probe's spawn failure", err)
-	}
-	if v := Classify(err); v != VerdictFatal {
-		t.Fatalf("Classify(%v) = %s, want fatal", err, v)
-	}
-	if probed := runner.probedTargets(); len(probed) != 1 || probed[0] != stuck {
-		t.Fatalf("presence probes = %v, want only [%s]", probed, stuck)
-	}
-	if asked := runner.relayTargets(); len(asked) != 0 {
-		t.Fatalf("relay dials = %v, want none", asked)
+			_, err := r.Route(context.Background(), []string{stuck, healthy}, endpoint, testAttempt)
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("Route = %v, want the probe's local failure %v", err, tt.err)
+			}
+			if v := Classify(err); v != VerdictFatal {
+				t.Fatalf("Classify(%v) = %s, want fatal", err, v)
+			}
+			if probed := runner.probedTargets(); len(probed) != 1 || probed[0] != stuck {
+				t.Fatalf("presence probes = %v, want only [%s]", probed, stuck)
+			}
+			if asked := runner.relayTargets(); len(asked) != 0 {
+				t.Fatalf("relay dials = %v, want none", asked)
+			}
+		})
 	}
 }
 

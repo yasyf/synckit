@@ -109,8 +109,8 @@ func (r *Router) Route(ctx context.Context, candidates []string, endpoint string
 // for it. next reports whether Route should advance to another approver — the
 // relay leg timed out (routesAround), or the peer answered an
 // explicit unavailable; next false carries the terminal outcome: the bound
-// reply, a denial, an unbound approval's *BindingMismatch, or a fatal protocol
-// failure (an unparseable reply or an unexpected status).
+// reply, a denial, an unbound approval's *BindingMismatch, or a fatal failure
+// (an ssh failure, an unparseable reply, or an unexpected status).
 func (r *Router) relay(ctx context.Context, peer, endpoint string, attempt Attempt) (reply *Reply, next bool, err error) {
 	nonce, err := r.Nonce()
 	if err != nil {
@@ -125,7 +125,7 @@ func (r *Router) relay(ctx context.Context, peer, endpoint string, attempt Attem
 	out, err := r.Runner.Run(cctx, peer, cmd, stdin)
 	if err != nil {
 		if routesAround(err) {
-			return nil, true, &AuthRequired{Msg: fmt.Sprintf("consent unreachable at %s: %v", peer, err)}
+			return nil, true, &AuthRequired{Msg: fmt.Sprintf("consent relay to %s timed out: %v", peer, err)}
 		}
 		return nil, false, fmt.Errorf("consent relay to %s: %w", peer, err)
 	}
@@ -175,8 +175,8 @@ func routesAround(err error) bool {
 }
 
 // ProbeRoutesAround reports whether a liveness-probe failure skips to the next
-// candidate: a timeout, or an *hostregistry.SSHError carrying ssh's exit. Any
-// other failure, such as an ssh that never ran, stays fatal.
+// candidate: a timeout, or an *hostregistry.SSHError whose ssh exited with a
+// status. Any other failure, such as an ssh that never ran, stays fatal.
 func ProbeRoutesAround(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true

@@ -142,6 +142,12 @@ func remoteExitFailure(addr string) error {
 	return &hostregistry.SSHError{Addr: addr, Stderr: "remote command failed", Err: &daemonkit.ExitError{Exit: daemonkit.Exit{Code: 1}}}
 }
 
+// localSignalDeath fabricates ExecSSH's shape when this host killed ssh before
+// its deadline: a signal exit the peer never chose.
+func localSignalDeath(addr string) error {
+	return &hostregistry.SSHError{Addr: addr, Err: &daemonkit.ExitError{Exit: daemonkit.Exit{Code: -1, Signal: syscall.SIGKILL}}}
+}
+
 // spawnFailure fabricates ExecSSH's shape when ssh never ran: an SSHError
 // wrapping the local spawn refusal a full descriptor table produces.
 func spawnFailure(addr string) error {

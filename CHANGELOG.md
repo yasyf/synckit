@@ -8,33 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`hostregistry.SSHError.Exited` reports whether a failed ssh attempt carries
-  ssh's exit**: a remote non-zero exit, ssh's own 255, or a fatal signal. A
-  refused spawn reports false, and so does a run whose only reported failure
-  was stdin delivery or its output.
+- **`hostregistry.SSHError.Exited` reports whether ssh exited with a status**:
+  a remote non-zero exit or ssh's own 255. A local signal death, a refused
+  spawn, and a run whose only reported failure was stdin delivery or its output
+  all report false.
 
 ### Changed
 
-- **A relay leg that fails at ssh is fatal, as it has been since 0.37.0.** The
-  router's relay leg was documented to fail over on ssh's exit 255. It matched
-  an exit-255 `*exec.ExitError`, which `ExecSSH` stopped returning when
-  it moved to the daemonkit runner, so the failover never fired. The dead check
-  is gone, and only a timed-out relay leg moves to the next candidate. A 255
-  cannot tell a refused connection from a session dropped after the peer
-  prompted, so failing over could ask a second person after the first one's
-  answer was lost.
+- **A relay leg that fails at ssh stays fatal.** The router's relay leg was
+  documented to fail over on ssh's exit 255. It matched an exit-255
+  `*exec.ExitError`, which `ExecSSH` does not return over its daemonkit runner,
+  so the failover never fired. The dead check is gone, and only a timed-out
+  relay leg moves to the next candidate. A 255 cannot tell a refused connection
+  from a session dropped after the peer prompted, so failing over could ask a
+  second person after the first one's answer was lost.
 
 ### Fixed
 
-- **A consent probe whose ssh never ran now fails the request instead of
+- **A consent probe that failed on this host now fails the request instead of
   reading as an offline peer.** The router skipped any candidate whose liveness
   probe returned a `*hostregistry.SSHError`, including one where the local spawn
   was refused before ssh ran. A resident whose descriptor table had grown past
   `OPEN_MAX` (10240) got `EBADF` from `posix_spawn_file_actions_adddup2` on
   every spawn. Every routed consent then answered `unavailable`, and the cause
-  was lost. A probe now routes around only when it timed out or its failure carries
-  ssh's exit. Any other probe failure fails the request with its cause. A peer
-  that is offline, locked, screen-shared, or slow still routes around.
+  was lost. A probe now routes around only when it timed out or its ssh exited
+  with a status. A refused spawn, a local kill before the deadline, or a stdin
+  or output failure fails the request with its cause. A peer that is offline,
+  locked, screen-shared, or slow still routes around.
   `consent.ProbeRoutesAround` callers get the same split, and a test fake that
   wraps `*exec.ExitError` must wrap `*daemonkit.ExitError`, the type `ExecSSH`
   returns.

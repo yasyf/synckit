@@ -488,9 +488,9 @@ func TestSSHErrorExitedFromARealRunner(t *testing.T) {
 	}
 }
 
-// TestSSHErrorExitedShapes pins Exited over every cause shape daemonkit's Run returns:
-// an exit, alone or joined with truncation, reads true; a run that reported no exit reads
-// false, even when ssh ran.
+// TestSSHErrorExitedShapes pins Exited over the cause shapes daemonkit's Run returns: a
+// status exit, alone or joined with truncation, reads true; a signal death or a run that
+// reported no exit reads false, even when ssh ran.
 func TestSSHErrorExitedShapes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -499,7 +499,8 @@ func TestSSHErrorExitedShapes(t *testing.T) {
 	}{
 		{"remote exit", &daemonkit.ExitError{Exit: daemonkit.Exit{Code: 3}}, true},
 		{"ssh 255 with truncated output", errors.Join(daemonkit.ErrTruncated, &daemonkit.ExitError{Exit: daemonkit.Exit{Code: 255}}), true},
-		{"signal at the deadline", errors.Join(&daemonkit.ExitError{Exit: daemonkit.Exit{Code: -1, Signal: syscall.SIGKILL}}, context.DeadlineExceeded), true},
+		{"local signal death", &daemonkit.ExitError{Exit: daemonkit.Exit{Code: -1, Signal: syscall.SIGKILL}}, false},
+		{"signal at the deadline", errors.Join(&daemonkit.ExitError{Exit: daemonkit.Exit{Code: -1, Signal: syscall.SIGKILL}}, context.DeadlineExceeded), false},
 		{"clean exit with truncated output", daemonkit.ErrTruncated, false},
 		{"output collection failure", fmt.Errorf("proc: collect run output: %w", syscall.EIO), false},
 		{"refused spawn", fmt.Errorf("posix_spawn_file_actions_adddup2 0: %w", syscall.EBADF), false},

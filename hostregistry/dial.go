@@ -57,12 +57,11 @@ func (e *SSHError) Error() string {
 // Unwrap returns the underlying error so errors.Is / errors.As reach the ssh exit cause.
 func (e *SSHError) Unwrap() error { return e.Err }
 
-// Exited reports whether the failure carries ssh's exit (a remote non-zero exit, ssh's
-// own 255, or a fatal signal). False means no exit was observed: the spawn was refused,
-// or a stdin or output failure was all the run reported.
+// Exited reports whether ssh exited with a status: a remote non-zero exit or ssh's own
+// 255. A local signal death, a refused spawn, or a stdin or output failure reports false.
 func (e *SSHError) Exited() bool {
 	var exit *daemonkit.ExitError
-	return errors.As(e.Err, &exit)
+	return errors.As(e.Err, &exit) && exit.Exit.Signal == 0
 }
 
 // brewWrap wraps remoteCmd so a non-interactive ssh on macOS sources brew's shellenv
@@ -87,7 +86,7 @@ func brewWrap(remoteCmd string) string {
 // addresses, keepalives that drop a dead peer); a connected command's runtime belongs
 // to the caller's ctx deadline — only the caller knows how long its command should take.
 // Every failing attempt surfaces as a [*SSHError] naming the dial address, its captured
-// stderr, and the unwrappable typed exit cause.
+// stderr, and the unwrappable cause.
 func ExecSSH(ctx context.Context, runner Commander, target, remoteCmd string, stdin []byte) (string, error) {
 	addrs, err := DialAddrs(target)
 	if err != nil {
