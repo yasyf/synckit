@@ -6,38 +6,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-10-19
+
 ### Added
 
 - **`hostregistry.SSHError.Exited` reports whether ssh exited with a status**:
   a remote non-zero exit or ssh's own 255. A local signal death, a refused
-  spawn, and a run whose only reported failure was stdin delivery or its output
-  all report false.
+  spawn, and a run whose only reported failure was stdin delivery or its
+  output all report false.
 
 ### Changed
 
 - **A relay leg that fails at ssh stays fatal.** The router's relay leg was
   documented to fail over on ssh's exit 255. It matched an exit-255
-  `*exec.ExitError`, which `ExecSSH` does not return over its daemonkit runner,
-  so the failover never fired. The dead check is gone, and only a timed-out
-  relay leg moves to the next candidate. A 255 cannot tell a refused connection
-  from a session dropped after the peer prompted, so failing over could ask a
-  second person after the first one's answer was lost.
+  `*exec.ExitError`, which `ExecSSH` does not return over its daemonkit
+  runner, so the failover never fired. The dead check is gone, and only a
+  timed-out relay leg or an explicit `unavailable` reply moves to the next
+  candidate. A 255 cannot tell a refused connection from a session dropped
+  after the peer prompted, so failing over could ask a second person after the
+  first one's answer was lost.
 
 ### Fixed
 
 - **A consent probe that failed on this host now fails the request instead of
-  reading as an offline peer.** The router skipped any candidate whose liveness
-  probe returned a `*hostregistry.SSHError`, including one where the local spawn
-  was refused before ssh ran. A resident whose descriptor table had grown past
-  `OPEN_MAX` (10240) got `EBADF` from `posix_spawn_file_actions_adddup2` on
-  every spawn. Every routed consent then answered `unavailable`, and the cause
-  was lost. A probe now routes around only when it timed out or its ssh exited
-  with a status. A refused spawn, a local kill before the deadline, or a stdin
-  or output failure fails the request with its cause. A peer that is offline,
-  locked, screen-shared, or slow still routes around.
-  `consent.ProbeRoutesAround` callers get the same split, and a test fake that
-  wraps `*exec.ExitError` must wrap `*daemonkit.ExitError`, the type `ExecSSH`
-  returns.
+  reading as an offline peer.** The router skipped any candidate whose
+  liveness probe returned a `*hostregistry.SSHError`, including one where the
+  local spawn was refused before ssh ran. A resident whose descriptor table
+  had grown past `OPEN_MAX` (10240) got `EBADF` from
+  `posix_spawn_file_actions_adddup2` on every spawn. Every routed consent then
+  answered `unavailable`, and the cause was lost. A probe now routes around
+  only when it timed out or its ssh exited with a status. A refused spawn, a
+  signal death of ssh itself, or a stdin or output failure fails the request
+  with its cause. A local kill that a connected ssh turns into its own exit
+  255 still routes around. A peer that is offline, locked, screen-shared, or
+  slow still routes around. `consent.ProbeRoutesAround` callers get the same
+  split, and a test fake that wraps `*exec.ExitError` must wrap
+  `*daemonkit.ExitError`, the type `ExecSSH` returns.
 
 ## [0.42.0] - 2026-10-17
 
@@ -783,7 +787,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.42.0...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.43.0...HEAD
+[0.43.0]: https://github.com/yasyf/synckit/compare/v0.42.0...v0.43.0
 [0.42.0]: https://github.com/yasyf/synckit/compare/v0.41.2...v0.42.0
 [0.41.2]: https://github.com/yasyf/synckit/compare/v0.41.1...v0.41.2
 [0.41.1]: https://github.com/yasyf/synckit/compare/v0.41.0...v0.41.1
