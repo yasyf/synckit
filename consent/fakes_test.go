@@ -3,12 +3,14 @@ package consent
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"os/exec"
+	"fmt"
 	"os/user"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+
+	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/presence"
@@ -128,30 +130,22 @@ func (r *approverMesh) relayStdins() []string {
 	return stdins
 }
 
-var (
-	exit255Once sync.Once
-	exit255Err  error
-)
-
 // sshTransportFailure fabricates ExecSSH's connection-failure shape: an
-// *hostregistry.SSHError wrapping a real exit-255 *exec.ExitError.
+// *hostregistry.SSHError wrapping ssh's exit-255 *daemonkit.ExitError.
 func sshTransportFailure(addr string) error {
-	exit255Once.Do(func() {
-		exit255Err = exec.Command("/bin/sh", "-c", "exit 255").Run()
-	})
-	return &hostregistry.SSHError{Addr: addr, Stderr: "connect refused", Err: exit255Err}
+	return &hostregistry.SSHError{Addr: addr, Stderr: "connect refused", Err: &daemonkit.ExitError{Exit: daemonkit.Exit{Code: 255}}}
 }
 
 // remoteExitFailure fabricates a real remote command failure: an SSHError
-// wrapping an exit-1 *exec.ExitError, the shape a remote hard RPC error takes.
-func remoteExitFailure(t *testing.T, addr string) error {
-	t.Helper()
-	exit1 := exec.Command("/bin/sh", "-c", "exit 1").Run()
-	var exitErr *exec.ExitError
-	if !errors.As(exit1, &exitErr) {
-		t.Fatalf("fabricate exit-1: %v", exit1)
-	}
-	return &hostregistry.SSHError{Addr: addr, Stderr: "remote command failed", Err: exit1}
+// wrapping an exit-1 *daemonkit.ExitError, the shape a remote hard RPC error takes.
+func remoteExitFailure(addr string) error {
+	return &hostregistry.SSHError{Addr: addr, Stderr: "remote command failed", Err: &daemonkit.ExitError{Exit: daemonkit.Exit{Code: 1}}}
+}
+
+// spawnFailure fabricates ExecSSH's shape when ssh never ran: an SSHError
+// wrapping the local spawn refusal a full descriptor table produces.
+func spawnFailure(addr string) error {
+	return &hostregistry.SSHError{Addr: addr, Err: fmt.Errorf("posix_spawn_file_actions_adddup2 0: %w", syscall.EBADF)}
 }
 
 // pinnedRouter builds a Router over runner with a fixed nonce.

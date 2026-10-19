@@ -456,6 +456,89 @@ func TestExecSSHErrorTypedWithStderr(t *testing.T) {
 	})
 }
 
+// TestSSHErrorReportsWhetherSSHRan proves Exited and ConnFailure read the cause a real
+// daemonkit runner produces: ssh's 255 and a remote exit both ran, and an ssh binary
+// that cannot spawn never did.
+func TestSSHErrorReportsWhetherSSHRan(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "attempts.log")
+	fake := fakeSSH(t, logPath)
+	tests := []struct {
+		name        string
+		bin         string
+		addr        string
+		exited      bool
+		connFailure bool
+	}{
+		{"connection failure", fake, "me@connfail-lan", true, true},
+		{"remote exit", fake, "me@remotefail-lan", true, false},
+		{"never spawned", filepath.Join(t.TempDir(), "missing-ssh"), "me@peer", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			swapSSHBin(t, tt.bin)
+			_, err := execSSHAddrs(context.Background(), testOwned(t), []string{tt.addr}, "echo hi", nil)
+			var sshErr *SSHError
+			if !errors.As(err, &sshErr) {
+				t.Fatalf("error %v (%T) is not a *SSHError", err, err)
+			}
+			if got := sshErr.Exited(); got != tt.exited {
+				t.Errorf("Exited() = %v, want %v (err %v)", got, tt.exited, err)
+			}
+			if got := sshErr.ConnFailure(); got != tt.connFailure {
+				t.Errorf("ConnFailure() = %v, want %v (err %v)", got, tt.connFailure, err)
+			}
+		})
+	}
+}
+
+// TestExecSSHPastOpenMaxNeverRunsSSH reproduces a process whose descriptor table is full
+// past OPEN_MAX: posix_spawn_file_actions_adddup2 refuses every new descriptor with EBADF,
+// so ssh never runs and the SSHError must not read as a peer's exit.
+func TestExecSSHPastOpenMaxNeverRunsSSH(t *testing.T) {
+	const openMax = 10240
+	var limit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &limit); err != nil {
+		t.Fatalf("read RLIMIT_NOFILE: %v", err)
+	}
+	if limit.Cur < openMax+64 {
+		t.Skipf("RLIMIT_NOFILE %d cannot fill the table past OPEN_MAX", limit.Cur)
+	}
+	logPath := filepath.Join(t.TempDir(), "attempts.log")
+	swapSSHBin(t, fakeSSH(t, logPath))
+	owned := testOwned(t)
+
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	held := make([]int, 0, openMax)
+	t.Cleanup(func() {
+		for _, fd := range held {
+			_ = syscall.Close(fd)
+		}
+		_ = devNull.Close()
+	})
+	for len(held) == 0 || held[len(held)-1] < openMax {
+		fd, err := syscall.Dup(int(devNull.Fd())) //nolint:gosec // G115: a file descriptor always fits in an int.
+		if err != nil {
+			t.Fatalf("fill descriptor table: %v", err)
+		}
+		held = append(held, fd)
+	}
+
+	_, err = execSSHAddrs(context.Background(), owned, []string{"me@peer"}, "echo hi", nil)
+	if !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("execSSHAddrs past OPEN_MAX = %v, want the EBADF spawn refusal", err)
+	}
+	var sshErr *SSHError
+	if !errors.As(err, &sshErr) || sshErr.Exited() {
+		t.Fatalf("error %v must be an *SSHError that did not exit", err)
+	}
+	if _, statErr := os.Stat(logPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("fake ssh ran (attempts log stat: %v), want no process at all", statErr)
+	}
+}
+
 func TestDialAddrsDefaultsToTarget(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	initializeTestState(t, Mesh)

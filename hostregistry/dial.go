@@ -57,6 +57,17 @@ func (e *SSHError) Error() string {
 // Unwrap returns the underlying error so errors.Is / errors.As reach the ssh exit cause.
 func (e *SSHError) Unwrap() error { return e.Err }
 
+// Exited reports whether ssh ran and exited unsuccessfully (a remote non-zero exit, ssh's
+// own 255, or a fatal signal); false means the attempt failed before ssh executed.
+func (e *SSHError) Exited() bool {
+	var exit *daemonkit.ExitError
+	return errors.As(e.Err, &exit)
+}
+
+// ConnFailure reports whether ssh exited with its own connection failure (exit 255),
+// the one exit that means the remote command never ran.
+func (e *SSHError) ConnFailure() bool { return isConnFailure(e.Err) }
+
 // brewWrap wraps remoteCmd so a non-interactive ssh on macOS sources brew's shellenv
 // and finds a brew-installed tool on PATH.
 func brewWrap(remoteCmd string) string {
