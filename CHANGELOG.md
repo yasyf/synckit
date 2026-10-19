@@ -6,6 +6,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`hostregistry.SSHError.Exited` and `SSHError.ConnFailure`** report whether
+  ssh ran and exited unsuccessfully, and whether that exit was ssh's own
+  connection failure (255). An attempt that failed before ssh ran, such as
+  a refused spawn, reports neither.
+
+### Fixed
+
+- **A consent probe whose ssh never ran now fails the request instead of
+  reading as an offline peer.** The router skipped any candidate whose liveness
+  probe returned a `*hostregistry.SSHError`, including one where the local spawn
+  was refused before ssh ran. A resident whose descriptor table had grown past
+  `OPEN_MAX` (10240) got `EBADF` from `posix_spawn_file_actions_adddup2` on
+  every spawn, so every routed consent answered `unavailable` and the cause was
+  lost. A probe now routes around only when its ssh exited or timed out. A probe
+  whose ssh never ran fails the request with its cause. A peer that is offline,
+  locked, screen-shared, or slow still routes around. `consent.ProbeRoutesAround`
+  callers get the same split, and a test fake that wraps `*exec.ExitError` must
+  wrap `*daemonkit.ExitError`, the type `ExecSSH` returns.
+- **A relay leg that fails at ssh's transport fails over again.** The relay
+  failover matched an exit-255 `*exec.ExitError`, which `ExecSSH` stopped
+  returning when it moved to the daemonkit runner, so a relay leg's connection
+  failure ended the walk as fatal. It now reads `*daemonkit.ExitError`. A relay
+  leg's real remote exit is still fatal.
+
 ## [0.42.0] - 2026-10-17
 
 ### Added
@@ -750,7 +776,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.41.1...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.42.0...HEAD
+[0.42.0]: https://github.com/yasyf/synckit/compare/v0.41.2...v0.42.0
+[0.41.2]: https://github.com/yasyf/synckit/compare/v0.41.1...v0.41.2
 [0.41.1]: https://github.com/yasyf/synckit/compare/v0.41.0...v0.41.1
 [0.41.0]: https://github.com/yasyf/synckit/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/yasyf/synckit/compare/v0.39.2...v0.40.0
