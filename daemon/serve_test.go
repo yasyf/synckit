@@ -27,7 +27,7 @@ func TestServeAdmitsBusinessAfterActivation(t *testing.T) {
 	shortDaemonHome(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
-	go func() { served <- serve(ctx) }()
+	go func() { served <- serve(ctx, "test") }()
 
 	client, err := daemonClient()
 	if err != nil {
@@ -492,7 +492,7 @@ func startStubServe(t *testing.T, fakes map[string]*fakeConsumer) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
-	go func() { served <- serve(ctx) }()
+	go func() { served <- serve(ctx, "test") }()
 	t.Cleanup(func() {
 		cancel()
 		select {

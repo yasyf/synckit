@@ -50,13 +50,13 @@ type runtimeProduct struct {
 	dispatcher *rpc.Dispatcher
 }
 
-func newServeCmd() *cobra.Command {
+func newServeCmd(build string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
 		Short: "Run the resident daemon: own the host mesh, serve the RPC socket, and supervise the watch engines.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return serve(cmd.Context())
+			return serve(cmd.Context(), build)
 		},
 	}
 }
@@ -65,7 +65,7 @@ func newServeCmd() *cobra.Command {
 // flock, the owner record, and the drain ladder; start builds the dispatcher
 // and the watch supervisor, and returning the product IS readiness. It blocks
 // until ctx is canceled, a drain signal arrives, or the drain verb lands.
-func serve(ctx context.Context) error {
+func serve(ctx context.Context, build string) error {
 	spec, err := stableServeSpec()
 	if err != nil {
 		return err
@@ -75,7 +75,7 @@ func serve(ctx context.Context) error {
 		return err
 	}
 	_, err = daemonkit.Serve(ctx, spec, func(c daemonkit.Ctx) (daemonkit.Product, error) {
-		return startServe(c, dir)
+		return startServe(c, dir, build)
 	})
 	return err
 }
@@ -85,7 +85,7 @@ func serve(ctx context.Context) error {
 // activation's own lifetime, cancelled when the drain begins.
 //
 //nolint:contextcheck // c.Context is the lifetime Serve mints for the product; the caller's own ctx is deliberately not it.
-func startServe(c daemonkit.Ctx, dir string) (daemonkit.Product, error) {
+func startServe(c daemonkit.Ctx, dir, build string) (daemonkit.Product, error) {
 	manualPath, err := netpolicy.ManualPath()
 	if err != nil {
 		return nil, err
@@ -96,7 +96,7 @@ func startServe(c daemonkit.Ctx, dir string) (daemonkit.Product, error) {
 	}
 	sup := newSupervisor(c, newDeliveryStore(dir), monitor)
 	d := rpc.NewDispatcher()
-	d.Register("status", handleStatus)
+	d.Register("status", statusHandler(build))
 	registerDelivery(d, sup)
 	// reconcile and reload mutate the engine generation, so they serialize behind
 	// the exclusive mutex — a reload never tears down the clients a reconcile pass

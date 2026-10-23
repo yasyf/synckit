@@ -45,12 +45,12 @@ func newRoot(build string) *cobra.Command {
 		},
 	}
 	root.AddCommand(
-		newServeCmd(),
+		newServeCmd(build),
 		newReconcileCmd(),
 		newHostCmd(),
 		newRegisterCmd(),
 		newUnregisterCmd(),
-		newStatusCmd(),
+		newStatusCmd(build),
 		newInstallCmd(),
 		newUninstallCmd(),
 		newConsentCmd(),

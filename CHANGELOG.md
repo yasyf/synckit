@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`synckitd status` names the daemon's build.** The `status` RPC reply
+  carries a `version` field, and `synckitd status` prints
+  `daemon: running <version>`. When that build differs from the `synckitd`
+  running the command, the line reads
+  `daemon: running <old>, but the installed synckitd is <new>`, and a daemon
+  too old to report a version shows up as `an unversioned build`.
+
 ## [0.44.0] - 2026-10-23
 
 ### Fixed
