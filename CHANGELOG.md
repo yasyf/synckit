@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An upgraded synckitd restages its own agents.** launchd runs staged copies
+  of synckitd, and `brew upgrade` replaced only the copy on `PATH`, so the old
+  daemon kept serving until someone ran `synckitd install` by hand. The
+  reconcile tick now compares its own bytes with the `synckitd` on `PATH`. When
+  they differ, it starts that binary's `install` in a session of its own and
+  exits, which restages and restarts the serve daemon and every agent within
+  15 minutes of an upgrade. Builds before this one still need one manual
+  `synckitd install` to pick it up.
+
 ## [0.43.0] - 2026-10-19
 
 ### Added
