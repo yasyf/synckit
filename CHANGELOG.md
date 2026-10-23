@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-10-23
+
 ### Added
 
 - **`synckitd status` names the daemon's build.** The `status` RPC reply
@@ -809,7 +811,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.44.0...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.45.0...HEAD
+[0.45.0]: https://github.com/yasyf/synckit/compare/v0.44.0...v0.45.0
 [0.44.0]: https://github.com/yasyf/synckit/compare/v0.43.0...v0.44.0
 [0.43.0]: https://github.com/yasyf/synckit/compare/v0.42.0...v0.43.0
 [0.42.0]: https://github.com/yasyf/synckit/compare/v0.41.2...v0.42.0
