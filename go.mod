@@ -15,7 +15,7 @@ require (
 	github.com/gofrs/flock v0.13.0
 	github.com/klauspost/compress v1.20.1
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/daemonkit v0.23.0
+	github.com/yasyf/daemonkit v0.32.3
 	golang.org/x/sys v0.47.0
 )
 
@@ -47,7 +47,6 @@ require (
 	github.com/vishvananda/netlink v1.2.1-beta.2 // indirect
 	github.com/vishvananda/netns v0.0.0-20200728191858-db3c7e526aae // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	go.etcd.io/bbolt v1.5.0 // indirect
 	golang.org/x/mod v0.27.0 // indirect
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect

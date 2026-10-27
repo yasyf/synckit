@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A long-running serve daemon keeps spawning as the user's process count
+  grows.** synckitd now builds against daemonkit 0.32.3. daemonkit 0.23.0
+  lowered `RLIMIT_NPROC` for each spawn and then failed to restore it, because
+  macOS had already clamped the hard limit launchd hands agents from 16000 to
+  10666. The soft limit stayed at the first spawn's process count plus 400, so
+  once the user's processes passed it, every spawn from `synckitd serve`
+  failed with `EAGAIN` until the daemon restarted. The first `synckitd install`
+  after upgrading re-applies the serve daemon's plist once, because daemonkit
+  now writes `PATH` into it.
+
 ## [0.45.0] - 2026-10-23
 
 ### Added
