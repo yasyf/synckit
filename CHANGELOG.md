@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.47.1] - 2026-10-28
+
 ### Fixed
 
 - The reconcile tick re-runs `synckitd install` when a consumer helper's
