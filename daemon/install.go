@@ -53,7 +53,7 @@ var (
 func newInstallCmd(build string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "install",
-		Short: "Install the synckitd LaunchAgents (reconcile tick, serve daemon, consumer helpers).",
+		Short: "Install the synckitd LaunchAgents (reconcile tick, serve daemon).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := install(cmd.Context(), build); err != nil {
@@ -85,8 +85,8 @@ func newUninstallCmd() *cobra.Command {
 // record lands before any agent is applied so a partial install still sweeps on
 // the next run. Ensure owns the serve label outright — its plist, its stable
 // executable, and its live process — and runs before the Apply loop, which
-// applies only the agents serviceAgents built, whose programs it already staged
-// under <mesh>/bin.
+// applies only the reconcile agent. Each consumer's helper is that consumer's
+// own Ensure; the record names its label so the sweep and uninstall remove it.
 func install(ctx context.Context, build string) error {
 	if err := hostregistry.Mesh.InitializeState(ctx); err != nil {
 		return fmt.Errorf("initialize host mesh state: %w", err)
@@ -95,19 +95,19 @@ func install(ctx context.Context, build string) error {
 	if err != nil {
 		return err
 	}
-	agents, err := serviceAgents(manifests)
+	reconcile, err := reconcileAgent()
 	if err != nil {
 		return err
 	}
-	plan, err := launchd.NewPlan(agents)
+	plan, err := launchd.NewPlan([]launchd.Agent{reconcile})
 	if err != nil {
 		return fmt.Errorf("build synckitd agent plan: %w", err)
 	}
-	planned := plan.Agents()
-	labels := make([]string, 0, len(planned))
-	for _, agent := range planned {
-		labels = append(labels, agent.Label)
+	labels, err := plannedLabels(manifests)
+	if err != nil {
+		return err
 	}
+	slices.Sort(labels)
 	recorded, err := readInstalledAgents()
 	if err != nil {
 		return err
@@ -122,7 +122,7 @@ func install(ctx context.Context, build string) error {
 	if err := ensureServeAgent(ctx, build); err != nil {
 		return err
 	}
-	for _, agent := range planned {
+	for _, agent := range plan.Agents() {
 		if err := retireDriftedAgent(ctx, agent); err != nil {
 			return err
 		}
@@ -182,10 +182,6 @@ func uninstall(ctx context.Context) error {
 	for _, label := range labels {
 		if err := removeAgent(ctx, label); err != nil {
 			errs = append(errs, fmt.Errorf("remove agent %q: %w", label, err))
-			continue
-		}
-		if err := removeStagedProgram(label); err != nil {
-			errs = append(errs, err)
 		}
 	}
 	if err := removeAgent(ctx, serveAgentLabel); err != nil {
@@ -242,10 +238,6 @@ func sweepStrayAgents(ctx context.Context, recorded, keep, retained []string) er
 		}
 		if err := removeAgent(ctx, label); err != nil {
 			errs = append(errs, fmt.Errorf("remove stray agent %q: %w", label, err))
-			continue
-		}
-		if err := removeStagedProgram(label); err != nil {
-			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)

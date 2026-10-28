@@ -1,18 +1,14 @@
 package daemon
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
 
-	"github.com/yasyf/daemonkit/durable"
 	"github.com/yasyf/daemonkit/launchd"
 
-	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/internal/serviceidentity"
 	"github.com/yasyf/synckit/manifest"
 )
@@ -32,65 +28,26 @@ const (
 
 	reconcileInterval = 15 * time.Minute
 	daemonPATH        = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
-
-	// stagedProgramDirName holds the binaries synckit registers with launchd on
-	// its own account, under the mesh directory rather than daemonkit's
-	// ~/.daemonkit/bin, whose leaves are daemonkit labels.
-	stagedProgramDirName = "bin"
 )
 
-// serviceAgents builds the exact launchd policy synckit owns outright: the
-// reconcile tick and one helper per manifest that declares one. The serve
-// daemon is deliberately absent — daemonkit's Client.Ensure owns that label's
-// plist, its stable executable, and its live process.
-func serviceAgents(manifests []manifest.Manifest) ([]launchd.Agent, error) {
-	program, err := daemonProgram()
+func reconcileAgent() (launchd.Agent, error) {
+	program, err := executableAlias(daemonBinary)
 	if err != nil {
-		return nil, err
+		return launchd.Agent{}, err
 	}
 	reconcile, err := newAgent(reconcileAgentLabel, []string{"reconcile"}, program)
 	if err != nil {
-		return nil, err
+		return launchd.Agent{}, err
 	}
 	reconcile.RestartPolicy = launchd.NoRestart
 	reconcile.StartInterval = reconcileInterval
 	reconcile.ProcessType = launchd.ProcessTypeBackground
-
-	agents := []launchd.Agent{reconcile}
-	for _, m := range manifests {
-		if m.Helper == nil {
-			continue
-		}
-		helper, err := helperAgent(m)
-		if err != nil {
-			return nil, err
-		}
-		agents = append(agents, helper)
-	}
-	return agents, nil
+	return reconcile, nil
 }
 
-func helperAgent(m manifest.Manifest) (launchd.Agent, error) {
-	helperLabel, err := serviceidentity.HelperLabel(m.Name)
-	if err != nil {
-		return launchd.Agent{}, fmt.Errorf("manifest %q helper identity: %w", m.Name, err)
-	}
-	program, err := executableAlias(m.Binary)
-	if err != nil {
-		return launchd.Agent{}, fmt.Errorf("resolve helper binary %q: %w", m.Binary, err)
-	}
-	helper, err := newAgent(helperLabel, []string{m.Helper.Command}, program)
-	if err != nil {
-		return launchd.Agent{}, err
-	}
-	helper.RestartPolicy = launchd.RestartAlways
-	return helper, nil
-}
-
-// plannedLabels is the label set serviceAgents would build, derived from the
-// manifests alone. Uninstall reads it without resolving or staging a single
-// program, so a helper binary that has since been uninstalled still gets its
-// agent removed.
+// plannedLabels is every label synckit sweeps: the reconcile tick and the
+// helper each manifest declares, derived from the manifests alone, so a helper
+// binary that has since been uninstalled still gets its agent removed.
 func plannedLabels(manifests []manifest.Manifest) ([]string, error) {
 	labels := []string{reconcileAgentLabel}
 	for _, m := range manifests {
@@ -128,26 +85,6 @@ func agentLogPath(label string) (string, error) {
 	return filepath.Join(home, "Library", "Logs", "synckit", label+".log"), nil
 }
 
-// daemonProgram stages this executable at the path the reconcile agent
-// registers. daemonkit.Stable stages the serve daemon's own copy under its
-// label and nothing else, so the tick — a job daemonkit does not own — gets a
-// synckit-owned copy that outlives the versioned original an upgrade deletes.
-func daemonProgram() (string, error) {
-	self, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("resolve current executable: %w", err)
-	}
-	source, err := filepath.EvalSymlinks(self)
-	if err != nil {
-		return "", fmt.Errorf("resolve current executable %q: %w", self, err)
-	}
-	program, err := stageProgram(reconcileAgentLabel, source)
-	if err != nil {
-		return "", fmt.Errorf("stage %s program: %w", daemonBinary, err)
-	}
-	return program, nil
-}
-
 func executableAlias(binary string) (string, error) {
 	alias, err := exec.LookPath(binary)
 	if err != nil {
@@ -158,87 +95,4 @@ func executableAlias(binary string) (string, error) {
 		return "", fmt.Errorf("resolve absolute executable alias %q: %w", binary, err)
 	}
 	return filepath.Clean(alias), nil
-}
-
-// stageProgram publishes source's bytes at <mesh>/bin/<label> and returns the
-// exact path launchd registers. daemonkit.Stable copies the invoking executable
-// and nothing else, so the reconcile tick's staging stays synckit's policy:
-// identical bytes and modification time are a no-op, leaving the inode launchd
-// already execs alone. The copy keeps the source's modification time, so a dev
-// build version.Running keys by mtime reports the same build from either path.
-var stageProgram = func(label, source string) (string, error) {
-	data, err := os.ReadFile(source) //nolint:gosec // exact resolved program source
-	if err != nil {
-		return "", fmt.Errorf("read program source %q: %w", source, err)
-	}
-	info, err := os.Stat(source)
-	if err != nil {
-		return "", fmt.Errorf("inspect program source %q: %w", source, err)
-	}
-	dir, err := stagedProgramDir()
-	if err != nil {
-		return "", err
-	}
-	target := filepath.Join(dir, label)
-	staged, err := stagedProgramCurrent(target, data, info.ModTime())
-	if err != nil {
-		return "", err
-	}
-	if !staged {
-		if err := durable.WriteFile(target, data, 0o700); err != nil {
-			return "", fmt.Errorf("stage program at %q: %w", target, err)
-		}
-		if err := os.Chtimes(target, info.ModTime(), info.ModTime()); err != nil {
-			return "", fmt.Errorf("carry %q's modification time to %q: %w", source, target, err)
-		}
-	}
-	return target, nil
-}
-
-// removeStagedProgram deletes the copy stageProgram published for label. A
-// staged program is named for its label exactly and every label that reaches
-// here is synckit's own by prefix, so the path can name nothing else; a label
-// that was never staged — a helper, or the daemonkit-owned serve job —
-// has nothing to delete.
-func removeStagedProgram(label string) error {
-	mesh, err := hostregistry.Mesh.Dir()
-	if err != nil {
-		return err
-	}
-	target := filepath.Join(mesh, stagedProgramDirName, label)
-	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove staged program %q: %w", target, err)
-	}
-	return nil
-}
-
-func stagedProgramDir() (string, error) {
-	mesh, err := hostregistry.Mesh.Dir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(mesh, stagedProgramDirName)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create staging dir %s: %w", dir, err)
-	}
-	return dir, nil
-}
-
-func stagedProgramCurrent(target string, data []byte, mtime time.Time) (bool, error) {
-	info, err := os.Lstat(target)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("inspect staged program %q: %w", target, err)
-	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || info.Size() != int64(len(data)) ||
-		!info.ModTime().Equal(mtime) {
-		return false, nil
-	}
-	staged, err := os.ReadFile(target) //nolint:gosec // exact synckit-owned staged program path
-	if err != nil {
-		return false, fmt.Errorf("read staged program %q: %w", target, err)
-	}
-	return bytes.Equal(staged, data), nil
 }

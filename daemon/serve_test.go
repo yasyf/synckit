@@ -423,9 +423,10 @@ func TestReconcileCommandGivesAPeerRegisteredSinceStartALane(t *testing.T) {
 		t.Fatalf("register peer: %v", err)
 	}
 
-	restageInstalled = func(context.Context, string) (bool, error) { return false, nil }
+	ensure := ensureServeAgent
+	ensureServeAgent = func(context.Context, string) error { return nil }
 	replaceHelpers = func(context.Context) error { return nil }
-	t.Cleanup(func() { restageInstalled, replaceHelpers = restageUpgrade, replaceOutdatedHelpers })
+	t.Cleanup(func() { ensureServeAgent, replaceHelpers = ensure, replaceOutdatedHelpers })
 
 	cmd := newReconcileCmd()
 	cmd.SetArgs(nil)
