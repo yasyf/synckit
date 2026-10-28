@@ -6,16 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A consumer helper's LaunchAgent now names the binary's `PATH` alias, such as
+  `/opt/homebrew/bin/cookiesync`, instead of the file that alias links to. A
+  Homebrew upgrade deletes the versioned Caskroom bundle
+  (`/opt/homebrew/Caskroom/cookiesync/<ver>/CookieSync.app/...`) but keeps the
+  alias, so launchd can always relaunch the helper. synckit no longer stages a
+  copy of an unbundled helper under the mesh's `bin` directory. Builds against
+  daemonkit 0.35.4, which accepts a symlinked program.
+
 ### Fixed
 
 - The reconcile tick re-runs `synckitd install` when a consumer helper's
   LaunchAgent plist no longer matches the one install would render, then
-  reconciles as usual. A Homebrew upgrade of a bundled helper such as
-  CookieSync.app deletes the versioned Caskroom bundle its plist names; within
-  one 15-minute tick the plist names the new bundle and launchd reloads the
-  helper, so the consumer's cask no longer has to rerun its own install. A
-  helper whose binary is gone from `PATH`, or whose plist was never installed,
-  is left alone.
+  reconciles as usual. After an upgrade the alias names new bytes, so the
+  plist's program digest changes, and within one 15-minute tick launchd
+  reloads the helper onto the new build. The consumer's cask no longer has to
+  rerun its own install. A helper whose binary is gone from `PATH`, or whose
+  plist was never installed, is left alone.
 
 ## [0.47.0] - 2026-10-27
 
