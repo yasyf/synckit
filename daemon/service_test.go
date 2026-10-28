@@ -270,7 +270,7 @@ func TestServiceAgentsUseStagedProgramsAndTypedPolicy(t *testing.T) {
 func TestInstalledAgentPlistsNameTheirSubcommand(t *testing.T) {
 	home := useHome(t)
 	useMesh(t)
-	usePathBinaries(t, "cookiesync")
+	bin := usePathBinaries(t, "cookiesync")
 	staging := useFlatStaging(t)
 
 	spec, err := stableServeSpec("test")
@@ -300,7 +300,7 @@ func TestInstalledAgentPlistsNameTheirSubcommand(t *testing.T) {
 		{
 			name:  "helper",
 			plist: agentPlist(t, findAgent(t, agents, helperLabel)),
-			want:  []string{filepath.Join(staging, helperLabel), "helper-serve"},
+			want:  []string{filepath.Join(bin, "cookiesync"), "helper-serve"},
 		},
 	}
 	for _, tt := range tests {
