@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-10-28
+
 ### Changed
 
 - The reconcile tick replaces a resident helper that serves a build other
@@ -882,7 +884,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.48.0...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.49.0...HEAD
+[0.49.0]: https://github.com/yasyf/synckit/compare/v0.48.0...v0.49.0
 [0.48.0]: https://github.com/yasyf/synckit/compare/v0.47.0...v0.48.0
 [0.47.0]: https://github.com/yasyf/synckit/compare/v0.46.0...v0.47.0
 [0.45.0]: https://github.com/yasyf/synckit/compare/v0.44.0...v0.45.0
