@@ -2,11 +2,8 @@ package daemon
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,22 +61,30 @@ func serviceAgents(manifests []manifest.Manifest) ([]launchd.Agent, error) {
 		if m.Helper == nil {
 			continue
 		}
-		helperLabel, err := serviceidentity.HelperLabel(m.Name)
-		if err != nil {
-			return nil, fmt.Errorf("manifest %q helper identity: %w", m.Name, err)
-		}
-		program, err := executableAlias(m.Binary)
-		if err != nil {
-			return nil, fmt.Errorf("resolve helper binary %q: %w", m.Binary, err)
-		}
-		helper, err := newAgent(helperLabel, []string{m.Helper.Command}, program)
+		helper, err := helperAgent(m)
 		if err != nil {
 			return nil, err
 		}
-		helper.RestartPolicy = launchd.RestartAlways
 		agents = append(agents, helper)
 	}
 	return agents, nil
+}
+
+func helperAgent(m manifest.Manifest) (launchd.Agent, error) {
+	helperLabel, err := serviceidentity.HelperLabel(m.Name)
+	if err != nil {
+		return launchd.Agent{}, fmt.Errorf("manifest %q helper identity: %w", m.Name, err)
+	}
+	program, err := executableAlias(m.Binary)
+	if err != nil {
+		return launchd.Agent{}, fmt.Errorf("resolve helper binary %q: %w", m.Binary, err)
+	}
+	helper, err := newAgent(helperLabel, []string{m.Helper.Command}, program)
+	if err != nil {
+		return launchd.Agent{}, err
+	}
+	helper.RestartPolicy = launchd.RestartAlways
+	return helper, nil
 }
 
 // plannedLabels is the label set serviceAgents would build, derived from the
@@ -113,19 +118,6 @@ func newAgent(label string, args []string, program string) (launchd.Agent, error
 		LogPath: log,
 		Env:     map[string]string{"PATH": daemonPATH},
 	}, nil
-}
-
-func programDigest(program string) (string, error) {
-	file, err := os.Open(program) //nolint:gosec // exact program launchd registers
-	if err != nil {
-		return "", fmt.Errorf("open program %q: %w", program, err)
-	}
-	defer func() { _ = file.Close() }()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", fmt.Errorf("digest program %q: %w", program, err)
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func agentLogPath(label string) (string, error) {
@@ -171,24 +163,33 @@ func executableAlias(binary string) (string, error) {
 // stageProgram publishes source's bytes at <mesh>/bin/<label> and returns the
 // exact path launchd registers. daemonkit.Stable copies the invoking executable
 // and nothing else, so the reconcile tick's staging stays synckit's policy:
-// identical bytes are a no-op, leaving the inode launchd already execs alone.
+// identical bytes and modification time are a no-op, leaving the inode launchd
+// already execs alone. The copy keeps the source's modification time, so a dev
+// build version.Running keys by mtime reports the same build from either path.
 var stageProgram = func(label, source string) (string, error) {
 	data, err := os.ReadFile(source) //nolint:gosec // exact resolved program source
 	if err != nil {
 		return "", fmt.Errorf("read program source %q: %w", source, err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return "", fmt.Errorf("inspect program source %q: %w", source, err)
 	}
 	dir, err := stagedProgramDir()
 	if err != nil {
 		return "", err
 	}
 	target := filepath.Join(dir, label)
-	staged, err := stagedProgramCurrent(target, data)
+	staged, err := stagedProgramCurrent(target, data, info.ModTime())
 	if err != nil {
 		return "", err
 	}
 	if !staged {
 		if err := durable.WriteFile(target, data, 0o700); err != nil {
 			return "", fmt.Errorf("stage program at %q: %w", target, err)
+		}
+		if err := os.Chtimes(target, info.ModTime(), info.ModTime()); err != nil {
+			return "", fmt.Errorf("carry %q's modification time to %q: %w", source, target, err)
 		}
 	}
 	return target, nil
@@ -223,7 +224,7 @@ func stagedProgramDir() (string, error) {
 	return dir, nil
 }
 
-func stagedProgramCurrent(target string, data []byte) (bool, error) {
+func stagedProgramCurrent(target string, data []byte, mtime time.Time) (bool, error) {
 	info, err := os.Lstat(target)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -231,7 +232,8 @@ func stagedProgramCurrent(target string, data []byte) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("inspect staged program %q: %w", target, err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || info.Size() != int64(len(data)) {
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || info.Size() != int64(len(data)) ||
+		!info.ModTime().Equal(mtime) {
 		return false, nil
 	}
 	staged, err := os.ReadFile(target) //nolint:gosec // exact synckit-owned staged program path

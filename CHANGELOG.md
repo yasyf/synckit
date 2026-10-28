@@ -6,17 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The reconcile tick replaces a resident helper that serves a build other
+  than its installed binary's. It reads the helper's `Health.Build` and runs
+  the binary's `--version`, and both report the same `version.Running` string.
+  On a mismatch it drains the helper, and launchd relaunches it from the `PATH`
+  alias its plist names. After a `brew upgrade`, the helper runs the new build
+  within one 15-minute tick.
+- The reconcile tick decides synckitd itself was upgraded by comparing its own
+  version with the installed synckitd's `--version`, instead of hashing both
+  binaries. The staged copy keeps the source's modification time, so a dev
+  build reports the same version from either path.
+
 ### Removed
 
-- Agent plists no longer carry `SYNCKIT_PROGRAM_SHA256`. A hash of the
-  program's bytes is no longer part of a job's identity: a helper's build is its
-  version, and daemonkit identifies it the same way it does every other daemon.
-  An upgrade that leaves a helper's `PATH` alias in place leaves its plist
-  unchanged.
-- The reconcile tick no longer compares each helper's published plist with the
-  one install would render (0.48.0's drift reinstall). Once the plist names the
-  stable alias and carries no digest, an upgrade never changes it, so there is
-  no drift to detect.
+- Agent plists no longer carry `SYNCKIT_PROGRAM_SHA256`. A build's identity is
+  its version string, never a hash of the file. A helper plist that differs
+  from what install would render, such as one naming an old path, still makes
+  the tick re-run `synckitd install`.
 
 ## [0.48.0] - 2026-10-28
 

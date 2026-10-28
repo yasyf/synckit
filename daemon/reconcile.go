@@ -19,13 +19,16 @@ func newReconcileCmd() *cobra.Command {
 		Short: "Run one convergent reconcile pass for every registered consumer.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			restaged, err := restageInstalled()
+			restaged, err := restageInstalled(cmd.Context(), cmd.Root().Version)
 			if err != nil {
 				return err
 			}
 			if restaged {
 				cmd.Println("restaging the upgraded synckitd")
 				return nil
+			}
+			if err := replaceHelpers(cmd.Context()); err != nil {
+				cmd.Printf("helpers: error: %v\n", err)
 			}
 			results, err := reconcileResident(cmd.Context())
 			if err != nil {
