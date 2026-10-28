@@ -15,7 +15,7 @@ require (
 	github.com/gofrs/flock v0.13.0
 	github.com/klauspost/compress v1.20.1
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/daemonkit v0.34.1-0.20261028042048-421113ae9455
+	github.com/yasyf/daemonkit v0.35.0
 	golang.org/x/sys v0.47.0
 )
 

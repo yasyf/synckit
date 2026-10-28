@@ -910,7 +910,7 @@ func TestUninstallRemovesServeBeforeSettlingAndClearsTheRecord(t *testing.T) {
 	}
 	fake.reset()
 
-	if err := uninstall(t.Context(), "test"); err != nil {
+	if err := uninstall(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	helper := labelPrefix + ".helper.cookiesync"
@@ -946,7 +946,7 @@ func TestUninstallKeepsTheRecordWhenARemovalFails(t *testing.T) {
 	stuck := errors.New("launchd refused")
 	fake.removeErr[reconcileAgentLabel] = stuck
 
-	if err := uninstall(t.Context(), "test"); !errors.Is(err, stuck) {
+	if err := uninstall(t.Context()); !errors.Is(err, stuck) {
 		t.Fatalf("error = %v", err)
 	}
 	if !slices.Contains(fake.events, "settle:"+serveAgentLabel) {
@@ -1033,7 +1033,7 @@ func TestUninstallSweepsEveryRecordedAgentDespiteAFailedDiscovery(t *testing.T) 
 	fake.reset()
 	duplicateManifest(t, "cookiesync")
 
-	err := uninstall(t.Context(), "test")
+	err := uninstall(t.Context())
 	if err == nil {
 		t.Fatal("uninstall succeeded despite a manifests directory that will not load")
 	}
@@ -1084,7 +1084,7 @@ func TestUninstallDeletesTheStagedProgramsItRegistered(t *testing.T) {
 	}
 	fake.reset()
 
-	if err := uninstall(t.Context(), "test"); err != nil {
+	if err := uninstall(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range staged {
