@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -135,30 +136,24 @@ func TestRestageUpgradeInstallsForADriftedHelperAndKeepsReconciling(t *testing.T
 	}
 }
 
-type idleProduct struct{}
-
-func (idleProduct) Drain(context.Context) error { return nil }
-func (idleProduct) Close(context.Context) error { return nil }
-
 func serveHelper(t *testing.T, name, build string) <-chan error {
 	t.Helper()
-	program, err := daemonkit.Stable(build)
+	goBin, err := exec.LookPath("go")
 	if err != nil {
+		t.Skip("go not on PATH")
+	}
+	bin := filepath.Join(t.TempDir(), "helperstub")
+	compile := exec.Command(goBin, "build", "-o", bin, "./testdata/helperstub") //nolint:gosec // G204: fixed test args, no untrusted input.
+	if out, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("build helperstub: %v\n%s", err, out)
+	}
+	helper := exec.Command(bin, name, build) //nolint:gosec // G204: the test-built stub, fixed argv.
+	if err := helper.Start(); err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := helperruntime.New(helperruntime.Config{
-		App:        helperruntime.App{Name: name},
-		Program:    program,
-		Dispatcher: rpc.NewDispatcher(),
-		Prepare:    func(daemonkit.Ctx) (helperruntime.Product, error) { return idleProduct{}, nil },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	served := make(chan error, 1)
-	go func() { served <- runtime.Run(ctx) }()
+	t.Cleanup(func() { _ = helper.Process.Kill() })
+	exited := make(chan error, 1)
+	go func() { exited <- helper.Wait() }()
 
 	spec, err := helperruntime.Spec(name, daemonkit.Program{}, 0)
 	if err != nil {
@@ -177,7 +172,7 @@ func serveHelper(t *testing.T, name, build string) <-chan error {
 	if err := rpctest.WaitReady(readyCtx, lane); err != nil {
 		t.Fatalf("wait ready: %v", err)
 	}
-	return served
+	return exited
 }
 
 func TestReplaceOutdatedHelperDrainsOnlyAnotherBuild(t *testing.T) {
@@ -191,15 +186,15 @@ func TestReplaceOutdatedHelperDrainsOnlyAnotherBuild(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			shortDaemonHome(t)
+			exited := serveHelper(t, "reposync", "1.0.0")
 			writeVersionedBinary(t, usePathBinaries(t), "reposync", tc.installed)
-			served := serveHelper(t, "reposync", "1.0.0")
 
 			if err := replaceOutdatedHelper(t.Context(), helperManifest("reposync", "")); err != nil {
 				t.Fatalf("replaceOutdatedHelper: %v", err)
 			}
 
 			select {
-			case err := <-served:
+			case err := <-exited:
 				if !tc.drained {
 					t.Fatalf("helper serving the installed build exited: %v", err)
 				}
