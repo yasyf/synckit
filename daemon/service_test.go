@@ -84,10 +84,9 @@ func useStaging(t *testing.T, stage func(label, source string) (string, error)) 
 	t.Cleanup(func() { stageProgram = previous })
 }
 
-// useResidentStaging publishes each staged program as a real executable under a
-// symlink-resolved directory: launchd.NewPlan validates every program against
-// the live filesystem and refuses a symlinked component, which t.TempDir's
-// /var/folders root is. It returns the source each label was staged from.
+// useResidentStaging publishes each staged program as a real executable, since
+// launchd.NewPlan validates every program against the live filesystem. It
+// returns the source each label was staged from.
 func useResidentStaging(t *testing.T) map[string]string {
 	t.Helper()
 	dir := resolvedTempDir(t)
@@ -442,126 +441,35 @@ func TestServiceAgentsNeverSessionLimitOrThrottleHelpers(t *testing.T) {
 	}
 }
 
-func TestServiceAgentsStageOnlyUnbundledHelperPrograms(t *testing.T) {
-	tests := []struct {
-		name   string
-		source func(t *testing.T, binDir string) string
-		staged bool
-	}{
-		{
-			name: "plain executable",
-			source: func(t *testing.T, binDir string) string {
-				target := filepath.Join(resolvedTempDir(t), "reposync")
-				if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
-					t.Fatal(err)
-				}
-				if err := os.Symlink(target, filepath.Join(binDir, "reposync")); err != nil {
-					t.Fatal(err)
-				}
-				return target
-			},
-			staged: true,
-		},
-		{
-			name: "bundled executable",
-			source: func(t *testing.T, binDir string) string {
-				macos := filepath.Join(resolvedTempDir(t), "Reposync.app", "Contents", "MacOS")
-				if err := os.MkdirAll(macos, 0o750); err != nil {
-					t.Fatal(err)
-				}
-				target := filepath.Join(macos, "reposync")
-				if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
-					t.Fatal(err)
-				}
-				if err := os.Symlink(target, filepath.Join(binDir, "reposync")); err != nil {
-					t.Fatal(err)
-				}
-				return target
-			},
-			staged: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			useHome(t)
-			useMesh(t)
-			binDir := usePathBinaries(t)
-			source, err := filepath.EvalSymlinks(tt.source(t, binDir))
-			if err != nil {
-				t.Fatal(err)
-			}
-			stagedPath := filepath.Join(resolvedTempDir(t), "staged-reposync")
-			if err := os.WriteFile(stagedPath, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
-				t.Fatal(err)
-			}
-			var calls []string
-			useStaging(t, func(label, got string) (string, error) {
-				if label == reconcileAgentLabel {
-					return stagedPath, nil
-				}
-				if got != source {
-					t.Fatalf("staged source = %q, want %q", got, source)
-				}
-				calls = append(calls, label)
-				return stagedPath, nil
-			})
-			agents, err := serviceAgents([]manifest.Manifest{helperManifest("reposync", "")})
-			if err != nil {
-				t.Fatal(err)
-			}
-			helper := findAgent(t, agents, labelPrefix+".helper.reposync")
-			wantProgram, wantCalls := source, []string(nil)
-			if tt.staged {
-				wantProgram, wantCalls = stagedPath, []string{labelPrefix + ".helper.reposync"}
-			}
-			if helper.Program != wantProgram {
-				t.Fatalf("helper program = %q, want %q", helper.Program, wantProgram)
-			}
-			if !slices.Equal(calls, wantCalls) {
-				t.Fatalf("staging calls = %#v, want %#v", calls, wantCalls)
-			}
-		})
-	}
-}
-
-func TestBundledExecutableMatchesInstalledHelperShapes(t *testing.T) {
-	tests := []struct {
-		program string
-		want    bool
-	}{
-		{program: "/opt/homebrew/Caskroom/reposync/0.27.4/reposync", want: false},
-		{program: "/opt/homebrew/Caskroom/cookiesync/0.27.2/CookieSync.app/Contents/MacOS/cookiesync", want: true},
-		{program: "/opt/homebrew/bin/reposync", want: false},
-		{program: "/Applications/CookieSync.app/Contents/MacOS/cookiesync", want: true},
-		{program: "/opt/homebrew/Caskroom/x/1.0/App.app/Contents/Helpers/tool", want: false},
-		{program: "/opt/homebrew/Caskroom/x/1.0/plain/Contents/MacOS/tool", want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.program, func(t *testing.T) {
-			if got := bundledExecutable(tt.program); got != tt.want {
-				t.Fatalf("bundledExecutable(%q) = %t, want %t", tt.program, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestServiceAgentsFailWhenHelperStagingFails(t *testing.T) {
+func TestServiceAgentsNameTheHelperByItsPATHAlias(t *testing.T) {
 	useHome(t)
 	useMesh(t)
-	usePathBinaries(t, "reposync")
-	stageErr := errors.New("stage failed")
-	staged := filepath.Join(resolvedTempDir(t), "synckitd")
-	if err := os.WriteFile(staged, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+	binDir := usePathBinaries(t)
+	macos := filepath.Join(resolvedTempDir(t), "Reposync.app", "Contents", "MacOS")
+	if err := os.MkdirAll(macos, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	useStaging(t, func(label, _ string) (string, error) {
-		if label == reconcileAgentLabel {
-			return staged, nil
-		}
-		return "", stageErr
-	})
-	if _, err := serviceAgents([]manifest.Manifest{helperManifest("reposync", "")}); !errors.Is(err, stageErr) {
-		t.Fatalf("error = %v", err)
+	target := filepath.Join(macos, "reposync")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
+		t.Fatal(err)
+	}
+	alias := filepath.Join(binDir, "reposync")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	sources := useResidentStaging(t)
+
+	agents, err := serviceAgents([]manifest.Manifest{helperManifest("reposync", "")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	helper := labelPrefix + ".helper.reposync"
+	if program := findAgent(t, agents, helper).Program; program != alias {
+		t.Fatalf("helper program = %q, want %q", program, alias)
+	}
+	if _, staged := sources[helper]; staged {
+		t.Fatalf("helper staged from %q, want it named by its alias", sources[helper])
 	}
 }
 

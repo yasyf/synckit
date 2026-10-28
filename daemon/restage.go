@@ -28,7 +28,7 @@ func launchInstall(program string) error {
 }
 
 func restageUpgrade() (bool, error) {
-	installed, err := canonicalHelperProgram(daemonBinary)
+	installed, err := executableAlias(daemonBinary)
 	if errors.Is(err, exec.ErrNotFound) {
 		return false, nil
 	}

@@ -42,11 +42,11 @@ const (
 	stagedProgramDirName = "bin"
 
 	// programDigestEnv carries the SHA-256 of the bytes an agent's program holds.
-	// An upgrade replaces a program at its same path — staging rewrites it, an
-	// app bundle updates its executable — and launchd.Apply only plain-kickstarts
-	// a byte-identical plist, a no-op for a job still running. The digest makes a
-	// replaced program a changed job Apply boots out and reloads, while an
-	// unchanged one renders identically.
+	// An upgrade replaces a program at its same path — staging rewrites it, a
+	// Homebrew upgrade repoints the link a helper names — and launchd.Apply
+	// only plain-kickstarts a byte-identical plist, a no-op for a job still
+	// running. The digest makes a replaced program a changed job Apply boots
+	// out and reloads, while an unchanged one renders identically.
 	programDigestEnv = "SYNCKIT_PROGRAM_SHA256"
 )
 
@@ -82,15 +82,16 @@ func serviceAgents(manifests []manifest.Manifest) ([]launchd.Agent, error) {
 }
 
 // helperAgent builds the resident helper agent for one manifest that declares
-// a helper, staging its program when the binary is not bundled.
+// a helper. Its program is the binary's PATH alias, such as the Homebrew bin
+// link, which survives the upgrade that deletes the versioned target it names.
 func helperAgent(m manifest.Manifest) (launchd.Agent, error) {
 	helperLabel, err := serviceidentity.HelperLabel(m.Name)
 	if err != nil {
 		return launchd.Agent{}, fmt.Errorf("manifest %q helper identity: %w", m.Name, err)
 	}
-	program, err := helperProgram(helperLabel, m.Binary)
+	program, err := executableAlias(m.Binary)
 	if err != nil {
-		return launchd.Agent{}, err
+		return launchd.Agent{}, fmt.Errorf("resolve helper binary %q: %w", m.Binary, err)
 	}
 	helper, err := newAgent(helperLabel, []string{m.Helper.Command}, program)
 	if err != nil {
@@ -190,25 +191,10 @@ func executableAlias(binary string) (string, error) {
 	return filepath.Clean(alias), nil
 }
 
-func canonicalHelperProgram(binary string) (string, error) {
-	alias, err := executableAlias(binary)
-	if err != nil {
-		return "", fmt.Errorf("resolve helper binary %q: %w", binary, err)
-	}
-	program, err := filepath.EvalSymlinks(alias)
-	if err != nil {
-		return "", fmt.Errorf("resolve helper binary %q target: %w", binary, err)
-	}
-	if !filepath.IsAbs(program) || filepath.Clean(program) != program {
-		return "", fmt.Errorf("helper binary %q resolved to non-exact target %q", binary, program)
-	}
-	return program, nil
-}
-
 // stageProgram publishes source's bytes at <mesh>/bin/<label> and returns the
 // exact path launchd registers. daemonkit.Stable copies the invoking executable
-// and nothing else, so helper staging stays synckit's policy: identical bytes
-// are a no-op, leaving the inode launchd already execs alone.
+// and nothing else, so the reconcile tick's staging stays synckit's policy:
+// identical bytes are a no-op, leaving the inode launchd already execs alone.
 var stageProgram = func(label, source string) (string, error) {
 	data, err := os.ReadFile(source) //nolint:gosec // exact resolved program source
 	if err != nil {
@@ -228,13 +214,13 @@ var stageProgram = func(label, source string) (string, error) {
 			return "", fmt.Errorf("stage program at %q: %w", target, err)
 		}
 	}
-	return canonicalStagedProgram(target)
+	return target, nil
 }
 
 // removeStagedProgram deletes the copy stageProgram published for label. A
 // staged program is named for its label exactly and every label that reaches
 // here is synckit's own by prefix, so the path can name nothing else; a label
-// that was never staged — a bundled helper, or the daemonkit-owned serve job —
+// that was never staged — a helper, or the daemonkit-owned serve job —
 // has nothing to delete.
 func removeStagedProgram(label string) error {
 	mesh, err := hostregistry.Mesh.Dir()
@@ -276,46 +262,4 @@ func stagedProgramCurrent(target string, data []byte) (bool, error) {
 		return false, fmt.Errorf("read staged program %q: %w", target, err)
 	}
 	return bytes.Equal(staged, data), nil
-}
-
-// canonicalStagedProgram resolves the staging directory but never the final
-// component, so a link substituted for the copy can never become the program
-// launchd registers — which launchd refuses outright anywhere in a program path.
-func canonicalStagedProgram(target string) (string, error) {
-	dir, err := filepath.EvalSymlinks(filepath.Dir(target))
-	if err != nil {
-		return "", fmt.Errorf("resolve staging dir: %w", err)
-	}
-	resolved := filepath.Join(dir, filepath.Base(target))
-	info, err := os.Lstat(resolved)
-	if err != nil {
-		return "", fmt.Errorf("inspect staged program %q: %w", resolved, err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("staged program %q is not a regular file", resolved)
-	}
-	return resolved, nil
-}
-
-func helperProgram(label, binary string) (string, error) {
-	source, err := canonicalHelperProgram(binary)
-	if err != nil {
-		return "", err
-	}
-	if bundledExecutable(source) {
-		return source, nil
-	}
-	program, err := stageProgram(label, source)
-	if err != nil {
-		return "", fmt.Errorf("stage helper binary %q: %w", binary, err)
-	}
-	return program, nil
-}
-
-func bundledExecutable(program string) bool {
-	macos := filepath.Dir(program)
-	contents := filepath.Dir(macos)
-	return filepath.Base(macos) == "MacOS" &&
-		filepath.Base(contents) == "Contents" &&
-		filepath.Ext(filepath.Dir(contents)) == ".app"
 }

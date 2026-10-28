@@ -56,12 +56,8 @@ func TestRestageUpgradeInstallsOnlyADifferentInstalledBuild(t *testing.T) {
 				}
 				return
 			}
-			resolved, err := filepath.EvalSymlinks(program)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(started) != 1 || started[0] != resolved {
-				t.Fatalf("started install of %v, want [%s]", started, resolved)
+			if len(started) != 1 || started[0] != program {
+				t.Fatalf("started install of %v, want [%s]", started, program)
 			}
 		})
 	}
