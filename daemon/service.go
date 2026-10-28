@@ -72,22 +72,32 @@ func serviceAgents(manifests []manifest.Manifest) ([]launchd.Agent, error) {
 		if m.Helper == nil {
 			continue
 		}
-		helperLabel, err := serviceidentity.HelperLabel(m.Name)
-		if err != nil {
-			return nil, fmt.Errorf("manifest %q helper identity: %w", m.Name, err)
-		}
-		program, err := helperProgram(helperLabel, m.Binary)
+		helper, err := helperAgent(m)
 		if err != nil {
 			return nil, err
 		}
-		helper, err := newAgent(helperLabel, []string{m.Helper.Command}, program)
-		if err != nil {
-			return nil, err
-		}
-		helper.RestartPolicy = launchd.RestartAlways
 		agents = append(agents, helper)
 	}
 	return agents, nil
+}
+
+// helperAgent builds the resident helper agent for one manifest that declares
+// a helper, staging its program when the binary is not bundled.
+func helperAgent(m manifest.Manifest) (launchd.Agent, error) {
+	helperLabel, err := serviceidentity.HelperLabel(m.Name)
+	if err != nil {
+		return launchd.Agent{}, fmt.Errorf("manifest %q helper identity: %w", m.Name, err)
+	}
+	program, err := helperProgram(helperLabel, m.Binary)
+	if err != nil {
+		return launchd.Agent{}, err
+	}
+	helper, err := newAgent(helperLabel, []string{m.Helper.Command}, program)
+	if err != nil {
+		return launchd.Agent{}, err
+	}
+	helper.RestartPolicy = launchd.RestartAlways
+	return helper, nil
 }
 
 // plannedLabels is the label set serviceAgents would build, derived from the

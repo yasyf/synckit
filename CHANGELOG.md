@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The reconcile tick re-runs `synckitd install` when a consumer helper's
+  LaunchAgent plist no longer matches the one install would render, then
+  reconciles as usual. A Homebrew upgrade of a bundled helper such as
+  CookieSync.app deletes the versioned Caskroom bundle its plist names; within
+  one 15-minute tick the plist names the new bundle and launchd reloads the
+  helper, so the consumer's cask no longer has to rerun its own install. A
+  helper whose binary is gone from `PATH`, or whose plist was never installed,
+  is left alone.
+
 ## [0.47.0] - 2026-10-27
 
 ### Changed
