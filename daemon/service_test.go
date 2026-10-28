@@ -633,23 +633,3 @@ func TestInstalledAgentsRecordRefusesForeignLabels(t *testing.T) {
 		})
 	}
 }
-
-func mustExecutable(t *testing.T) string {
-	t.Helper()
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return self
-}
-
-func findAgent(t *testing.T, agents []launchd.Agent, label string) launchd.Agent {
-	t.Helper()
-	for _, agent := range agents {
-		if agent.Label == label {
-			return agent
-		}
-	}
-	t.Fatalf("missing agent %q", label)
-	return launchd.Agent{}
-}
