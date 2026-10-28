@@ -6,6 +6,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **synckitd no longer renders consumer helper LaunchAgents.** Each consumer
+  owns its helper through daemonkit's `Client.Ensure`, with
+  `daemonkit.Installed(<PATH alias>, version)` as the program, the same way it
+  already does on Linux. synckit still derives each helper's label and socket,
+  records the label, and removes the helper's agent on uninstall or when its
+  manifest is gone. The reconcile tick still drains a helper whose build differs
+  from its installed binary's `--version`, so an upgrade reaches it even before
+  the consumer's CLI next runs.
+- **The reconcile agent runs from synckitd's `PATH` alias**, and each tick runs
+  `Client.Ensure` on the serve daemon with its own version. Ensure does nothing
+  at the same build and replaces serve after an upgrade.
+
+### Removed
+
+- The staged copy of synckitd under the mesh's `bin` directory, and the tick's
+  comparison of that copy with the installed synckitd. A copy an earlier
+  version staged stays on disk, unused.
+- The tick's comparison of each helper plist with what install would render,
+  since install renders none.
+
 ## [0.49.0] - 2026-10-28
 
 ### Changed

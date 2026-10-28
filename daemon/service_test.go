@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/yasyf/daemonkit"
@@ -74,31 +73,6 @@ func useLaunchd(t *testing.T) *fakeLaunchd {
 	return fake
 }
 
-func useStaging(t *testing.T, stage func(label, source string) (string, error)) {
-	t.Helper()
-	previous := stageProgram
-	stageProgram = stage
-	t.Cleanup(func() { stageProgram = previous })
-}
-
-// useResidentStaging publishes each staged program as a real executable, since
-// launchd.NewPlan validates every program against the live filesystem. It
-// returns the source each label was staged from.
-func useResidentStaging(t *testing.T) map[string]string {
-	t.Helper()
-	dir := resolvedTempDir(t)
-	sources := map[string]string{}
-	useStaging(t, func(label, source string) (string, error) {
-		path := filepath.Join(dir, label)
-		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
-			return "", err
-		}
-		sources[label] = source
-		return path, nil
-	})
-	return sources
-}
-
 func useHome(t *testing.T) string {
 	t.Helper()
 	home := resolvedTempDir(t)
@@ -126,7 +100,7 @@ func resolvedTempDir(t *testing.T) string {
 func usePathBinaries(t *testing.T, names ...string) string {
 	t.Helper()
 	dir := resolvedTempDir(t)
-	for _, name := range names {
+	for _, name := range append(names, daemonBinary) {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
 			t.Fatal(err)
 		}
@@ -218,45 +192,27 @@ func TestServeLabelIsTheOneEnsureAdopts(t *testing.T) {
 	}
 }
 
-func TestServiceAgentsUseStagedProgramsAndTypedPolicy(t *testing.T) {
+func TestReconcileAgentRunsFromThePATHAliasOnASchedule(t *testing.T) {
 	useHome(t)
 	useMesh(t)
-	usePathBinaries(t, "cookiesync")
-	sources := useResidentStaging(t)
+	bin := usePathBinaries(t)
 
-	agents, err := serviceAgents([]manifest.Manifest{helperManifest("cookiesync", manifest.SessionTypeAqua)})
+	reconcile, err := reconcileAgent()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(agents) != 2 {
-		t.Fatalf("agents = %#v", agents)
-	}
-	self, err := filepath.EvalSymlinks(mustExecutable(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	reconcile := findAgent(t, agents, reconcileAgentLabel)
 	if reconcile.RestartPolicy != launchd.NoRestart || reconcile.StartInterval != reconcileInterval ||
 		reconcile.ProcessType != launchd.ProcessTypeBackground {
 		t.Fatalf("reconcile policy = %#v", reconcile)
 	}
-	if !slices.Equal(reconcile.Args, []string{"reconcile"}) || sources[reconcileAgentLabel] != self {
-		t.Fatalf("reconcile staged from %q, want %q", sources[reconcileAgentLabel], self)
+	if reconcile.Program != filepath.Join(bin, daemonBinary) || !slices.Equal(reconcile.Args, []string{"reconcile"}) {
+		t.Fatalf("reconcile runs %q %v, want the %s alias", reconcile.Program, reconcile.Args, daemonBinary)
 	}
-	helper := findAgent(t, agents, labelPrefix+".helper.cookiesync")
-	if helper.RestartPolicy != launchd.RestartAlways || helper.ProcessType != 0 || helper.StartInterval != 0 {
-		t.Fatalf("helper policy = %#v", helper)
+	if reconcile.Env["PATH"] != daemonPATH {
+		t.Fatalf("reconcile PATH = %q", reconcile.Env["PATH"])
 	}
-	if !slices.Equal(helper.Args, []string{"helper-serve"}) {
-		t.Fatalf("helper args = %#v", helper.Args)
-	}
-	for _, agent := range agents {
-		if agent.Env["PATH"] != daemonPATH {
-			t.Fatalf("agent %q PATH = %q", agent.Label, agent.Env["PATH"])
-		}
-		if !filepath.IsAbs(agent.LogPath) || filepath.Base(agent.LogPath) != agent.Label+".log" {
-			t.Fatalf("agent %q log = %q", agent.Label, agent.LogPath)
-		}
+	if !filepath.IsAbs(reconcile.LogPath) || filepath.Base(reconcile.LogPath) != reconcile.Label+".log" {
+		t.Fatalf("reconcile log = %q", reconcile.LogPath)
 	}
 }
 
@@ -267,18 +223,16 @@ func TestServiceAgentsUseStagedProgramsAndTypedPolicy(t *testing.T) {
 func TestInstalledAgentPlistsNameTheirSubcommand(t *testing.T) {
 	home := useHome(t)
 	useMesh(t)
-	bin := usePathBinaries(t, "cookiesync")
-	staging := useFlatStaging(t)
+	bin := usePathBinaries(t)
 
 	spec, err := stableServeSpec("test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	agents, err := serviceAgents([]manifest.Manifest{helperManifest("cookiesync", manifest.SessionTypeAqua)})
+	reconcile, err := reconcileAgent()
 	if err != nil {
 		t.Fatal(err)
 	}
-	helperLabel := labelPrefix + ".helper.cookiesync"
 	tests := []struct {
 		name  string
 		plist []byte
@@ -291,13 +245,8 @@ func TestInstalledAgentPlistsNameTheirSubcommand(t *testing.T) {
 		},
 		{
 			name:  "reconcile",
-			plist: agentPlist(t, findAgent(t, agents, reconcileAgentLabel)),
-			want:  []string{filepath.Join(staging, reconcileAgentLabel), "reconcile"},
-		},
-		{
-			name:  "helper",
-			plist: agentPlist(t, findAgent(t, agents, helperLabel)),
-			want:  []string{filepath.Join(bin, "cookiesync"), "helper-serve"},
+			plist: agentPlist(t, reconcile),
+			want:  []string{filepath.Join(bin, daemonBinary), "reconcile"},
 		},
 	}
 	for _, tt := range tests {
@@ -310,25 +259,6 @@ func TestInstalledAgentPlistsNameTheirSubcommand(t *testing.T) {
 	}
 }
 
-// useFlatStaging publishes every staged program directly under one returned
-// directory, so each agent's exact program path is known before it is built.
-func useFlatStaging(t *testing.T) string {
-	t.Helper()
-	dir := resolvedTempDir(t)
-	useStaging(t, func(label, _ string) (string, error) {
-		path := filepath.Join(dir, label)
-		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
-			return "", err
-		}
-		return path, nil
-	})
-	return dir
-}
-
-// ensuredServePlist renders the LaunchAgent Client.Ensure writes for spec.
-// daemonkit's Daemon-to-Agent mapping is unexported, so the program is
-// reproduced from its documented placement — ~/.daemonkit/bin/<label> — while
-// Args comes off the production spec and the log path off paths.Agent.
 func ensuredServePlist(t *testing.T, spec daemonkit.Daemon, home string) []byte {
 	t.Helper()
 	label := string(spec.Label)
@@ -384,152 +314,10 @@ func plistStrings(t *testing.T, plist []byte, key string) []string {
 	}
 }
 
-func TestServiceAgentsOmitTheDaemonkitOwnedServeLabel(t *testing.T) {
+func TestInstallEnsuresServeBeforeApplyingTheReconcileAgent(t *testing.T) {
 	useHome(t)
 	useMesh(t)
 	usePathBinaries(t, "cookiesync")
-	useResidentStaging(t)
-
-	agents, err := serviceAgents([]manifest.Manifest{helperManifest("cookiesync", "")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, agent := range agents {
-		if agent.Label == serveAgentLabel {
-			t.Fatalf("serviceAgents built the daemonkit-owned serve agent: %#v", agent)
-		}
-	}
-}
-
-func TestServiceAgentsNeverSessionLimitOrThrottleHelpers(t *testing.T) {
-	sessions := []manifest.SessionType{
-		"",
-		manifest.SessionTypeAqua,
-		manifest.SessionTypeBackground,
-		manifest.SessionTypeLoginWindow,
-		manifest.SessionTypeStandardIO,
-		manifest.SessionTypeSystem,
-	}
-	for _, session := range sessions {
-		t.Run(string(session), func(t *testing.T) {
-			useHome(t)
-			useMesh(t)
-			usePathBinaries(t, "reposync")
-			useResidentStaging(t)
-
-			agents, err := serviceAgents([]manifest.Manifest{helperManifest("reposync", session)})
-			if err != nil {
-				t.Fatal(err)
-			}
-			helper := findAgent(t, agents, labelPrefix+".helper.reposync")
-			if helper.ProcessType != 0 {
-				t.Fatalf("helper policy = %#v", helper)
-			}
-			plist, err := helper.Plist()
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, key := range []string{"LimitLoadToSessionType", "ProcessType"} {
-				if strings.Contains(string(plist), key) {
-					t.Fatalf("helper plist carries %s\n%s", key, plist)
-				}
-			}
-		})
-	}
-}
-
-func TestServiceAgentsNameTheHelperByItsPATHAlias(t *testing.T) {
-	useHome(t)
-	useMesh(t)
-	binDir := usePathBinaries(t)
-	macos := filepath.Join(resolvedTempDir(t), "Reposync.app", "Contents", "MacOS")
-	if err := os.MkdirAll(macos, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	target := filepath.Join(macos, "reposync")
-	if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // executable test stub
-		t.Fatal(err)
-	}
-	alias := filepath.Join(binDir, "reposync")
-	if err := os.Symlink(target, alias); err != nil {
-		t.Fatal(err)
-	}
-	sources := useResidentStaging(t)
-
-	agents, err := serviceAgents([]manifest.Manifest{helperManifest("reposync", "")})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	helper := labelPrefix + ".helper.reposync"
-	if program := findAgent(t, agents, helper).Program; program != alias {
-		t.Fatalf("helper program = %q, want %q", program, alias)
-	}
-	if _, staged := sources[helper]; staged {
-		t.Fatalf("helper staged from %q, want it named by its alias", sources[helper])
-	}
-}
-
-func TestStageProgramPublishesUnderTheMeshAndReusesIdenticalBytes(t *testing.T) {
-	useHome(t)
-	mesh := useMesh(t)
-	source := filepath.Join(resolvedTempDir(t), "reposync")
-	if err := os.WriteFile(source, []byte("#!/bin/sh\necho one\n"), 0o755); err != nil { //nolint:gosec // executable test stub
-		t.Fatal(err)
-	}
-	label := labelPrefix + ".helper.reposync"
-
-	program, err := stageProgram(label, source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir, err := filepath.EvalSymlinks(filepath.Join(mesh, "synckit", stagedProgramDirName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if program != filepath.Join(dir, label) {
-		t.Fatalf("staged program = %q, want %q", program, filepath.Join(dir, label))
-	}
-	info, err := os.Lstat(program)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm()&0o111 == 0 {
-		t.Fatalf("staged program mode = %v", info.Mode())
-	}
-
-	first := info.ModTime()
-	if _, err := stageProgram(label, source); err != nil {
-		t.Fatal(err)
-	}
-	restaged, err := os.Lstat(program)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !restaged.ModTime().Equal(first) {
-		t.Fatal("identical bytes restaged the program launchd already execs")
-	}
-
-	if err := os.WriteFile(source, []byte("#!/bin/sh\necho two\n"), 0o755); err != nil { //nolint:gosec // executable test stub
-		t.Fatal(err)
-	}
-	if _, err := stageProgram(label, source); err != nil {
-		t.Fatal(err)
-	}
-	staged, err := os.ReadFile(program) //nolint:gosec // exact staged program path
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(staged) != "#!/bin/sh\necho two\n" {
-		t.Fatalf("staged bytes = %q", staged)
-	}
-}
-
-func TestInstallEnsuresServeBeforeApplyingEveryPlannedAgent(t *testing.T) {
-	useHome(t)
-	useMesh(t)
-	usePathBinaries(t, "cookiesync")
-	useResidentStaging(t)
 	fake := useLaunchd(t)
 	writeManifest(t, "cookiesync")
 
@@ -537,7 +325,7 @@ func TestInstallEnsuresServeBeforeApplyingEveryPlannedAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	helper := labelPrefix + ".helper.cookiesync"
-	want := []string{"ensure:" + serveAgentLabel, "apply:" + helper, "apply:" + reconcileAgentLabel}
+	want := []string{"ensure:" + serveAgentLabel, "apply:" + reconcileAgentLabel}
 	if !slices.Equal(fake.events, want) {
 		t.Fatalf("events = %#v, want %#v", fake.events, want)
 	}
@@ -554,7 +342,6 @@ func TestInstallSweepsAgentsWhoseManifestVanished(t *testing.T) {
 	useHome(t)
 	useMesh(t)
 	usePathBinaries(t, "cookiesync", "reposync")
-	useResidentStaging(t)
 	fake := useLaunchd(t)
 	writeManifest(t, "cookiesync")
 	writeManifest(t, "reposync")
@@ -563,8 +350,12 @@ func TestInstallSweepsAgentsWhoseManifestVanished(t *testing.T) {
 		t.Fatal(err)
 	}
 	orphan := labelPrefix + ".helper.reposync"
-	if !slices.Contains(fake.applied, orphan) {
-		t.Fatalf("first install applied = %#v", fake.applied)
+	first, err := readInstalledAgents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(first, orphan) {
+		t.Fatalf("first install recorded = %#v", first)
 	}
 	removeManifest(t, "reposync")
 	fake.reset()
@@ -576,8 +367,8 @@ func TestInstallSweepsAgentsWhoseManifestVanished(t *testing.T) {
 		t.Fatalf("swept = %#v, want %#v", fake.removed, []string{orphan})
 	}
 	kept := []string{labelPrefix + ".helper.cookiesync", reconcileAgentLabel}
-	if !slices.Equal(fake.applied, kept) {
-		t.Fatalf("applied = %#v, want %#v", fake.applied, kept)
+	if !slices.Equal(fake.applied, []string{reconcileAgentLabel}) {
+		t.Fatalf("applied = %#v, want only the reconcile agent", fake.applied)
 	}
 	recorded, err := readInstalledAgents()
 	if err != nil {
@@ -592,7 +383,6 @@ func TestUninstallRemovesServeBeforeSettlingAndClearsTheRecord(t *testing.T) {
 	useHome(t)
 	useMesh(t)
 	usePathBinaries(t, "cookiesync")
-	useResidentStaging(t)
 	fake := useLaunchd(t)
 	writeManifest(t, "cookiesync")
 	if err := install(t.Context(), "test"); err != nil {
@@ -626,7 +416,6 @@ func TestUninstallKeepsTheRecordWhenARemovalFails(t *testing.T) {
 	useHome(t)
 	useMesh(t)
 	usePathBinaries(t, "cookiesync")
-	useResidentStaging(t)
 	fake := useLaunchd(t)
 	writeManifest(t, "cookiesync")
 	if err := install(t.Context(), "test"); err != nil {
@@ -662,7 +451,6 @@ func TestInstallSweepsOnlyGenuinelyAbsentManifests(t *testing.T) {
 	useHome(t)
 	useMesh(t)
 	usePathBinaries(t, "cookiesync", "reposync")
-	useResidentStaging(t)
 	fake := useLaunchd(t)
 	writeManifest(t, "cookiesync")
 	writeManifest(t, "reposync")
@@ -670,8 +458,8 @@ func TestInstallSweepsOnlyGenuinelyAbsentManifests(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale, absent := labelPrefix+".helper.reposync", labelPrefix+".helper.cookiesync"
-	if !slices.Contains(fake.applied, stale) || !slices.Contains(fake.applied, absent) {
-		t.Fatalf("first install applied = %#v", fake.applied)
+	if first, err := readInstalledAgents(); err != nil || !slices.Contains(first, stale) || !slices.Contains(first, absent) {
+		t.Fatalf("first install recorded = %#v, %v", first, err)
 	}
 	corruptManifest(t, "reposync")
 	removeManifest(t, "cookiesync")
@@ -714,7 +502,6 @@ func TestUninstallSweepsEveryRecordedAgentDespiteAFailedDiscovery(t *testing.T) 
 	useHome(t)
 	useMesh(t)
 	usePathBinaries(t, "cookiesync")
-	useResidentStaging(t)
 	fake := useLaunchd(t)
 	writeManifest(t, "cookiesync")
 	if err := install(t.Context(), "test"); err != nil {
@@ -749,41 +536,6 @@ func TestUninstallSweepsEveryRecordedAgentDespiteAFailedDiscovery(t *testing.T) 
 // TestUninstallDeletesTheStagedProgramsItRegistered proves the durable record is
 // what makes the staged copies removable: each label it names loses its
 // <mesh>/bin copy once launchd has let that agent go.
-func TestUninstallDeletesTheStagedProgramsItRegistered(t *testing.T) {
-	useHome(t)
-	useMesh(t)
-	usePathBinaries(t, "cookiesync")
-	useResidentStaging(t)
-	fake := useLaunchd(t)
-	writeManifest(t, "cookiesync")
-	if err := install(t.Context(), "test"); err != nil {
-		t.Fatal(err)
-	}
-	dir, err := stagedProgramDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	staged := []string{
-		filepath.Join(dir, labelPrefix+".helper.cookiesync"),
-		filepath.Join(dir, reconcileAgentLabel),
-	}
-	for _, path := range staged {
-		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	fake.reset()
-
-	if err := uninstall(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range staged {
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("staged program %q survived uninstall: %v", path, err)
-		}
-	}
-}
-
 func TestUninstallLabelsUnionTheRecordAndTheManifests(t *testing.T) {
 	helper := func(name string) string { return labelPrefix + ".helper." + name }
 	tests := []struct {
