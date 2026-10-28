@@ -49,7 +49,7 @@ func (f *fakeLaunchd) remove(_ context.Context, label string) error {
 	return nil
 }
 
-func (f *fakeLaunchd) ensure(context.Context) error {
+func (f *fakeLaunchd) ensure(context.Context, string) error {
 	f.events = append(f.events, "ensure:"+serveAgentLabel)
 	return nil
 }
@@ -274,7 +274,7 @@ func TestInstalledAgentPlistsNameTheirSubcommand(t *testing.T) {
 	usePathBinaries(t, "cookiesync")
 	staging := useFlatStaging(t)
 
-	spec, err := stableServeSpec()
+	spec, err := stableServeSpec("test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -628,7 +628,7 @@ func TestInstallEnsuresServeBeforeApplyingEveryPlannedAgent(t *testing.T) {
 	fake := useLaunchd(t)
 	writeManifest(t, "cookiesync")
 
-	if err := install(t.Context()); err != nil {
+	if err := install(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	helper := labelPrefix + ".helper.cookiesync"
@@ -658,7 +658,7 @@ func useLaunchctl(t *testing.T) launchctlRecorder {
 	calls := launchctlRecorder{}
 	runner, ensure := launchctl, ensureServeAgent
 	launchctl = calls.run
-	ensureServeAgent = func(context.Context) error { return nil }
+	ensureServeAgent = func(context.Context, string) error { return nil }
 	t.Cleanup(func() { launchctl, ensureServeAgent = runner, ensure })
 	return calls
 }
@@ -719,7 +719,7 @@ func TestInstallReloadsOnlyAHelperWhoseProgramChangedInPlace(t *testing.T) {
 					t.Fatal(err)
 				}
 				clear(calls)
-				if err := install(t.Context()); err != nil {
+				if err := install(t.Context(), "test"); err != nil {
 					t.Fatalf("%s: %v", step.name, err)
 				}
 				if !maps.EqualFunc(calls, step.want, slices.Equal[[]string]) {
@@ -781,7 +781,7 @@ func useLaunchdJobs(t *testing.T) *launchdJobs {
 	jobs := &launchdJobs{loaded: map[string][]byte{}}
 	runner, ensure := launchctl, ensureServeAgent
 	launchctl = jobs.run
-	ensureServeAgent = func(context.Context) error { return nil }
+	ensureServeAgent = func(context.Context, string) error { return nil }
 	t.Cleanup(func() { launchctl, ensureServeAgent = runner, ensure })
 	return jobs
 }
@@ -826,14 +826,14 @@ func TestInstallKeepsAnInterruptedHelperReloadPendingUntilTheOldJobBootsOut(t *t
 			if err := os.WriteFile(source, []byte(original), 0o755); err != nil { //nolint:gosec // executable test stub
 				t.Fatal(err)
 			}
-			if err := install(t.Context()); err != nil {
+			if err := install(t.Context(), "test"); err != nil {
 				t.Fatalf("first install: %v", err)
 			}
 			if err := os.WriteFile(source, []byte(upgraded), 0o755); err != nil { //nolint:gosec // executable test stub
 				t.Fatal(err)
 			}
 			jobs.failLabel, jobs.failVerb = helper, tt.verb
-			if err := install(t.Context()); !errors.Is(err, errLaunchctlInterrupted) {
+			if err := install(t.Context(), "test"); !errors.Is(err, errLaunchctlInterrupted) {
 				t.Fatalf("interrupted upgrade: err = %v, want %v", err, errLaunchctlInterrupted)
 			}
 			running, loaded := jobs.loaded[helper]
@@ -847,7 +847,7 @@ func TestInstallKeepsAnInterruptedHelperReloadPendingUntilTheOldJobBootsOut(t *t
 				t.Fatalf("interrupted upgrade published no digest of %q\n%s", tt.wantProgram, published())
 			}
 
-			if err := install(t.Context()); err != nil {
+			if err := install(t.Context(), "test"); err != nil {
 				t.Fatalf("retry: %v", err)
 			}
 			if running := jobs.loaded[helper]; !bytes.Equal(running, published()) {
@@ -869,7 +869,7 @@ func TestInstallSweepsAgentsWhoseManifestVanished(t *testing.T) {
 	writeManifest(t, "cookiesync")
 	writeManifest(t, "reposync")
 
-	if err := install(t.Context()); err != nil {
+	if err := install(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	orphan := labelPrefix + ".helper.reposync"
@@ -879,7 +879,7 @@ func TestInstallSweepsAgentsWhoseManifestVanished(t *testing.T) {
 	removeManifest(t, "reposync")
 	fake.reset()
 
-	if err := install(t.Context()); err != nil {
+	if err := install(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(fake.removed, []string{orphan}) {
@@ -905,12 +905,12 @@ func TestUninstallRemovesServeBeforeSettlingAndClearsTheRecord(t *testing.T) {
 	useResidentStaging(t)
 	fake := useLaunchd(t)
 	writeManifest(t, "cookiesync")
-	if err := install(t.Context()); err != nil {
+	if err := install(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	fake.reset()
 
-	if err := uninstall(t.Context()); err != nil {
+	if err := uninstall(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	helper := labelPrefix + ".helper.cookiesync"
@@ -939,14 +939,14 @@ func TestUninstallKeepsTheRecordWhenARemovalFails(t *testing.T) {
 	useResidentStaging(t)
 	fake := useLaunchd(t)
 	writeManifest(t, "cookiesync")
-	if err := install(t.Context()); err != nil {
+	if err := install(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	fake.reset()
 	stuck := errors.New("launchd refused")
 	fake.removeErr[reconcileAgentLabel] = stuck
 
-	if err := uninstall(t.Context()); !errors.Is(err, stuck) {
+	if err := uninstall(t.Context(), "test"); !errors.Is(err, stuck) {
 		t.Fatalf("error = %v", err)
 	}
 	if !slices.Contains(fake.events, "settle:"+serveAgentLabel) {
@@ -976,7 +976,7 @@ func TestInstallSweepsOnlyGenuinelyAbsentManifests(t *testing.T) {
 	fake := useLaunchd(t)
 	writeManifest(t, "cookiesync")
 	writeManifest(t, "reposync")
-	if err := install(t.Context()); err != nil {
+	if err := install(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	stale, absent := labelPrefix+".helper.reposync", labelPrefix+".helper.cookiesync"
@@ -987,7 +987,7 @@ func TestInstallSweepsOnlyGenuinelyAbsentManifests(t *testing.T) {
 	removeManifest(t, "cookiesync")
 	fake.reset()
 
-	if err := install(t.Context()); err != nil {
+	if err := install(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(fake.removed, []string{absent}) {
@@ -1007,7 +1007,7 @@ func TestInstallSweepsOnlyGenuinelyAbsentManifests(t *testing.T) {
 	removeManifest(t, "reposync")
 	fake.reset()
 
-	if err := install(t.Context()); err != nil {
+	if err := install(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(fake.removed, []string{stale}) {
@@ -1027,13 +1027,13 @@ func TestUninstallSweepsEveryRecordedAgentDespiteAFailedDiscovery(t *testing.T) 
 	useResidentStaging(t)
 	fake := useLaunchd(t)
 	writeManifest(t, "cookiesync")
-	if err := install(t.Context()); err != nil {
+	if err := install(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	fake.reset()
 	duplicateManifest(t, "cookiesync")
 
-	err := uninstall(t.Context())
+	err := uninstall(t.Context(), "test")
 	if err == nil {
 		t.Fatal("uninstall succeeded despite a manifests directory that will not load")
 	}
@@ -1066,7 +1066,7 @@ func TestUninstallDeletesTheStagedProgramsItRegistered(t *testing.T) {
 	useResidentStaging(t)
 	fake := useLaunchd(t)
 	writeManifest(t, "cookiesync")
-	if err := install(t.Context()); err != nil {
+	if err := install(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := stagedProgramDir()
@@ -1084,7 +1084,7 @@ func TestUninstallDeletesTheStagedProgramsItRegistered(t *testing.T) {
 	}
 	fake.reset()
 
-	if err := uninstall(t.Context()); err != nil {
+	if err := uninstall(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range staged {

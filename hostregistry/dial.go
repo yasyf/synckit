@@ -149,7 +149,7 @@ func execSSHOnce(
 	defer cancel()
 	result, err := runner.Run(runCtx, daemonkit.Cmd{
 		Path: sshBin, Args: args, Dir: filepath.Dir(sshBin), Stdin: stdin,
-		Exec: daemonkit.ServingSameUser(), MaxOutput: maxCommandOutput,
+		MaxOutput: maxCommandOutput,
 	})
 	if err != nil {
 		return string(result.Stdout), &SSHError{Addr: addr, Stderr: string(result.Stderr), Err: err}

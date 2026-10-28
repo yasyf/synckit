@@ -51,7 +51,6 @@ func Spec(name string, program daemonkit.Program, maxFrame daemonkit.Bytes) (dae
 		Label:    daemonkit.Label(label),
 		Program:  program,
 		Schemas:  []daemonkit.Schema{rpc.WireBuild},
-		Trust:    daemonkit.Trust{Serving: daemonkit.ServingSameUser()},
 		Restart:  daemonkit.RestartAlways,
 		Shutdown: daemonkit.Grace(shutdownGrace),
 		MaxFrame: maxFrame,

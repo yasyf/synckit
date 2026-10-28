@@ -50,13 +50,13 @@ var (
 	launchctl launchd.Runner = execLaunchctl
 )
 
-func newInstallCmd() *cobra.Command {
+func newInstallCmd(build string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "install",
 		Short: "Install the synckitd LaunchAgents (reconcile tick, serve daemon, consumer helpers).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := install(cmd.Context()); err != nil {
+			if err := install(cmd.Context(), build); err != nil {
 				return err
 			}
 			cmd.Println("Installed synckitd agents.")
@@ -87,7 +87,7 @@ func newUninstallCmd() *cobra.Command {
 // executable, and its live process — and runs before the Apply loop, which
 // applies only the agents serviceAgents built, whose programs it already staged
 // under <mesh>/bin.
-func install(ctx context.Context) error {
+func install(ctx context.Context, build string) error {
 	if err := hostregistry.Mesh.InitializeState(ctx); err != nil {
 		return fmt.Errorf("initialize host mesh state: %w", err)
 	}
@@ -119,7 +119,7 @@ func install(ctx context.Context) error {
 	if err := writeInstalledAgents(append(slices.Clone(labels), retained...)); err != nil {
 		return err
 	}
-	if err := ensureServeAgent(ctx); err != nil {
+	if err := ensureServeAgent(ctx, build); err != nil {
 		return err
 	}
 	for _, agent := range planned {
@@ -274,8 +274,8 @@ func retainedLabels(skipped []manifest.Skipped, recorded []string) []string {
 // ensureServe makes the serve daemon be this build, ready and serving: Ensure
 // places the stable executable, writes the plist for its own label, and evicts
 // the incumbent it replaces.
-func ensureServe(ctx context.Context) error {
-	spec, err := stableServeSpec()
+func ensureServe(ctx context.Context, build string) error {
+	spec, err := stableServeSpec(build)
 	if err != nil {
 		return err
 	}

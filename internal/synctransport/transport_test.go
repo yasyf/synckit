@@ -35,9 +35,6 @@ func TestSpawnedCommandSealsTheChildEnvironment(t *testing.T) {
 	if cmd.Dir != filepath.Dir("/usr/bin/ssh") || !cmd.Session {
 		t.Fatalf("dir = %q session = %t", cmd.Dir, cmd.Session)
 	}
-	if cmd.Exec != daemonkit.ServingSameUser() {
-		t.Fatal("spawned command states no same-user exec posture")
-	}
 }
 
 func TestSpawnedCommandRejectsEmptyArgv(t *testing.T) {
