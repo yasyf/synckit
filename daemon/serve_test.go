@@ -425,8 +425,7 @@ func TestReconcileCommandGivesAPeerRegisteredSinceStartALane(t *testing.T) {
 
 	ensure := ensureServeAgent
 	ensureServeAgent = func(context.Context, string) error { return nil }
-	replaceHelpers = func(context.Context) error { return nil }
-	t.Cleanup(func() { ensureServeAgent, replaceHelpers = ensure, replaceOutdatedHelpers })
+	t.Cleanup(func() { ensureServeAgent = ensure })
 
 	cmd := newReconcileCmd()
 	cmd.SetArgs(nil)

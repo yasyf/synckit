@@ -22,9 +22,6 @@ func newReconcileCmd() *cobra.Command {
 			if err := ensureServeAgent(cmd.Context(), cmd.Root().Version); err != nil {
 				return err
 			}
-			if err := replaceHelpers(cmd.Context()); err != nil {
-				cmd.Printf("helpers: error: %v\n", err)
-			}
 			results, err := reconcileResident(cmd.Context())
 			if err != nil {
 				return err

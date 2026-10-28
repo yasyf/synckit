@@ -16,9 +16,7 @@ import (
 	"github.com/yasyf/daemonkit/launchd"
 	"github.com/yasyf/daemonkit/paths"
 
-	"github.com/yasyf/synckit/codec"
 	"github.com/yasyf/synckit/hostregistry"
-	"github.com/yasyf/synckit/manifest"
 )
 
 // fakeLaunchd records every launchd mutation install and uninstall drive, in
@@ -164,17 +162,6 @@ func duplicateManifest(t *testing.T, name string) {
 	}
 	if err := os.WriteFile(filepath.Join(directory, name+"-copy.json"), []byte(manifestPayload(name)), 0o600); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func helperManifest(name string, session manifest.SessionType) manifest.Manifest {
-	return manifest.Manifest{
-		Name: name, Binary: name, Watch: manifest.WatchSpec{Debounce: codec.Duration(0)},
-		Service: manifest.ServiceSpec{
-			Kind:              "resident",
-			SchemaFingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		},
-		Helper: &manifest.HelperSpec{Command: "helper-serve", SessionType: session},
 	}
 }
 

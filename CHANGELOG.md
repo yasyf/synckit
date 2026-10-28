@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The reconcile tick no longer drains a helper whose `Health.Build` differs
+  from its installed binary's `--version`. A helper is replaced only by its
+  consumer's own `Client.Ensure`, the next time the consumer's CLI calls it,
+  so its LaunchAgent and its process have one owner.
+
 ## [0.50.0] - 2026-10-28
 
 ### Changed
