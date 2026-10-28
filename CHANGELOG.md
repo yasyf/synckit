@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Any process running as the same user can connect to synckitd.**
-  synckitd builds against the daemonkit release that drops peer
+  synckitd builds against daemonkit 0.35.1, which drops peer
   verification: the serve daemon, the rpc socket, and the ssh and sync
   transports no longer check a peer's or spawned child's code signature or
   user ID. The serve daemon's staged copy is now keyed by the build's version
@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asks launchd about a serve daemon that already reports this build. The first
   install after upgrading stops the old serve daemon with SIGTERM, because it
   speaks the older wire protocol.
+- Builds with Go 1.26.10 for GO-2026-6604 and GO-2026-6809.
 
 ## [0.46.0] - 2026-10-27
 

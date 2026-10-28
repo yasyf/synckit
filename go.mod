@@ -2,7 +2,7 @@ module github.com/yasyf/synckit
 
 go 1.26.5
 
-toolchain go1.26.6
+toolchain go1.26.10
 
 require (
 	github.com/brutella/dnssd v1.2.14
@@ -15,7 +15,7 @@ require (
 	github.com/gofrs/flock v0.13.0
 	github.com/klauspost/compress v1.20.1
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/daemonkit v0.35.0
+	github.com/yasyf/daemonkit v0.35.1
 	golang.org/x/sys v0.47.0
 )
 
