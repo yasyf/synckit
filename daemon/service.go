@@ -40,14 +40,6 @@ const (
 	// its own account, under the mesh directory rather than daemonkit's
 	// ~/.daemonkit/bin, whose leaves are daemonkit labels.
 	stagedProgramDirName = "bin"
-
-	// programDigestEnv carries the SHA-256 of the bytes an agent's program holds.
-	// An upgrade replaces a program at its same path — staging rewrites it, a
-	// Homebrew upgrade repoints the link a helper names — and launchd.Apply
-	// only plain-kickstarts a byte-identical plist, a no-op for a job still
-	// running. The digest makes a replaced program a changed job Apply boots
-	// out and reloads, while an unchanged one renders identically.
-	programDigestEnv = "SYNCKIT_PROGRAM_SHA256"
 )
 
 // serviceAgents builds the exact launchd policy synckit owns outright: the
@@ -72,33 +64,22 @@ func serviceAgents(manifests []manifest.Manifest) ([]launchd.Agent, error) {
 		if m.Helper == nil {
 			continue
 		}
-		helper, err := helperAgent(m)
+		helperLabel, err := serviceidentity.HelperLabel(m.Name)
+		if err != nil {
+			return nil, fmt.Errorf("manifest %q helper identity: %w", m.Name, err)
+		}
+		program, err := executableAlias(m.Binary)
+		if err != nil {
+			return nil, fmt.Errorf("resolve helper binary %q: %w", m.Binary, err)
+		}
+		helper, err := newAgent(helperLabel, []string{m.Helper.Command}, program)
 		if err != nil {
 			return nil, err
 		}
+		helper.RestartPolicy = launchd.RestartAlways
 		agents = append(agents, helper)
 	}
 	return agents, nil
-}
-
-// helperAgent builds the resident helper agent for one manifest that declares
-// a helper. Its program is the binary's PATH alias, such as the Homebrew bin
-// link, which survives the upgrade that deletes the versioned target it names.
-func helperAgent(m manifest.Manifest) (launchd.Agent, error) {
-	helperLabel, err := serviceidentity.HelperLabel(m.Name)
-	if err != nil {
-		return launchd.Agent{}, fmt.Errorf("manifest %q helper identity: %w", m.Name, err)
-	}
-	program, err := executableAlias(m.Binary)
-	if err != nil {
-		return launchd.Agent{}, fmt.Errorf("resolve helper binary %q: %w", m.Binary, err)
-	}
-	helper, err := newAgent(helperLabel, []string{m.Helper.Command}, program)
-	if err != nil {
-		return launchd.Agent{}, err
-	}
-	helper.RestartPolicy = launchd.RestartAlways
-	return helper, nil
 }
 
 // plannedLabels is the label set serviceAgents would build, derived from the
@@ -125,16 +106,12 @@ func newAgent(label string, args []string, program string) (launchd.Agent, error
 	if err != nil {
 		return launchd.Agent{}, err
 	}
-	digest, err := programDigest(program)
-	if err != nil {
-		return launchd.Agent{}, err
-	}
 	return launchd.Agent{
 		Label:   label,
 		Program: program,
 		Args:    args,
 		LogPath: log,
-		Env:     map[string]string{"PATH": daemonPATH, programDigestEnv: digest},
+		Env:     map[string]string{"PATH": daemonPATH},
 	}, nil
 }
 

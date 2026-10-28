@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -47,53 +46,11 @@ func restageUpgrade() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if running != want {
-		if err := startInstall(installed); err != nil {
-			return false, err
-		}
-		return true, nil
+	if running == want {
+		return false, nil
 	}
-	drifted, err := helpersDrifted()
-	if err != nil || !drifted {
+	if err := startInstall(installed); err != nil {
 		return false, err
 	}
-	return false, startInstall(installed)
-}
-
-func helpersDrifted() (bool, error) {
-	manifests, err := discoverManifests()
-	if err != nil {
-		return false, err
-	}
-	for _, m := range manifests {
-		if m.Helper == nil {
-			continue
-		}
-		agent, err := helperAgent(m)
-		if errors.Is(err, exec.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return false, err
-		}
-		path, err := agent.PlistPath()
-		if err != nil {
-			return false, fmt.Errorf("resolve agent %q plist: %w", agent.Label, err)
-		}
-		published, err := os.ReadFile(path) //nolint:gosec // exact agent-owned plist path
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return false, fmt.Errorf("read agent %q plist: %w", agent.Label, err)
-		}
-		desired, err := agent.Plist()
-		if err != nil {
-			return false, fmt.Errorf("render agent %q plist: %w", agent.Label, err)
-		}
-		if !bytes.Equal(published, desired) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return true, nil
 }
