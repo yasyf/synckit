@@ -17,8 +17,8 @@ func serveSpec(program daemonkit.Program) daemonkit.Daemon { return servespec.Sp
 
 // stableServeSpec is serveSpec over the executable launchd runs from a copy of
 // the invoking one, at a path package upgrades survive.
-func stableServeSpec() (daemonkit.Daemon, error) {
-	program, err := daemonkit.Stable()
+func stableServeSpec(build string) (daemonkit.Daemon, error) {
+	program, err := daemonkit.Stable(build)
 	if err != nil {
 		return daemonkit.Daemon{}, fmt.Errorf("resolve stable synckitd program: %w", err)
 	}

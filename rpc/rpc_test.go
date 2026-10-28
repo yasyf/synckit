@@ -116,7 +116,6 @@ func TestCallOnAnAbsentDaemonIsUndispatched(t *testing.T) {
 	spec := daemonkit.Daemon{
 		Label:   "com.github.yasyf.synckit.rpctest.absent",
 		Schemas: []daemonkit.Schema{WireBuild},
-		Trust:   daemonkit.Trust{Serving: daemonkit.ServingSameUser()},
 	}
 	peer, err := daemonkit.Open(spec)
 	if err != nil {

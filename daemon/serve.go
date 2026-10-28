@@ -66,7 +66,7 @@ func newServeCmd(build string) *cobra.Command {
 // and the watch supervisor, and returning the product IS readiness. It blocks
 // until ctx is canceled, a drain signal arrives, or the drain verb lands.
 func serve(ctx context.Context, build string) error {
-	spec, err := stableServeSpec()
+	spec, err := stableServeSpec(build)
 	if err != nil {
 		return err
 	}

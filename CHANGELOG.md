@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-10-27
+
+### Changed
+
+- **Any process running as the same user can connect to synckitd.**
+  synckitd builds against daemonkit 0.35.1, which drops peer
+  verification: the serve daemon, the rpc socket, and the ssh and sync
+  transports no longer check a peer's or spawned child's code signature or
+  user ID. The serve daemon's staged copy is now keyed by the build's version
+  string instead of a SHA-256 of the binary, and `synckitd install` no longer
+  asks launchd about a serve daemon that already reports this build. The first
+  install after upgrading stops the old serve daemon with SIGTERM, because it
+  speaks the older wire protocol.
+- Builds with Go 1.26.10 for GO-2026-6604 and GO-2026-6809.
+
 ## [0.46.0] - 2026-10-27
 
 ### Fixed
@@ -825,7 +840,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.45.0...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.47.0...HEAD
+[0.47.0]: https://github.com/yasyf/synckit/compare/v0.46.0...v0.47.0
 [0.45.0]: https://github.com/yasyf/synckit/compare/v0.44.0...v0.45.0
 [0.44.0]: https://github.com/yasyf/synckit/compare/v0.43.0...v0.44.0
 [0.43.0]: https://github.com/yasyf/synckit/compare/v0.42.0...v0.43.0

@@ -106,7 +106,7 @@ func runCmd(ctx context.Context, runner Commander, name string, args ...string) 
 	defer cancel()
 	result, runErr := runner.Run(runCtx, daemonkit.Cmd{
 		Path: filepath.Clean(executable), Args: args, Dir: filepath.Dir(executable),
-		Exec: daemonkit.ServingSameUser(), MaxOutput: maxCommandOutput,
+		MaxOutput: maxCommandOutput,
 	})
 	if runErr != nil {
 		return string(result.Stdout), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), runErr, strings.TrimSpace(string(result.Stderr)))

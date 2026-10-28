@@ -51,7 +51,7 @@ func newRoot(build string) *cobra.Command {
 		newRegisterCmd(),
 		newUnregisterCmd(),
 		newStatusCmd(build),
-		newInstallCmd(),
+		newInstallCmd(build),
 		newUninstallCmd(),
 		newConsentCmd(),
 		newNetCmd(),

@@ -30,7 +30,6 @@ func Spec(label string) daemonkit.Daemon {
 	return daemonkit.Daemon{
 		Label:    daemonkit.Label(label),
 		Schemas:  []daemonkit.Schema{rpc.WireBuild},
-		Trust:    daemonkit.Trust{Serving: daemonkit.ServingSameUser()},
 		Shutdown: daemonkit.Grace(closeBudget),
 		MaxFrame: rpc.MaxFrame,
 	}

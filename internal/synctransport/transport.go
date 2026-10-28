@@ -341,6 +341,6 @@ func spawnedCommand(executable string, args []string) (daemonkit.Cmd, error) {
 	}
 	return daemonkit.Cmd{
 		Path: executable, Args: args, Dir: filepath.Dir(executable),
-		Env: []string{"HOME=" + home}, Session: true, Exec: daemonkit.ServingSameUser(),
+		Env: []string{"HOME=" + home}, Session: true,
 	}, nil
 }

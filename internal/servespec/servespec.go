@@ -31,7 +31,6 @@ func Spec(program daemonkit.Program) daemonkit.Daemon {
 		Program:  program,
 		Args:     []string{"serve"},
 		Schemas:  []daemonkit.Schema{rpc.WireBuild},
-		Trust:    daemonkit.Trust{Serving: daemonkit.ServingSameUser()},
 		Restart:  daemonkit.RestartAlways,
 		Shutdown: daemonkit.Grace(Shutdown),
 		MaxFrame: rpc.MaxFrame,
