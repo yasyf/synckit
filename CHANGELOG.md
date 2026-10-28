@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-10-28
+
 ### Changed
 
 - **synckitd no longer renders consumer helper LaunchAgents.** Each consumer
@@ -19,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The reconcile agent runs from synckitd's `PATH` alias**, and each tick runs
   `Client.Ensure` on the serve daemon with its own version. Ensure does nothing
   at the same build and replaces serve after an upgrade.
+- Builds against daemonkit 0.36.0.
 
 ### Removed
 
@@ -906,7 +909,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.49.0...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.50.0...HEAD
+[0.50.0]: https://github.com/yasyf/synckit/compare/v0.49.0...v0.50.0
 [0.49.0]: https://github.com/yasyf/synckit/compare/v0.48.0...v0.49.0
 [0.48.0]: https://github.com/yasyf/synckit/compare/v0.47.0...v0.48.0
 [0.47.0]: https://github.com/yasyf/synckit/compare/v0.46.0...v0.47.0
