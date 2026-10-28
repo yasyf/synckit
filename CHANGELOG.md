@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-10-28
+
 ### Removed
 
 - The reconcile tick no longer drains a helper whose `Health.Build` differs
@@ -916,7 +918,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - goreleaser release of the `synckitd` binary to the Homebrew tap (`brew install
   yasyf/tap/synckitd`).
 
-[Unreleased]: https://github.com/yasyf/synckit/compare/v0.50.0...HEAD
+[Unreleased]: https://github.com/yasyf/synckit/compare/v0.51.0...HEAD
+[0.51.0]: https://github.com/yasyf/synckit/compare/v0.50.0...v0.51.0
 [0.50.0]: https://github.com/yasyf/synckit/compare/v0.49.0...v0.50.0
 [0.49.0]: https://github.com/yasyf/synckit/compare/v0.48.0...v0.49.0
 [0.48.0]: https://github.com/yasyf/synckit/compare/v0.47.0...v0.48.0
