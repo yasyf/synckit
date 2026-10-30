@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   release:
-    uses: yasyf/homebrew-tap/.github/workflows/release-go.yml@41f8de6765b3b833ef333b0b98f5683f0e46685b
+    uses: yasyf/homebrew-tap/.github/workflows/release-go.yml@4eb5c04c8e2b93464e22774e65184b66b794e1ea
     secrets: inherit
     with:
       # synckitd ships as a formula (livecheck + `brew install --HEAD` source build)
