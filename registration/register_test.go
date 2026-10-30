@@ -1,4 +1,4 @@
-package hostregistry
+package registration
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yasyf/synckit/codec"
+	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/internal/rpctest"
 	"github.com/yasyf/synckit/internal/servespec"
 	"github.com/yasyf/synckit/manifest"
@@ -38,7 +39,7 @@ func TestRegisterManifestReloadsOverAuthenticatedRPC(t *testing.T) {
 			dispatcher := rpc.NewDispatcher()
 			dispatcher.Register("reload", func(ctx context.Context, params map[string]any) (any, error) {
 				pid, _ := rpc.PeerPID(ctx)
-				path, err := RegisteredPath(m.Name)
+				path, err := hostregistry.RegisteredPath(m.Name)
 				var installed *manifest.Manifest
 				if err == nil {
 					installed, err = manifest.Load(path)
@@ -85,7 +86,7 @@ func TestRegisterManifestAtomicallyPreservesOptionsWithoutDaemon(t *testing.T) {
 	if err := RegisterManifest(ctx, m); err != nil {
 		t.Fatal(err)
 	}
-	path, err := RegisteredPath(m.Name)
+	path, err := hostregistry.RegisteredPath(m.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +135,7 @@ func TestRegisterManifestRejectsInvalidWithoutWriting(t *testing.T) {
 			}
 		})
 	}
-	dir, err := ManifestsDir()
+	dir, err := hostregistry.ManifestsDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +146,7 @@ func TestRegisterManifestRejectsInvalidWithoutWriting(t *testing.T) {
 
 func TestRegisterManifestReportsPublicationFailure(t *testing.T) {
 	registrationHome(t)
-	dir, err := ManifestsDir()
+	dir, err := hostregistry.ManifestsDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +183,7 @@ func TestUnregisterManifestPreservesOtherRegistrations(t *testing.T) {
 			t.Fatalf("invalid name %q accepted", name)
 		}
 	}
-	path, err := RegisteredPath(m.Name)
+	path, err := hostregistry.RegisteredPath(m.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +198,7 @@ func TestUnregisterManifestPreservesOtherRegistrations(t *testing.T) {
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unregistered path = %v", err)
 	}
-	otherPath, err := RegisteredPath(other.Name)
+	otherPath, err := hostregistry.RegisteredPath(other.Name)
 	if err != nil {
 		t.Fatal(err)
 	}

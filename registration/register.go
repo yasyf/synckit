@@ -1,4 +1,4 @@
-package hostregistry
+package registration
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/yasyf/daemonkit/durable"
 
+	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/internal/servespec"
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
@@ -24,11 +25,11 @@ func RegisterManifest(ctx context.Context, m manifest.Manifest) error {
 	if err := m.Validate(); err != nil {
 		return err
 	}
-	dest, err := RegisteredPath(m.Name)
+	dest, err := hostregistry.RegisteredPath(m.Name)
 	if err != nil {
 		return err
 	}
-	dir, err := ManifestsDir()
+	dir, err := hostregistry.ManifestsDir()
 	if err != nil {
 		return err
 	}
@@ -49,7 +50,7 @@ func RegisterManifest(ctx context.Context, m manifest.Manifest) error {
 // UnregisterManifest removes a consumer registration and asks the running daemon
 // to reload. An absent registration or unavailable daemon is already settled.
 func UnregisterManifest(ctx context.Context, name string) error {
-	path, err := RegisteredPath(name)
+	path, err := hostregistry.RegisteredPath(name)
 	if err != nil {
 		return err
 	}

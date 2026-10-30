@@ -3,7 +3,7 @@ package daemon
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/registration"
 	"github.com/yasyf/synckit/manifest"
 )
 
@@ -17,7 +17,7 @@ func newRegisterCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := hostregistry.RegisterManifest(cmd.Context(), *m); err != nil {
+			if err := registration.RegisterManifest(cmd.Context(), *m); err != nil {
 				return err
 			}
 			cmd.Println("registered manifest " + m.Name)
@@ -32,7 +32,7 @@ func newUnregisterCmd() *cobra.Command {
 		Short: "Remove a consumer manifest and nudge the daemon to reload.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := hostregistry.UnregisterManifest(cmd.Context(), args[0]); err != nil {
+			if err := registration.UnregisterManifest(cmd.Context(), args[0]); err != nil {
 				return err
 			}
 			cmd.Println("unregistered manifest " + args[0])
