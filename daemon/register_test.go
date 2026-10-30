@@ -92,7 +92,7 @@ func TestRegisterManifestAtomicallyPreservesOptionsWithoutDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old, err := os.Open(path)
+	old, err := os.OpenInRoot(filepath.Dir(path), filepath.Base(path))
 	if err != nil {
 		t.Fatal(err)
 	}
