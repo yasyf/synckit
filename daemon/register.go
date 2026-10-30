@@ -2,20 +2,46 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/yasyf/daemonkit/durable"
 
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
 	"github.com/yasyf/synckit/rpc"
 )
 
-// reloadTimeout bounds the best-effort reload nudge to a running daemon.
 const reloadTimeout = 5 * time.Second
+
+// RegisterManifest atomically installs a validated consumer manifest and asks the
+// running local daemon to reload it. An unavailable daemon is not an error;
+// its next start discovers the registration.
+func RegisterManifest(ctx context.Context, m manifest.Manifest) error {
+	if err := m.Validate(); err != nil {
+		return err
+	}
+	dest, err := hostregistry.RegisteredPath(m.Name)
+	if err != nil {
+		return err
+	}
+	if _, err := ensureManifestsDir(); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode manifest %s: %w", m.Name, err)
+	}
+	if err := durable.WriteFile(dest, append(raw, '\n'), 0o600); err != nil {
+		return fmt.Errorf("install manifest to %s: %w", dest, err)
+	}
+	nudgeReload(ctx)
+	return nil
+}
 
 func newRegisterCmd() *cobra.Command {
 	return &cobra.Command{
@@ -27,23 +53,10 @@ func newRegisterCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			dest, err := hostregistry.RegisteredPath(m.Name)
-			if err != nil {
+			if err := RegisterManifest(cmd.Context(), *m); err != nil {
 				return err
-			}
-			if _, err := ensureManifestsDir(); err != nil {
-				return err
-			}
-			raw, err := os.ReadFile(args[0]) //nolint:gosec // G304: path is the manifest the user explicitly asked to register; it is read back after manifest.Load already validated it.
-			if err != nil {
-				return fmt.Errorf("read manifest %q: %w", args[0], err)
-			}
-			//nolint:gosec // G703: RegisteredPath refuses any name that is not a plain base name, so dest stays within the manifests dir.
-			if err := os.WriteFile(dest, raw, 0o600); err != nil {
-				return fmt.Errorf("install manifest to %s: %w", dest, err)
 			}
 			cmd.Println("registered manifest " + m.Name)
-			nudgeReload(cmd.Context())
 			return nil
 		},
 	}
