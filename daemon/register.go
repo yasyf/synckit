@@ -3,8 +3,8 @@ package daemon
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/yasyf/synckit/registration"
 	"github.com/yasyf/synckit/manifest"
+	"github.com/yasyf/synckit/registration"
 )
 
 func newRegisterCmd() *cobra.Command {

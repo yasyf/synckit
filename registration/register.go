@@ -1,3 +1,4 @@
+// Package registration installs consumer manifests for discovery by the local daemon.
 package registration
 
 import (
