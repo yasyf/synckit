@@ -1,4 +1,4 @@
-package daemon
+package hostregistry
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/yasyf/synckit/codec"
-	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/internal/rpctest"
 	"github.com/yasyf/synckit/internal/servespec"
 	"github.com/yasyf/synckit/manifest"
@@ -27,9 +26,8 @@ func TestRegisterManifestReloadsOverAuthenticatedRPC(t *testing.T) {
 			name = "rejected"
 		}
 		t.Run(name, func(t *testing.T) {
-			shortConfigHome(t)
-			shortDaemonHome(t)
-			m := testManifest()
+			registrationHome(t)
+			m := manifest.Manifest{Name: "stub", Binary: "stub", Watch: manifest.WatchSpec{Debounce: codec.Duration(10 * time.Millisecond)}, Service: manifest.ServiceSpec{Kind: "resident", SchemaFingerprint: strings.Repeat("a", 64)}}
 			type observation struct {
 				pid       int
 				params    int
@@ -40,7 +38,7 @@ func TestRegisterManifestReloadsOverAuthenticatedRPC(t *testing.T) {
 			dispatcher := rpc.NewDispatcher()
 			dispatcher.Register("reload", func(ctx context.Context, params map[string]any) (any, error) {
 				pid, _ := rpc.PeerPID(ctx)
-				path, err := hostregistry.RegisteredPath(m.Name)
+				path, err := RegisteredPath(m.Name)
 				var installed *manifest.Manifest
 				if err == nil {
 					installed, err = manifest.Load(path)
@@ -76,8 +74,7 @@ func TestRegisterManifestReloadsOverAuthenticatedRPC(t *testing.T) {
 }
 
 func TestRegisterManifestAtomicallyPreservesOptionsWithoutDaemon(t *testing.T) {
-	shortConfigHome(t)
-	shortDaemonHome(t)
+	registrationHome(t)
 	m := manifest.Manifest{
 		Name: "cci", Binary: "cci", Brew: "yasyf/tap/cci",
 		Watch:   manifest.WatchSpec{Debounce: codec.Duration(17 * time.Second)},
@@ -88,7 +85,7 @@ func TestRegisterManifestAtomicallyPreservesOptionsWithoutDaemon(t *testing.T) {
 	if err := RegisterManifest(ctx, m); err != nil {
 		t.Fatal(err)
 	}
-	path, err := hostregistry.RegisteredPath(m.Name)
+	path, err := RegisteredPath(m.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,8 +126,7 @@ func TestRegisterManifestAtomicallyPreservesOptionsWithoutDaemon(t *testing.T) {
 }
 
 func TestRegisterManifestRejectsInvalidWithoutWriting(t *testing.T) {
-	shortConfigHome(t)
-	shortDaemonHome(t)
+	registrationHome(t)
 	for _, name := range []string{"../cci", "cci"} {
 		t.Run(name, func(t *testing.T) {
 			if err := RegisterManifest(context.Background(), manifest.Manifest{Name: name}); err == nil {
@@ -138,7 +134,7 @@ func TestRegisterManifestRejectsInvalidWithoutWriting(t *testing.T) {
 			}
 		})
 	}
-	dir, err := hostregistry.ManifestsDir()
+	dir, err := ManifestsDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,14 +144,13 @@ func TestRegisterManifestRejectsInvalidWithoutWriting(t *testing.T) {
 }
 
 func TestRegisterManifestReportsPublicationFailure(t *testing.T) {
-	shortConfigHome(t)
-	shortDaemonHome(t)
-	dir, err := ensureManifestsDir()
+	registrationHome(t)
+	dir, err := ManifestsDir()
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "cci.json")
-	if err := os.Mkdir(path, 0o700); err != nil {
+	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	m := manifest.Manifest{Name: "cci", Binary: "cci", Watch: manifest.WatchSpec{Debounce: codec.Duration(time.Second)}, Service: manifest.ServiceSpec{Kind: "resident", SchemaFingerprint: strings.Repeat("a", 64)}}
@@ -169,4 +164,56 @@ func TestRegisterManifestReportsPublicationFailure(t *testing.T) {
 	if len(entries) != 1 || entries[0].Name() != "cci.json" || !entries[0].IsDir() {
 		t.Fatalf("failed publication left entries: %v", entries)
 	}
+}
+
+func TestUnregisterManifestPreservesOtherRegistrations(t *testing.T) {
+	registrationHome(t)
+	m := manifest.Manifest{Name: "cci", Binary: "cci", Watch: manifest.WatchSpec{Debounce: codec.Duration(time.Second)}, Service: manifest.ServiceSpec{Kind: "resident", SchemaFingerprint: strings.Repeat("a", 64)}}
+	if err := RegisterManifest(t.Context(), m); err != nil {
+		t.Fatal(err)
+	}
+	other := m
+	other.Name = "other"
+	if err := RegisterManifest(t.Context(), other); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"../cci", "cci/other"} {
+		if err := UnregisterManifest(t.Context(), name); err == nil {
+			t.Fatalf("invalid name %q accepted", name)
+		}
+	}
+	path, err := RegisteredPath(m.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := UnregisterManifest(t.Context(), m.Name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unregistered path = %v", err)
+	}
+	otherPath, err := RegisteredPath(other.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := manifest.Load(otherPath)
+	if err != nil || !reflect.DeepEqual(got, &other) {
+		t.Fatalf("other registration = %+v, %v; want %+v", got, err, other)
+	}
+}
+
+func registrationHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	base, err := os.MkdirTemp("/tmp", "sk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	t.Setenv("DAEMONKIT_HOME", base)
 }

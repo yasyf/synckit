@@ -32,6 +32,20 @@ jobs:
       - name: Build
         run: go build ./...
 
+  registry-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet the portable registration API
+        run: go vet ./hostregistry
+      - name: Test the portable registration API
+        run: go test -race ./hostregistry
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
