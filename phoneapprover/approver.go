@@ -27,6 +27,10 @@ const PathPrefix = "/cc-sudo/phone/requests/"
 
 const maxBody = 64 << 10
 
+// shutdownGrace lets the answer's own response reach the phone before the
+// listener goes away.
+const shutdownGrace = 5 * time.Second
+
 // Notification is the push a phone gets: the asking Mac's name, the request
 // id, and the base URL to fetch it from.
 type Notification struct {
@@ -70,7 +74,11 @@ func (a *Approver) Ask(ctx context.Context, phone consent.Phone, ask consent.Pho
 	p := &parked{phone: phone, ask: ask, id: id, whois: a.WhoIs, answers: make(chan answer, 1)}
 	srv := &http.Server{Handler: p, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
-	defer func() { _ = srv.Close() }()
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		_ = srv.Shutdown(sctx)
+	}()
 
 	if err := a.Push(ctx, phone.PushToken, Notification{Mac: ask.Origin, ID: id, URL: base}); err != nil {
 		return nil, &consent.AuthRequired{Msg: fmt.Sprintf("phone %s: push: %v", phone.Name, err)}

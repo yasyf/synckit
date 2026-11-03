@@ -68,9 +68,10 @@ func (d phoneDevice) do(t *testing.T, method, url, id string, body []byte) *http
 }
 
 // harness runs an Approver whose push hands the notification to phone, which
-// plays the phone's side from its own goroutine.
-func harness(t *testing.T, node string, phone func(n Notification)) *Approver {
+// plays the phone's side from its own goroutine; done closes when it returns.
+func harness(t *testing.T, node string, phone func(n Notification)) (*Approver, <-chan struct{}) {
 	t.Helper()
+	done := make(chan struct{})
 	return &Approver{
 		Listen: func(context.Context) (net.Listener, string, error) {
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -81,11 +82,14 @@ func harness(t *testing.T, node string, phone func(n Notification)) *Approver {
 		},
 		WhoIs: func(context.Context, string) (string, error) { return node, nil },
 		Push: func(_ context.Context, _ string, n Notification) error {
-			go phone(n)
+			go func() {
+				defer close(done)
+				phone(n)
+			}()
 			return nil
 		},
 		Window: 2 * time.Second,
-	}
+	}, done
 }
 
 func enrolled(t *testing.T, device phoneDevice) consent.Phone {
@@ -98,7 +102,7 @@ var ask = consent.PhoneAsk{Origin: "yasyf-forge", Argv: []string{"/usr/bin/dscac
 func TestThePhoneFetchesTheExactRequestAndItsApprovalComesBackSigned(t *testing.T) {
 	device := newPhoneDevice(t)
 	fetched := make(chan map[string]any, 1)
-	a := harness(t, "nPHONE", func(n Notification) {
+	a, done := harness(t, "nPHONE", func(n Notification) {
 		resp := device.do(t, http.MethodGet, n.URL, n.ID, nil)
 		var got map[string]any
 		_ = json.NewDecoder(resp.Body).Decode(&got)
@@ -108,6 +112,7 @@ func TestThePhoneFetchesTheExactRequestAndItsApprovalComesBackSigned(t *testing.
 	})
 
 	reply, err := a.Ask(context.Background(), enrolled(t, device), ask)
+	<-done
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
@@ -125,11 +130,12 @@ func TestThePhoneFetchesTheExactRequestAndItsApprovalComesBackSigned(t *testing.
 func TestAnotherTailnetNodeReadsNothing(t *testing.T) {
 	device := newPhoneDevice(t)
 	status := make(chan int, 1)
-	a := harness(t, "nOTHER", func(n Notification) {
+	a, done := harness(t, "nOTHER", func(n Notification) {
 		status <- device.do(t, http.MethodGet, n.URL, n.ID, nil).StatusCode
 	})
 
 	_, err := a.Ask(context.Background(), enrolled(t, device), ask)
+	<-done
 	if consent.Classify(err) != consent.VerdictUnavailable {
 		t.Fatalf("Ask error = %v, want unavailable", err)
 	}
@@ -141,11 +147,13 @@ func TestAnotherTailnetNodeReadsNothing(t *testing.T) {
 func TestAKeyOtherThanTheEnrolledTransportKeyReadsNothing(t *testing.T) {
 	device, impostor := newPhoneDevice(t), newPhoneDevice(t)
 	status := make(chan int, 1)
-	a := harness(t, "nPHONE", func(n Notification) {
+	a, done := harness(t, "nPHONE", func(n Notification) {
 		status <- impostor.do(t, http.MethodGet, n.URL, n.ID, nil).StatusCode
 	})
 
-	if _, err := a.Ask(context.Background(), enrolled(t, device), ask); consent.Classify(err) != consent.VerdictUnavailable {
+	_, err := a.Ask(context.Background(), enrolled(t, device), ask)
+	<-done
+	if consent.Classify(err) != consent.VerdictUnavailable {
 		t.Fatalf("Ask error = %v, want unavailable", err)
 	}
 	if got := <-status; got != http.StatusUnauthorized {
@@ -156,7 +164,7 @@ func TestAKeyOtherThanTheEnrolledTransportKeyReadsNothing(t *testing.T) {
 func TestAnAnswerMustEchoTheNonceAndADenialIsFinal(t *testing.T) {
 	device := newPhoneDevice(t)
 	status := make(chan int, 1)
-	a := harness(t, "nPHONE", func(n Notification) {
+	a, done := harness(t, "nPHONE", func(n Notification) {
 		stale, _ := json.Marshal(map[string]string{"id": n.ID, "nonce": "old-nonce", "verdict": "approved", "key_id": "kid", "sig": "sig"})
 		status <- device.do(t, http.MethodPost, n.URL, n.ID, stale).StatusCode
 		deny, _ := json.Marshal(map[string]string{"id": n.ID, "nonce": "root-nonce", "verdict": "denied"})
@@ -164,6 +172,7 @@ func TestAnAnswerMustEchoTheNonceAndADenialIsFinal(t *testing.T) {
 	})
 
 	_, err := a.Ask(context.Background(), enrolled(t, device), ask)
+	<-done
 	var denied *consent.Denied
 	if !errors.As(err, &denied) || denied.Peer != "yphone" {
 		t.Fatalf("Ask error = %v, want a denial from yphone", err)
@@ -175,7 +184,7 @@ func TestAnAnswerMustEchoTheNonceAndADenialIsFinal(t *testing.T) {
 
 func TestAFailedPushIsUnavailable(t *testing.T) {
 	device := newPhoneDevice(t)
-	a := harness(t, "nPHONE", nil)
+	a, _ := harness(t, "nPHONE", nil)
 	a.Push = func(context.Context, string, Notification) error { return errors.New("no apns key") }
 
 	if _, err := a.Ask(context.Background(), enrolled(t, device), ask); consent.Classify(err) != consent.VerdictUnavailable {
