@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -12,6 +14,8 @@ import (
 	"github.com/yasyf/synckit/authkit"
 	"github.com/yasyf/synckit/consent"
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/meshtrust"
+	"github.com/yasyf/synckit/phoneapprover"
 	"github.com/yasyf/synckit/presence"
 	"github.com/yasyf/synckit/rpc"
 )
@@ -46,7 +50,28 @@ var buildConsentEngine = defaultConsentEngine
 
 func defaultConsentEngine(runner hostregistry.Commander) *consent.Engine {
 	router := consent.NewRouter(execSSHRunner{runner: runner}, consent.PresenceCommand)
-	return consent.NewEngine(selfIdentity, authkit.Gate{}, presence.Session, router, resolvePeers)
+	engine := consent.NewEngine(selfIdentity, authkit.Gate{}, presence.Session, router, resolvePeers)
+	if dir, err := hostregistry.Mesh.Dir(); err == nil {
+		engine.Phones = phoneApprover(dir)
+	}
+	return engine
+}
+
+// phoneApprover serves parked phone requests under the mesh config dir: the
+// tailnet certificate in tls/, the APNs provider key and config in apns/.
+func phoneApprover(dir string) *phoneapprover.Approver {
+	pusher := &phoneapprover.APNs{
+		Dir:      filepath.Join(dir, "apns"),
+		Endpoint: phoneapprover.APNsEndpoint,
+		Client:   &http.Client{Timeout: 30 * time.Second},
+		Now:      time.Now,
+	}
+	return &phoneapprover.Approver{
+		Listen: phoneapprover.TailnetListener(meshtrust.Detect(), filepath.Join(dir, "tls")),
+		WhoIs:  meshtrust.WhoIsNode,
+		Push:   pusher.Push,
+		Window: rpc.DispatchTimeout - 30*time.Second,
+	}
 }
 
 // selfIdentity resolves this host's mesh identity — reloaded each call, like
@@ -86,7 +111,7 @@ func registerConsent(d *rpc.Dispatcher, runner hostregistry.Commander) {
 // consent.request (local consumer surface; the requestor is server-derived as
 // "sid:"+PeerSID, never client-supplied):
 //
-//	params  {client, reason, subject, argv?, nonce?, ttl_ms?, local_only?}
+//	params  {client, reason, subject, argv?, nonce?, ttl_ms?, local_only?, approvers?, phones?}
 //	result  {verdict, approved_by, routed, cached, granted_until?, attestation?}
 //
 // verdict ∈ approved|denied|unavailable; a fatal local prompt is an RPC error
@@ -100,6 +125,12 @@ func registerConsent(d *rpc.Dispatcher, runner hostregistry.Commander) {
 // An attestation request ALWAYS prompts and signs fresh — grants are
 // verdict-only: ttl_ms records and serves a grant only for a request without
 // argv, since a cached verdict carries no signature over a new nonce.
+// approvers, when present, limits the routed walk to those mesh peers. phones
+// ([{name, node_id, push_token, transport_key}]) are asked in order once no
+// Mac approves an attesting request: synckitd parks it, pushes the phone, and
+// serves GET/POST /cc-sudo/phone/requests/<id> on its tailnet address only to
+// that node under that transport key; an approval comes back signed_by the
+// phone's name.
 //
 // consent.relay (approver leg a routed walk shells as `synckitd consent relay`,
 // the request fed as one JSON line on stdin so command text stays off the remote

@@ -6,6 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A phone approver for attesting consent. `consent.request` takes optional
+  `phones` (`[{name, node_id, push_token, transport_key}]`); once no Mac
+  approves, synckitd parks the request under a random id, sends a
+  time-sensitive APNs push naming only the Mac, serves
+  `GET`/`POST /cc-sudo/phone/requests/<id>` on its tailnet address over the
+  Mac's tailnet certificate to that one tailnet node and only under requests
+  signed by its transport key, and returns the phone's signature
+  `signed_by` its name. A denial is final; no answer within the window is
+  `unavailable`. Verdict-only asks never reach a phone. The APNs provider key
+  and `apns.json` live in `~/.config/synckit/apns/`, never in a repo.
+
+### Changed
+
+- `consent.request` takes optional `approvers`: when present, the routed walk
+  offers argv and nonce only to those mesh peers, so a registered peer the
+  requester never enrolled sees nothing.
+
 ## [0.51.0] - 2026-10-28
 
 ### Removed

@@ -65,6 +65,14 @@ func (e *Engine) handleRequest(ctx context.Context, params map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
+	approvers, err := stringsParam(params, "approvers")
+	if err != nil {
+		return nil, err
+	}
+	phones, err := phonesParam(params, "phones")
+	if err != nil {
+		return nil, err
+	}
 	d, err := e.Decide(ctx, Request{
 		Requestor: "sid:" + strconv.Itoa(sid),
 		Client:    client,
@@ -74,6 +82,8 @@ func (e *Engine) handleRequest(ctx context.Context, params map[string]any) (any,
 		Nonce:     nonce,
 		TTL:       ttl,
 		LocalOnly: localOnly,
+		Approvers: approvers,
+		Phones:    phones,
 	})
 	if err != nil {
 		return nil, err
@@ -211,6 +221,36 @@ func stringsParam(params map[string]any, key string) ([]string, error) {
 			return nil, fmt.Errorf("param %q element %d is %T, want string", key, i, item)
 		}
 		out[i] = s
+	}
+	return out, nil
+}
+
+func phonesParam(params map[string]any, key string) ([]Phone, error) {
+	v, ok := params[key]
+	if !ok {
+		return nil, nil
+	}
+	raw, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("param %q is %T, want an array of phones", key, v)
+	}
+	out := make([]Phone, len(raw))
+	for i, item := range raw {
+		fields, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("param %q element %d is %T, want an object", key, i, item)
+		}
+		var phone Phone
+		for name, dst := range map[string]*string{
+			"name": &phone.Name, "node_id": &phone.NodeID, "push_token": &phone.PushToken, "transport_key": &phone.TransportKey,
+		} {
+			s, err := stringParam(fields, name)
+			if err != nil {
+				return nil, fmt.Errorf("param %q element %d: %w", key, i, err)
+			}
+			*dst = s
+		}
+		out[i] = phone
 	}
 	return out, nil
 }
