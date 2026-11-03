@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -48,6 +49,37 @@ type Request struct {
 	Nonce     string
 	TTL       time.Duration
 	LocalOnly bool
+	// Approvers, when non-nil, limits the routed walk to these mesh peers:
+	// cc-sudo names the Macs it enrolled, so argv and nonce never reach a peer
+	// whose signature its verifier would reject anyway.
+	Approvers []string
+	// Phones are asked, in order, once no Mac approves; only an attesting
+	// request reaches a phone, because a phone's answer is only its signature.
+	Phones []Phone
+}
+
+// Phone is an enrolled phone approver as the requesting verifier names it:
+// the name its key is enrolled under, the tailnet node and transport key a
+// fetch must come from, and its push token.
+type Phone struct {
+	Name         string
+	NodeID       string
+	PushToken    string
+	TransportKey string
+}
+
+// PhoneAsk is what a phone sees and signs for one attesting request.
+type PhoneAsk struct {
+	Origin string
+	Argv   []string
+	Nonce  string
+}
+
+// PhoneTransport parks one request for one phone, wakes it, and waits for its
+// answer: the Reply on approval, *Denied on denial, *AuthRequired when the
+// phone never answered.
+type PhoneTransport interface {
+	Ask(ctx context.Context, phone Phone, ask PhoneAsk) (*Reply, error)
 }
 
 // attests reports whether req carries the attestation extension — an argv the
@@ -113,6 +145,7 @@ type Engine struct {
 	Grants   *Grants
 	Router   *Router
 	Resolve  ResolveFunc
+	Phones   PhoneTransport
 
 	promptMu sync.Mutex
 }
@@ -262,6 +295,9 @@ func (e *Engine) route(ctx context.Context, req Request) (Decision, error) {
 	if err != nil {
 		return Decision{}, err
 	}
+	if req.Approvers != nil {
+		candidates = slices.DeleteFunc(candidates, func(peer string) bool { return !slices.Contains(req.Approvers, peer) })
+	}
 	endpoint := self + ":" + req.Subject
 	relay := RelayRequest{
 		Client:    req.Client,
@@ -281,6 +317,9 @@ func (e *Engine) route(ctx context.Context, req Request) (Decision, error) {
 		}
 		return RelayCommand, stdin, nil
 	})
+	if Classify(err) == VerdictUnavailable && req.attests() && e.Phones != nil {
+		reply, err = e.askPhones(ctx, req, self)
+	}
 	if err != nil {
 		switch Classify(err) {
 		case VerdictDenied:
@@ -299,4 +338,23 @@ func (e *Engine) route(ctx context.Context, req Request) (Decision, error) {
 		d.Attestation = &Attestation{KeyID: reply.KeyID, Sig: reply.Sig, SignedBy: reply.SignedBy}
 	}
 	return e.approve(req, d), nil
+}
+
+// askPhones walks the request's phones once no Mac approved. The phone's
+// signature binds the requester's own nonce, so the reply needs no echo
+// binding beyond the transport's own checks.
+func (e *Engine) askPhones(ctx context.Context, req Request, self string) (*Reply, error) {
+	for _, phone := range req.Phones {
+		reply, err := e.Phones.Ask(ctx, phone, PhoneAsk{Origin: self, Argv: req.Argv, Nonce: req.Nonce})
+		if Classify(err) == VerdictUnavailable {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		reply.Peer = phone.Name
+		reply.SignedBy = phone.Name
+		return reply, nil
+	}
+	return nil, &AuthRequired{Msg: "no mac or phone approved consent"}
 }
