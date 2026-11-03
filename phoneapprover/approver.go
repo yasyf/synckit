@@ -75,7 +75,7 @@ func (a *Approver) Ask(ctx context.Context, phone consent.Phone, ask consent.Pho
 	srv := &http.Server{Handler: p, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 	defer func() {
-		sctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
 		defer cancel()
 		_ = srv.Shutdown(sctx)
 	}()
