@@ -50,7 +50,7 @@ func TestPushSendsATimeSensitiveAlertNamingOnlyTheMac(t *testing.T) {
 		payload map[string]any
 	}
 	got := make(chan seen, 1)
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var payload map[string]any
 		_ = json.Unmarshal(body, &payload)

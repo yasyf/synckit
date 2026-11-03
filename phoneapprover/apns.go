@@ -111,17 +111,22 @@ func (a *APNs) credentials() (*apnsConfig, string, error) {
 }
 
 func loadAPNsConfig(dir string) (*apnsConfig, error) {
-	raw, err := os.ReadFile(filepath.Join(dir, "apns.json"))
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, fmt.Errorf("apns config: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	raw, err := root.ReadFile("apns.json")
+	if err != nil {
+		return nil, fmt.Errorf("apns config: %s: %w", filepath.Join(dir, "apns.json"), err)
 	}
 	var config apnsConfig
 	if err := json.Unmarshal(raw, &config); err != nil {
 		return nil, fmt.Errorf("apns config: %w", err)
 	}
-	pemBytes, err := os.ReadFile(filepath.Join(dir, "AuthKey.p8"))
+	pemBytes, err := root.ReadFile("AuthKey.p8")
 	if err != nil {
-		return nil, fmt.Errorf("apns key: %w", err)
+		return nil, fmt.Errorf("apns key: %s: %w", filepath.Join(dir, "AuthKey.p8"), err)
 	}
 	block, _ := pem.Decode(pemBytes)
 	if block == nil {
